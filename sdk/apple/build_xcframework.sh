@@ -33,8 +33,10 @@ build_slice() {
   local avx2_flag="${7:-OFF}"
 
   local bdir="$BUILD_ROOT/$name"
+  local gen="Unix Makefiles"
+  if command -v ninja >/dev/null 2>&1; then gen="Ninja"; fi
   echo "=== Building Apple slice: $name ($archs, NEON=$neon_flag, AVX2=$avx2_flag) ==="
-  cmake -S "$ROOT" -B "$bdir" -G Ninja \
+  cmake -S "$ROOT" -B "$bdir" -G "$gen" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME="$sysname" \
     -DCMAKE_OSX_SYSROOT="$sysroot" \

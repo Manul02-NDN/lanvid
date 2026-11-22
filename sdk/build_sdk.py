@@ -38,9 +38,18 @@ def run(cmd: list[str], cwd: Path | None = None, shell: bool = False) -> None:
 
 
 def run_cmake_windows(args_str: str) -> None:
-    vcvars = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
     cmake_exe = shutil.which("cmake") or r"C:\Program Files\CMake\bin\cmake.exe"
-    if Path(vcvars).is_file():
+    if shutil.which("cl"):
+        subprocess.run(f'"{cmake_exe}" {args_str}', shell=True, check=True)
+        return
+    candidates = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
+    ]
+    vcvars = next((p for p in candidates if Path(p).is_file()), None)
+    if vcvars:
         cmd = f'call "{vcvars}" >nul && "{cmake_exe}" {args_str}'
         subprocess.run(cmd, shell=True, check=True)
     else:

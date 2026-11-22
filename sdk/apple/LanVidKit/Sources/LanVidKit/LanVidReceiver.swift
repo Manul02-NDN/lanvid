@@ -15,13 +15,21 @@ public final class LanVidReceiver {
 
         public init(
             bindPort: UInt16 = 5000,
-            deviceName: String = Host.current().localizedName ?? "AppleDevice",
+            deviceName: String? = nil,
             audioTargetMs: Double = 12.0,
             enableAudioPlayback: Bool = true,
             enableDiscovery: Bool = true
         ) {
             self.bindPort = bindPort
-            self.deviceName = deviceName
+            if let name = deviceName {
+                self.deviceName = name
+            } else {
+                #if os(macOS)
+                self.deviceName = Host.current().localizedName ?? "MacDevice"
+                #else
+                self.deviceName = "iOSDevice"
+                #endif
+            }
             self.audioTargetMs = audioTargetMs
             self.enableAudioPlayback = enableAudioPlayback
             self.enableDiscovery = enableDiscovery

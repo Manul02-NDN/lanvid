@@ -1,5 +1,9 @@
 # LanVid
 
+[![CI Build & Test](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml)
+[![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Ultra-Low Latency Slice-Based Intra-Frame LAN Video & Audio Streaming Protocol, Cross-Platform Apps (`LanVid Studio`) & Multi-Platform SDK (`C++20 / C ABI / Swift / Kotlin / Python`).**
 
 LanVid is engineered from scratch in dependency-free C++20 for sub-frame **4K60** local network streaming (**< 1 ms** codec latency, **< 4–6 ms** glass-to-glass LAN latency) with zero GOP buffering, instant packet-loss recovery, and synchronized low-latency audio.
