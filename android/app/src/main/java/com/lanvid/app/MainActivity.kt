@@ -82,6 +82,7 @@ fun LanVidAndroidApp(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val simdInfo = remember { LanVidNative.nativeGetSimdInfo() }
+    val appVersion = remember { LanVidNative.nativeGetVersion() }
 
     // Auto-request runtime permissions on first launch
     val permLauncher = rememberLauncherForActivityResult(
@@ -104,6 +105,9 @@ fun LanVidAndroidApp(
     var frontCamera by remember { mutableStateOf(false) }
     var audioMode by remember { mutableIntStateOf(0) } // 0=Off, 1=Internal, 2=Mic
     var quality by remember { mutableFloatStateOf(78f) }
+    var codecId by remember { mutableIntStateOf(0) } // 0=LanVid DCT, 1=H.264 HW, 2=H.265 HW
+    var bitrateMbps by remember { mutableFloatStateOf(8f) }
+    var audioLatencyMs by remember { mutableFloatStateOf(20f) }
     var fecGroup by remember { mutableIntStateOf(6) }
     var adaptive by remember { mutableStateOf(true) }
     var volume by remember { mutableFloatStateOf(1.0f) }
@@ -132,7 +136,9 @@ fun LanVidAndroidApp(
                 60,
                 quality.toInt(),
                 fecGroup,
-                adaptive
+                adaptive,
+                codecId,
+                (bitrateMbps * 1000).toInt()
             )
             if (ok) {
                 val svcIntent = Intent(context, ScreenCaptureService::class.java).apply {
@@ -181,7 +187,7 @@ fun LanVidAndroidApp(
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        "v2.1 | Core SIMD: $simdInfo | ${Build.MODEL}",
+                        "v$appVersion | Core SIMD: $simdInfo | ${Build.MODEL}",
                         fontSize = 12.sp,
                         color = Color(0xFF94A3B8)
                     )
@@ -324,14 +330,37 @@ fun LanVidAndroidApp(
                         }
                     }
 
-                    // Quality / FEC / AIMD Card
+                    // Codec / Quality / Bitrate / FEC / AIMD Card
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Якість: Q=${quality.toInt()} | XOR FEC=$fecGroup | AIMD=${if (adaptive) "ON" else "OFF"}")
-                            Slider(value = quality, onValueChange = { quality = it }, valueRange = 30f..95f)
+                            Text("Відеокодек", fontWeight = FontWeight.SemiBold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FilterChip(
+                                    selected = codecId == 0,
+                                    onClick = { codecId = 0 },
+                                    label = { Text("LanVid DCT") }
+                                )
+                                FilterChip(
+                                    selected = codecId == 1,
+                                    onClick = { codecId = 1 },
+                                    label = { Text("H.264 HW") }
+                                )
+                                FilterChip(
+                                    selected = codecId == 2,
+                                    onClick = { codecId = 2 },
+                                    label = { Text("H.265 HW") }
+                                )
+                            }
+                            if (codecId == 0) {
+                                Text("Якість: Q=${quality.toInt()} | XOR FEC=$fecGroup | AIMD=${if (adaptive) "ON" else "OFF"}")
+                                Slider(value = quality, onValueChange = { quality = it }, valueRange = 30f..95f)
+                            } else {
+                                Text("Бітрейт: ${bitrateMbps.toInt()} Mbps | XOR FEC=$fecGroup | AIMD=${if (adaptive) "ON" else "OFF"}")
+                                Slider(value = bitrateMbps, onValueChange = { bitrateMbps = it }, valueRange = 1f..50f)
+                            }
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked = adaptive, onCheckedChange = { adaptive = it })
                                 Text("Wi-Fi Adaptive (AIMD) + XOR FEC")
@@ -355,7 +384,9 @@ fun LanVidAndroidApp(
                                         60,
                                         quality.toInt(),
                                         fecGroup,
-                                        adaptive
+                                        adaptive,
+                                        codecId,
+                                        (bitrateMbps * 1000).toInt()
                                     )
                                     if (ok) {
                                         cameraStreamer.start(1280, 720, frontCamera) { err ->
@@ -417,8 +448,9 @@ fun LanVidAndroidApp(
                             onClick = {
                                 if (!receiverActive) {
                                     val p = listenPort.toIntOrNull() ?: 5000
-                                    if (LanVidNative.nativeStartReceiver(p, 12.0, Build.MODEL)) {
+                                    if (LanVidNative.nativeStartReceiver(p, audioLatencyMs.toDouble(), Build.MODEL)) {
                                         LanVidNative.nativeSetVolume(volume)
+                                        LanVidNative.nativeSetAudioLatencyMs(audioLatencyMs.toInt())
                                         receiverActive = true
                                         statusMessage = "Прийом на UDP :$p (AAudio + LAN автопошук)"
                                     }
@@ -464,7 +496,7 @@ fun LanVidAndroidApp(
                         )
                     }
 
-                    // Volume + Live Telemetry
+                    // Volume + Adaptive Audio Bus Latency + Live Telemetry
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Гучність ${(volume * 100).toInt()}%", fontSize = 13.sp, modifier = Modifier.width(105.dp))
                         Slider(
@@ -474,6 +506,18 @@ fun LanVidAndroidApp(
                                 LanVidNative.nativeSetVolume(it)
                             },
                             valueRange = 0f..1.5f,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("AoIP ${audioLatencyMs.toInt()} ms", fontSize = 13.sp, modifier = Modifier.width(105.dp))
+                        Slider(
+                            value = audioLatencyMs,
+                            onValueChange = {
+                                audioLatencyMs = it
+                                if (receiverActive) LanVidNative.nativeSetAudioLatencyMs(it.toInt())
+                            },
+                            valueRange = 2f..2000f,
                             modifier = Modifier.weight(1f)
                         )
                     }

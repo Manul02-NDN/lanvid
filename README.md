@@ -1,4 +1,4 @@
-# LanVid
+# LanVid `v2.3.1`
 
 [![CI Build & Test](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml)
 [![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
@@ -23,9 +23,14 @@ LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network 
 - **64-Channel AoIP Bus (Dante / AES67-style):** up to 64 independent per-channel streams (PCM16 / PCM24 / F32, 48 / 96 kHz) on LVSP audio v2, a PTP-style Master Clock (min-RTT gated Kalman filter over PING/PONG), sample-accurate phase-coherent playout across all channels (`T_playout = T_master − latency`), shared ±100 ppm Hermite drift resampler, and a latency-scaled reliability ladder from **2 ms** (0.5 ms chunks, 1+1/2+1 XOR FEC) to **2000 ms** (interleaved FEC + multi-round NACK + duplication) — see [docs/PROTOCOL.md §7](docs/PROTOCOL.md).
 - **Synchronized Low-Latency Audio + LAN Auto-Discovery:** 48 kHz Stereo `PCM16` / `Float32` in 2.5 ms or 5 ms UDP packets over the same socket, lock-free SPSC jitter buffer (~12 ms target) with adaptive 1-sample clock-drift compensation, WASAPI Loopback/Mic (Windows), native AAudio (Android), `AVAudioEngine` (Apple), and UDP broadcast LAN peer discovery (port `5099`).
 - **Hardware-Accelerated Preview & Desktop/Mobile Apps:**
-  - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux, with live codec selector (`LanVid DCT` / `H.264` / `H.265`), bitrate slider, and hardware badge telemetry.
-  - **Android App (`android/`):** Kotlin + Jetpack Compose + Camera2 (`YUV_420_888` zero-RGB-copy) + MediaProjection Foreground Service + `ANativeWindow` + native AAudio.
-  - **One-Click Installers (`installer/` & `sdk/apple/installer/`):** Pre-flight environment, port-conflict, firewall, and dependency installers for Windows (`.exe` / Inno Setup), Linux (`.run` / `.deb` / `.AppImage`), and macOS (Universal `.pkg` / `.dmg`).
+  - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux, with live codec selector (`LanVid DCT` / `H.264` / `H.265`), bitrate slider, 64-channel AoIP bus latency (`2–2000 ms`) & LED meter grid, and hardware badge telemetry.
+  - **Android App (`android/`):** Kotlin + Jetpack Compose + Camera2 (`YUV_420_888` zero-RGB-copy) + MediaProjection Foreground Service + `ANativeWindow` + native AAudio, with live codec switching (`LanVid DCT` / `H.264 HW` / `H.265 HW`), bitrate control, and adaptive AoIP bus latency (`2–2000 ms`).
+  - **One-Click Installers & Release Artifacts (`v2.3.1`):**
+    - **Windows:** `LanVid_Setup.exe` (Setup Wizard + D3D11/firewall pre-flight + Studio GUI + CLI + `lanvid_core.dll`)
+    - **Linux:** `LanVid-Linux-x86_64.run` & `.deb` (`SDL2 + OpenGL3` Studio GUI + CLI + `liblanvid_core.so`)
+    - **macOS / iOS:** `LanVidSDK-v2.3.1-macOS.pkg` & `.dmg` (Universal `arm64` NEON + `x86_64` AVX2 + `LanVidCore.xcframework` + SwiftPM `LanVidKit`)
+    - **Android:** `LanVid-Android.apk` (Universal `arm64-v8a` + `armeabi-v7a`) & `lanvid-sdk-2.3.1.aar`
+    - **Cross-Platform SDK:** `LanVidSDK-Universal.zip` (`C ABI`, `C++17`, `Swift`, `Kotlin`, `Python`)
 
 ### Multi-Codec Comparison (1080p60 Live UDP Loopback — Windows 11, Ryzen Zen 4 + AMD VCN 3.1 D3D11 HW)
 
@@ -63,13 +68,13 @@ lanvid/
 │   ├── common/              # CPU SIMD dispatch, CRC32C, monotonic clock, Image buffers
 │   ├── codec/               # Color (Scalar/AVX2/NEON), 2D LLM DCT/IDCT, Slice/Frame codec, HW H.264/H.265 backends
 │   ├── parallel/            # Lock-free work pool for slice-level parallelism
-│   ├── audio/               # Lock-free SPSC AudioJitterBuffer + clock-drift compensation
+│   ├── audio/               # 64-ch AoIP bus (MasterClock, AudioSyncMatrix, Tx/Rx FEC+NACK) + AudioJitterBuffer
 │   ├── net/                 # UDP sockets (Win32/POSIX sendmmsg/recvmmsg), Packetizer/FEC, Assembler, AIMD, Discovery
 │   ├── core/                # Shared C ABI implementation (lanvid_core.dll / liblanvid_core.so / .dylib)
 │   ├── platform/            # DXGI/GDI screen capture, Media Foundation cam, WASAPI audio, D3D11/SDL2 preview
 │   ├── gui/                 # LanVid Studio (Dear ImGui + Win32 D3D11 / Linux SDL2 OpenGL3)
 │   └── app/                 # CLI sender / receiver, Y4M/PPM file source, telemetry stats
-├── sdk/                     # Cross-Platform LanVidSDK v1.0.0
+├── sdk/                     # Cross-Platform LanVidSDK v2.3.1
 │   ├── README.md            # Developer Quick Start (C++17, Swift, Kotlin, Python)
 │   ├── build_sdk.py         # Unified SDK builder & external find_package() verifier
 │   ├── include/lanvid/      # Self-contained C ABI headers (lanvid_sdk.h, lanvid_types.h, lanvid_export.h)
@@ -81,7 +86,7 @@ lanvid/
 │   └── examples/cpp_client/ # Standalone external CMake consumer demo
 ├── android/                 # Standalone LanVid Studio Android app (Kotlin + Compose + NDK)
 ├── installer/               # Windows (Setup Wizard + Inno Setup + preflight.ps1) & Linux (.run / .deb / .AppImage)
-├── tests/                   # 35 unit & loopback integration tests (DCT + H.264/H.265 + PLI + FEC + SDK)
+├── tests/                   # 41 unit & loopback integration tests (DCT + H.264/H.265 + 64-ch AoIP + PLI + FEC + SDK)
 ├── bench/                   # 1080p / 4K SIMD vs Scalar codec benchmark
 └── third_party/imgui/       # Vendored Dear ImGui v1.91.8 (MIT) for self-contained Desktop GUI builds
 ```
@@ -96,7 +101,7 @@ lanvid/
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Run all 35 unit tests & 4K benchmark
+# Run all 41 unit tests & 4K benchmark
 .\build\lanvid_tests.exe
 .\build\bench_codec.exe
 

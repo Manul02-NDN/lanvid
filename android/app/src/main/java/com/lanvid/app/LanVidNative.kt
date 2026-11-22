@@ -48,6 +48,7 @@ object LanVidNative {
     }
 
     @JvmStatic external fun nativeInit(): Int
+    @JvmStatic external fun nativeGetVersion(): String
     @JvmStatic external fun nativeGetSimdInfo(): String
     @JvmStatic external fun nativeEnumerateDevices(): String
     @JvmStatic external fun nativeScanLan(timeoutMs: Int): String
@@ -60,8 +61,12 @@ object LanVidNative {
         fps: Int,
         quality: Int,
         fecGroup: Int,
-        adaptive: Boolean
+        adaptive: Boolean,
+        codec: Int,
+        bitrateKbps: Int
     ): Boolean
+
+    @JvmStatic external fun nativeSetAudioLatencyMs(latencyMs: Int)
 
     @JvmStatic external fun nativeStopSender()
 

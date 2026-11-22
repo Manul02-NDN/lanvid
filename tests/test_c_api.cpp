@@ -192,8 +192,10 @@ TEST(udp_loopback_c_api_and_discovery) {
 
 TEST(sdk_callbacks_and_version_check) {
     // 1. Version & ABI compatibility checks
-    CHECK(std::string(lv_get_version_string()) == "1.0.0");
-    CHECK(lv_get_version_number() == ((1u << 16) | (0u << 8) | 0u));
+    CHECK(std::string(lv_get_version_string()) == LV_SDK_VERSION_STRING);
+    CHECK(lv_get_version_number() ==
+          ((uint32_t(LV_SDK_VERSION_MAJOR) << 16) | (uint32_t(LV_SDK_VERSION_MINOR) << 8) |
+           uint32_t(LV_SDK_VERSION_PATCH)));
     CHECK(lv_check_abi_compatibility(LV_SDK_VERSION_MAJOR, LV_SDK_VERSION_MINOR) == 1);
     CHECK(lv_check_abi_compatibility(LV_SDK_VERSION_MAJOR + 1, 0) == 0);
     CHECK(lv_check_abi_compatibility(LV_SDK_VERSION_MAJOR, LV_SDK_VERSION_MINOR + 1) == 0);

@@ -75,6 +75,7 @@ void print_usage(const char* prog) {
         "  --pace <mbps>            Optional token-bucket pacing in Mbps (default: 0=off)\n"
         "  --frames <n>             Stop after N frames (default: 0=infinite)\n"
         "  --duration <sec>         Stop after S seconds (default: 0=infinite)\n"
+        "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
         prog);
 }
@@ -152,6 +153,13 @@ int main(int argc, char** argv) {
         };
         if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
+            return 0;
+        } else if (arg == "-V" || arg == "--version") {
+#ifndef LANVID_VERSION_STRING
+#define LANVID_VERSION_STRING "2.3.1"
+#endif
+            std::printf("LanVid sender v%s (SIMD: %s)\n", LANVID_VERSION_STRING,
+                        lv::dct_kernels_best().name);
             return 0;
         } else if (arg == "--list-devices") {
             print_devices();

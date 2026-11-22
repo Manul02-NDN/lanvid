@@ -21,6 +21,7 @@
 #include <thread>
 #include <vector>
 
+#include "lanvid/lanvid_sdk.h"
 #include "lanvid_c_api.h"
 
 #define LV_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LanVidJNI", __VA_ARGS__)
@@ -150,6 +151,10 @@ JNIEXPORT jint JNICALL Java_com_lanvid_app_LanVidNative_nativeInit(JNIEnv*, jcla
     return lv_init();
 }
 
+JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetVersion(JNIEnv* env, jclass) {
+    return env->NewStringUTF(lv_get_version_string());
+}
+
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetSimdInfo(JNIEnv* env, jclass) {
     return env->NewStringUTF(lv_get_cpu_simd_info());
 }
@@ -171,7 +176,7 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeScanLan(JNIEnv*
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     JNIEnv* env, jclass, jstring dest_ip, jint dest_port, jint width, jint height, jint fps,
-    jint quality, jint fec_group, jboolean adaptive) {
+    jint quality, jint fec_group, jboolean adaptive, jint codec, jint bitrate_kbps) {
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_sender) g_sender = lv_sender_create();
     LvSenderConfig sc;
@@ -186,10 +191,21 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     sc.quality = std::clamp(int(quality), 10, 98);
     sc.fec_group_size = std::max(0, int(fec_group));
     sc.adaptive_quality = adaptive ? 1 : 0;
+    sc.codec = std::clamp(int(codec), 0, 2);
+    sc.bitrate_kbps = uint32_t(std::clamp(int(bitrate_kbps), 250, 100000));
     sc.q_min = 35;
     sc.q_max = 85;
     sc.threads = 0;
     return lv_sender_start(g_sender, &sc) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetAudioLatencyMs(JNIEnv*, jclass,
+                                                                                jint latency_ms) {
+    std::lock_guard<std::mutex> lk(g_mu);
+    if (g_receiver) {
+        lv_receiver_set_audio_latency_ms(g_receiver,
+                                         uint32_t(std::clamp(int(latency_ms), 2, 2000)));
+    }
 }
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeStopSender(JNIEnv*, jclass) {

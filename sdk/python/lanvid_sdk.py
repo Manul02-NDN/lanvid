@@ -20,9 +20,11 @@ except ImportError:
     np = None  # type: ignore
     _HAS_NUMPY = False
 
-# ---- Constants matching sdk/include/lanvid/lanvid_types.h ----
-LV_SDK_VERSION_MAJOR = 1
-LV_SDK_VERSION_MINOR = 0
+# ---- Constants matching sdk/include/lanvid/lanvid_export.h & lanvid_types.h ----
+__version__ = "2.3.1"
+LV_SDK_VERSION_MAJOR = 2
+LV_SDK_VERSION_MINOR = 3
+LV_SDK_VERSION_PATCH = 1
 
 LV_PIXEL_FORMAT_BGRA8888 = 0
 LV_PIXEL_FORMAT_RGBA8888 = 1
@@ -250,8 +252,8 @@ def _find_library(explicit_path: Optional[str] = None) -> str:
         here.parent / "bin" / lib_name,
         here.parent / "lib" / lib_name,
         here.parents[1] / "build" / lib_name,
-        here.parents[1] / "dist" / "LanVidSDK-v1.0.0" / "bin" / lib_name,
-        here.parents[1] / "dist" / "LanVidSDK-v1.0.0" / "lib" / lib_name,
+        here.parents[1] / "dist" / f"LanVidSDK-v{__version__}" / "bin" / lib_name,
+        here.parents[1] / "dist" / f"LanVidSDK-v{__version__}" / "lib" / lib_name,
     ]
     for c in candidates:
         if c.is_file():

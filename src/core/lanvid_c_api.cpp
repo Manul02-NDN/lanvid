@@ -492,7 +492,7 @@ struct LvReceiverHandle {
 extern "C" {
 
 /* ---- Version & Error Helpers ---- */
-const char* lv_get_version_string(void) { return "1.0.0"; }
+const char* lv_get_version_string(void) { return LV_SDK_VERSION_STRING; }
 
 uint32_t lv_get_version_number(void) {
     return (uint32_t(LV_SDK_VERSION_MAJOR) << 16) | (uint32_t(LV_SDK_VERSION_MINOR) << 8) |

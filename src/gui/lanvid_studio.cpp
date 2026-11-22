@@ -485,9 +485,12 @@ void LanVidStudioApp::draw_aspect_image(IGpuTexture* tex, const ImVec2& avail, c
 void LanVidStudioApp::draw_top_bar() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.13f, 0.18f, 1.0f));
     ImGui::BeginChild("##TopBar", ImVec2(0, 46), true, ImGuiWindowFlags_NoScrollbar);
+#ifndef LANVID_VERSION_STRING
+#define LANVID_VERSION_STRING "2.3.1"
+#endif
     ImGui::TextColored(ImVec4(0.32f, 0.78f, 1.0f, 1.0f), "LanVid Studio");
     ImGui::SameLine();
-    ImGui::TextDisabled("v2.1  |  SIMD: %s  |  GPU: %s  |  LAN IP: %s",
+    ImGui::TextDisabled("v%s  |  SIMD: %s  |  GPU: %s  |  LAN IP: %s", LANVID_VERSION_STRING,
                         lv_get_cpu_simd_info(), host_.renderer_name, local_lan_ip_.c_str());
 
     // Live status pill on right side

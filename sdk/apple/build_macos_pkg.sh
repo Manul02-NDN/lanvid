@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SDK_VERSION="1.0.0"
+SDK_VERSION="2.3.1"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLE_DIR="$ROOT/sdk/apple"
 INST_DIR="$APPLE_DIR/installer"
@@ -191,17 +191,29 @@ cat > "$DMG_STAGE/Verify_LanVidSDK.command" <<'VEOF'
 if command -v lanvid-sdk-info >/dev/null 2>&1; then
   lanvid-sdk-info
 else
-  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v1.0.0-macOS.pkg first."
+  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.3.1-macOS.pkg first."
 fi
 read -r -p "Press Enter to close..."
 VEOF
 chmod 0755 "$DMG_STAGE/Verify_LanVidSDK.command"
 
-hdiutil create \
-  -volname "LanVidSDK v${SDK_VERSION}" \
-  -srcfolder "$DMG_STAGE" \
-  -ov -format UDZO \
-  "$DMG_OUT" >/dev/null
+DMG_OK=0
+for attempt in 1 2 3 4 5; do
+  if hdiutil create \
+      -volname "LanVidSDK v${SDK_VERSION}" \
+      -srcfolder "$DMG_STAGE" \
+      -ov -format UDZO \
+      "$DMG_OUT" >/dev/null; then
+    DMG_OK=1
+    break
+  fi
+  echo "[WARN] hdiutil create busy (attempt $attempt/5), retrying in 3s..."
+  sleep 3
+done
+if [ "$DMG_OK" -ne 1 ]; then
+  echo "[ERROR] hdiutil create failed after 5 attempts" >&2
+  exit 1
+fi
 
 echo "========================================================"
 echo "  SUCCESS! macOS Single-File Installers Ready:"

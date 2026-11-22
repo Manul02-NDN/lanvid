@@ -61,7 +61,7 @@ jobs:
             build/lanvid_core.dll
             build/sender.exe
             build/receiver.exe
-            dist/LanVidSDK-v1.0.0/
+            dist/LanVidSDK-v2.3.1/
           if-no-files-found: error
 
   build-and-test-linux:
@@ -106,7 +106,7 @@ jobs:
             installer/linux/*.deb
             build/lanvid_app
             build/liblanvid_core.so
-            dist/LanVidSDK-v1.0.0/
+            dist/LanVidSDK-v2.3.1/
           if-no-files-found: error
 
   build-and-test-macos-ios:
@@ -141,8 +141,8 @@ jobs:
         with:
           name: lanvid-macos-ios
           path: |
-            dist/apple/LanVidSDK-v1.0.0-macOS.pkg
-            dist/apple/LanVidSDK-v1.0.0-macOS.dmg
+            dist/apple/LanVidSDK-v2.3.1-macOS.pkg
+            dist/apple/LanVidSDK-v2.3.1-macOS.dmg
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
@@ -195,6 +195,6 @@ jobs:
         with:
           name: lanvid-android
           path: |
-            dist/android/lanvid-sdk-1.0.0.aar
+            dist/android/lanvid-sdk-2.3.1.aar
             android/LanVid-Android-universal.apk
           if-no-files-found: error
