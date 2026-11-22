@@ -84,7 +84,7 @@ public final class LanVidReceiver {
         var c = LV_ReceiverConfig()
         lv_sdk_receiver_config_default(&c)
         c.bind_port = config.bindPort
-        c.output_format = LV_PIXEL_FORMAT_BGRA8888.rawValue
+        c.output_format = Int32(LV_PIXEL_FORMAT_BGRA8888.rawValue)
         c.audio_target_ms = config.audioTargetMs
         c.enable_os_audio = 0 // AVAudioEngine pulls directly from lock-free jitter buffer
         c.enable_discovery = config.enableDiscovery ? 1 : 0

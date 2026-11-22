@@ -168,12 +168,17 @@ TEST(udp_loopback_c_api_and_discovery) {
     CHECK(got);
     CHECK(ow == 160 && oh == 96);
 
+    LvReceiverStats rst{};
+    for (int i = 0; i < 80; ++i) {
+        if (lv_receiver_get_stats(rx, &rst) == 1 && rst.audio_packets_rx >= 4) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
     // Check volume control & external AAudio-style pull
     lv_receiver_set_volume(rx, 0.5f);
     int16_t apcm[240 * 2]{};
     CHECK(lv_receiver_pop_audio_pcm16(rx, apcm, 240) == 240);
 
-    LvReceiverStats rst{};
     CHECK(lv_receiver_get_stats(rx, &rst) == 1);
     CHECK(rst.frames_complete >= 1);
     CHECK(rst.audio_packets_rx == 4);

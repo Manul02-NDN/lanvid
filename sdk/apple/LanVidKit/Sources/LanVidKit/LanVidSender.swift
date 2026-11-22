@@ -119,7 +119,7 @@ public final class LanVidSender {
                 0,
                 width,
                 height,
-                LV_PIXEL_FORMAT_BGRA8888.rawValue,
+                Int32(LV_PIXEL_FORMAT_BGRA8888.rawValue),
                 timestampUs
             )
         } else if fmt == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
@@ -136,7 +136,7 @@ public final class LanVidSender {
                 s1,
                 width,
                 height,
-                LV_PIXEL_FORMAT_NV12.rawValue,
+                Int32(LV_PIXEL_FORMAT_NV12.rawValue),
                 timestampUs
             )
         } else {
@@ -154,7 +154,7 @@ public final class LanVidSender {
                                timestampUs: UInt32 = 0) {
         guard let h = handle else { return }
         _ = lv_sender_push_audio_chunk(
-            h, samples, frameCount, sampleRate, channels, LV_AUDIO_FORMAT_PCM16.rawValue, timestampUs
+            h, samples, frameCount, sampleRate, channels, Int32(LV_AUDIO_FORMAT_PCM16.rawValue), timestampUs
         )
     }
 

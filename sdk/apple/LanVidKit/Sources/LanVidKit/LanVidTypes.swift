@@ -108,7 +108,7 @@ internal func writeCString<T>(_ str: String, into tuple: inout T) {
     withUnsafeMutablePointer(to: &tuple) {
         $0.withMemoryRebound(to: CChar.self, capacity: cap) { dst in
             dst.initialize(repeating: 0, count: cap)
-            str.withCString { src in
+            _ = str.withCString { src in
                 strncpy(dst, src, cap - 1)
             }
         }
