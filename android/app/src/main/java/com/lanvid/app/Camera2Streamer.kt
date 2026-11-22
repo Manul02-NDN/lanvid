@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
 import android.util.Size
+import android.view.Surface
 import java.nio.ByteBuffer
 import kotlin.math.abs
 
@@ -26,10 +27,23 @@ class Camera2Streamer(private val context: Context) {
     private var cameraDevice: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var reader: ImageReader? = null
+    @Volatile private var streamFramesEnabled: Boolean = false
+
+    fun setStreamingEnabled(enabled: Boolean) {
+        streamFramesEnabled = enabled
+    }
 
     @SuppressLint("MissingPermission")
-    fun start(width: Int, height: Int, frontFacing: Boolean, onError: (String) -> Unit) {
+    fun start(
+        width: Int,
+        height: Int,
+        frontFacing: Boolean,
+        previewSurface: Surface? = null,
+        streamEnabled: Boolean = true,
+        onError: (String) -> Unit
+    ) {
         stop()
+        streamFramesEnabled = streamEnabled
         val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val targetFacing = if (frontFacing) {
             CameraCharacteristics.LENS_FACING_FRONT
@@ -66,7 +80,7 @@ class Camera2Streamer(private val context: Context) {
         imgReader.setOnImageAvailableListener({ r ->
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
-                if (img.planes.size >= 3) {
+                if (streamFramesEnabled && img.planes.size >= 3) {
                     val yPlane = img.planes[0]
                     val uPlane = img.planes[1]
                     val vPlane = img.planes[2]
@@ -97,9 +111,12 @@ class Camera2Streamer(private val context: Context) {
             mgr.openCamera(camId, object : CameraDevice.StateCallback() {
                 override fun onOpened(cam: CameraDevice) {
                     cameraDevice = cam
-                    val surf = imgReader.surface
+                    val targets = buildList {
+                        add(imgReader.surface)
+                        if (previewSurface != null && previewSurface.isValid) add(previewSurface)
+                    }
                     val reqBuilder = cam.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                        addTarget(surf)
+                        targets.forEach { addTarget(it) }
                         set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 60))
                         set(
                             CaptureRequest.CONTROL_AF_MODE,
@@ -108,7 +125,7 @@ class Camera2Streamer(private val context: Context) {
                     }
                     @Suppress("DEPRECATION")
                     cam.createCaptureSession(
-                        listOf(surf),
+                        targets,
                         object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(s: CameraCaptureSession) {
                                 session = s
