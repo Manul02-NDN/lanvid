@@ -21,7 +21,7 @@ mkdir -p "$BUILD_ROOT" "$DIST_APPLE" "$STAGE_HEADERS/lanvid"
 
 # Stage self-contained public SDK headers + Swift module.modulemap
 cp "$ROOT/sdk/include/lanvid/"*.h "$STAGE_HEADERS/lanvid/"
-cp "$APPLE_DIR/module.modulemap" "$STAGE_HEADERS/module.modulemap"
+cp "$APPLE_DIR/installer/module.modulemap" "$STAGE_HEADERS/module.modulemap"
 
 build_slice() {
   local name="$1"

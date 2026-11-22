@@ -136,11 +136,14 @@ private:
         } else if (std::strcmp(name, "libx264") == 0) {
             av_opt_set(ctx_->priv_data, "preset", "ultrafast", 0);
             av_opt_set(ctx_->priv_data, "tune", "zerolatency", 0);
-            av_opt_set(ctx_->priv_data, "x264-params", "repeat-headers=1:bframes=0", 0);
+            av_opt_set(ctx_->priv_data, "forced-idr", "1", 0);
+            av_opt_set(ctx_->priv_data, "x264-params", "repeat-headers=1:bframes=0:open-gop=0", 0);
         } else if (std::strcmp(name, "libx265") == 0) {
             av_opt_set(ctx_->priv_data, "preset", "ultrafast", 0);
             av_opt_set(ctx_->priv_data, "tune", "zerolatency", 0);
-            av_opt_set(ctx_->priv_data, "x265-params", "repeat-headers=1:bframes=0:log-level=error", 0);
+            av_opt_set(ctx_->priv_data, "forced-idr", "1", 0);
+            av_opt_set(ctx_->priv_data, "x265-params",
+                       "repeat-headers=1:bframes=0:open-gop=0:scenecut=0:log-level=error", 0);
         }
 
         if (avcodec_open2(ctx_, avc, nullptr) < 0) return false;
@@ -181,8 +184,12 @@ private:
     bool encode_current_frame(EncodedVideoPacket& out) {
         out.data.clear();
         frame_->pts = frame_index_++;
-        frame_->pict_type =
-            force_idr_.exchange(false, std::memory_order_acq_rel) ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+        const bool want_idr = force_idr_.exchange(false, std::memory_order_acq_rel);
+        frame_->pict_type = want_idr ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+#ifdef AV_FRAME_FLAG_KEY
+        if (want_idr) frame_->flags |= AV_FRAME_FLAG_KEY;
+        else frame_->flags &= ~AV_FRAME_FLAG_KEY;
+#endif
 
         if (avcodec_send_frame(ctx_, frame_) < 0) return false;
         if (avcodec_receive_packet(ctx_, pkt_) < 0) return false;
