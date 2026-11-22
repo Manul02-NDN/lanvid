@@ -51,6 +51,8 @@ void ShmAudioHost::loop() {
     clock::time_point anchor_t{};
     uint64_t frames_since_anchor = 0;
     clock::time_point last_tx = clock::now();
+    bool drifting = false;
+    clock::time_point drift_since{};
 
     while (!stop_.load(std::memory_order_acquire)) {
         bus_.host_heartbeat();
@@ -72,18 +74,22 @@ void ShmAudioHost::loop() {
                 const uint32_t n = bus_.host_read_tx(planes.data(), ch, std::min(avail, blk));
                 if (n == 0) break;
                 const auto now = clock::now();
-                // Stall (> kReanchorMs without data) or device-clock drift -> re-anchor timeline.
-                if (now - last_tx > std::chrono::milliseconds(kReanchorMs)) need_anchor = true;
+                if (now - last_tx > std::chrono::milliseconds(kStallMs)) need_anchor = true;  // DAW stopped
                 if (!need_anchor) {
                     const double elapsed_ms =
                         std::chrono::duration<double, std::milli>(now - anchor_t).count();
                     const double media_ms = 1000.0 * double(frames_since_anchor + n) / rate;
-                    if (std::fabs(media_ms - elapsed_ms) > double(kReanchorMs) + 1000.0 * blk / rate)
-                        need_anchor = true;
+                    if (std::fabs(media_ms - elapsed_ms) > double(kDriftMs)) {
+                        if (!drifting) { drifting = true; drift_since = now; }
+                        else if (now - drift_since > std::chrono::milliseconds(kDriftHoldMs)) need_anchor = true;
+                    } else {
+                        drifting = false;
+                    }
                 }
                 const bool disc = need_anchor;
                 if (need_anchor) {
                     need_anchor = false;
+                    drifting = false;
                     anchor_t = now;
                     frames_since_anchor = 0;
                     reanchors_.fetch_add(1, std::memory_order_relaxed);
@@ -98,7 +104,7 @@ void ShmAudioHost::loop() {
         // ---- RX: network -> DAW (fill to target so pops follow the device clock) ----
         if (rx_ && connected) {
             const uint32_t bs = h->buffer_size.load(std::memory_order_relaxed);
-            uint32_t target = cfg_.rx_target_frames ? cfg_.rx_target_frames : std::max<uint32_t>(2 * bs, 256);
+            uint32_t target = cfg_.rx_target_frames ? cfg_.rx_target_frames : std::max<uint32_t>(3 * bs, 512);
             target = std::min<uint32_t>(target, kShmBusFrames - blk);
             for (int guard = 0; guard < 64; ++guard) {
                 const uint32_t fill = bus_.host_rx_fill();

@@ -7,8 +7,10 @@
 //
 // RX is filled up to a target level, so the network playout is pulled exactly at the DAW device
 // rate (the AudioSyncMatrix resampler then absorbs master-vs-device clock drift).
-// TX is re-anchored to the master clock (PushFn `discontinuity`) when the DAW restarts, stalls,
-// or its device clock drifts more than kReanchorMs away from real time.
+// TX is re-anchored to the master clock (PushFn `discontinuity`) when the DAW restarts, really
+// stops (> kStallMs without data), or its device clock stays more than kDriftMs away from real
+// time for longer than kDriftHoldMs. Short scheduling hiccups are absorbed (an absolute-clock
+// driver catches up by itself), because re-anchoring on them would punch holes in the stream.
 
 #include <atomic>
 #include <cstdint>
@@ -44,11 +46,13 @@ public:
     struct Config {
         uint32_t channels = 64;
         uint32_t block_frames = 128;
-        uint32_t rx_target_frames = 0;  // 0 = auto: max(2 x driver buffer, 256)
+        uint32_t rx_target_frames = 0;  // 0 = auto: max(3 x driver buffer, 512)
         std::string bus_name;           // empty = kShmBusName
     };
 
-    static constexpr uint32_t kReanchorMs = 20;
+    static constexpr uint32_t kStallMs = 250;
+    static constexpr uint32_t kDriftMs = 50;
+    static constexpr uint32_t kDriftHoldMs = 500;
 
     ShmAudioHost() = default;
     ~ShmAudioHost() { stop(); }

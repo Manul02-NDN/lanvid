@@ -29,9 +29,10 @@ A DAW counts as connected while `driver_running = 1` and its heartbeat is younge
 
 **Host pump** (`src/audio/shm_audio_host.*`, used by Studio and the CLI):
 * TX: forwards everything the DAW writes to `lv_sender_push_audio_multichannel`. The timeline is
-  re-anchored to the sender Master Clock when the DAW starts, stalls for more than 20 ms, or its
-  device clock drifts more than 20 ms away from real time.
-* RX: keeps the RX ring filled to `max(2 × driver buffer, 256)` frames from
+  re-anchored to the sender Master Clock when the DAW starts, stops (no data for 250 ms), or its
+  device clock stays more than 50 ms away from real time for over 0.5 s. Shorter scheduling
+  hiccups are absorbed, because re-anchoring on them would punch holes into the stream.
+* RX: keeps the RX ring filled to `max(3 × driver buffer, 512)` frames from
   `lv_receiver_pop_audio_multichannel`, so the network playout is pulled exactly at the DAW
   device rate and the AudioSyncMatrix resampler (±100 ppm) absorbs clock drift.
 
