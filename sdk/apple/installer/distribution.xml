@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>LanVidSDK v2.3.1</title>
+    <title>LanVidSDK v2.4.0</title>
     <organization>com.lanvid</organization>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false" />
     <options customize="allow" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
@@ -53,8 +53,8 @@
         <pkg-ref id="com.lanvid.audio.hal" />
     </choice>
 
-    <pkg-ref id="com.lanvid.sdk.core" version="2.3.1" onConclusion="none">lanvid-core.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.swift" version="2.3.1" onConclusion="none">lanvid-swift.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.extras" version="2.3.1" onConclusion="none">lanvid-extras.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.audio.hal" version="2.3.1" onConclusion="none">lanvid-hal.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.core" version="2.4.0" onConclusion="none">lanvid-core.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.swift" version="2.4.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.extras" version="2.4.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.audio.hal" version="2.4.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
 </installer-gui-script>

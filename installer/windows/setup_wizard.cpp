@@ -298,7 +298,7 @@ void register_uninstaller(const fs::path& dest_dir) {
                        DWORD((val.size() + 1) * sizeof(wchar_t)));
     };
     set_sz(L"DisplayName", L"LanVid Studio");
-    set_sz(L"DisplayVersion", L"2.3.1");
+    set_sz(L"DisplayVersion", L"2.4.0");
     set_sz(L"Publisher", L"LanVid Project");
     set_sz(L"InstallLocation", dest_dir.wstring());
     set_sz(L"DisplayIcon", (dest_dir / L"lanvid_app.exe").wstring());

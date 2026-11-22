@@ -564,7 +564,7 @@ void LanVidStudioApp::draw_top_bar() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.13f, 0.18f, 1.0f));
     ImGui::BeginChild("##TopBar", ImVec2(0, 46), true, ImGuiWindowFlags_NoScrollbar);
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.3.1"
+#define LANVID_VERSION_STRING "2.4.0"
 #endif
     ImGui::TextColored(ImVec4(0.32f, 0.78f, 1.0f, 1.0f), "LanVid Studio");
     ImGui::SameLine();

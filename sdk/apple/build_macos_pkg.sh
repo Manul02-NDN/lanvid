@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SDK_VERSION="2.3.1"
+SDK_VERSION="2.4.0"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLE_DIR="$ROOT/sdk/apple"
 INST_DIR="$APPLE_DIR/installer"
@@ -228,7 +228,7 @@ cat > "$DMG_STAGE/Verify_LanVidSDK.command" <<'VEOF'
 if command -v lanvid-sdk-info >/dev/null 2>&1; then
   lanvid-sdk-info
 else
-  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.3.1-macOS.pkg first."
+  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.4.0-macOS.pkg first."
 fi
 read -r -p "Press Enter to close..."
 VEOF

@@ -2,7 +2,7 @@
 ; Build with: iscc installer\windows\lanvid.iss
 
 #define MyAppName "LanVid Studio"
-#define MyAppVersion "2.3.1"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "LanVid Project"
 #define MyAppExeName "lanvid_app.exe"
 

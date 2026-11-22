@@ -35,7 +35,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run Unit Tests (44 tests) & 4K Codec Benchmark
+      - name: Run Unit Tests (43 tests) & 4K Codec Benchmark
         shell: pwsh
         run: |
           .\build\lanvid_tests.exe
@@ -71,7 +71,7 @@ jobs:
             build/lanvid_core.dll
             build/sender.exe
             build/receiver.exe
-            dist/LanVidSDK-v2.3.1/
+            dist/LanVidSDK-v2.4.0/
           if-no-files-found: error
 
   build-and-test-linux:
@@ -123,7 +123,7 @@ jobs:
             installer/linux/*.deb
             build/lanvid_app
             build/liblanvid_core.so
-            dist/LanVidSDK-v2.3.1/
+            dist/LanVidSDK-v2.4.0/
           if-no-files-found: error
 
   build-and-test-macos-ios:
@@ -166,8 +166,8 @@ jobs:
         with:
           name: lanvid-macos-ios
           path: |
-            dist/apple/LanVidSDK-v2.3.1-macOS.pkg
-            dist/apple/LanVidSDK-v2.3.1-macOS.dmg
+            dist/apple/LanVidSDK-v2.4.0-macOS.pkg
+            dist/apple/LanVidSDK-v2.4.0-macOS.dmg
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
@@ -214,12 +214,14 @@ jobs:
         run: |
           cd android
           gradle --no-daemon exportUniversalApk
+          mkdir -p ../dist/android
+          cp LanVid-Android-universal.apk ../dist/android/LanVid-Android-v2.4.0.apk
 
       - name: Upload Android Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lanvid-android
           path: |
-            dist/android/lanvid-sdk-2.3.1.aar
-            android/LanVid-Android-universal.apk
+            dist/android/lanvid-sdk-2.4.0.aar
+            dist/android/LanVid-Android-v2.4.0.apk
           if-no-files-found: error
