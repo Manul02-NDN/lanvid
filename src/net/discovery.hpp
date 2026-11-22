@@ -3,6 +3,8 @@
 // Cross-platform: Windows (Winsock2 + iphlpapi), Linux/macOS/Android (POSIX + getifaddrs).
 
 #include <atomic>
+#include <functional>
+#include <mutex>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -26,13 +28,42 @@ struct DiscoveredReceiver {
     std::string os;
     std::string simd;
     uint32_t rtt_ms = 0;
+    // ---- AoIP node announcement (optional field, ignored by older scanners) ----
+    bool aoip = false;
+    std::string hostname;
+    std::string audio_driver;        // "CoreAudio HAL" / "ASIO" / "JACK/PipeWire" / "" (no DAW yet)
+    bool driver_connected = false;
+    uint16_t audio_channels = 0;
+    uint16_t aoip_rx_port = 0;       // where this node RECEIVES the bus
+    uint16_t aoip_tx_port = 0;       // peer port this node SENDS to (duplex)
+    bool duplex = false;
 };
+
+// What an AoIP node advertises in its discovery reply (evaluated per probe, so it is always live).
+struct AoipAnnounce {
+    bool enabled = false;
+    std::string hostname;
+    std::string audio_driver;
+    bool driver_connected = false;
+    uint16_t channels = 64;
+    uint16_t rx_port = 0;
+    uint16_t tx_port = 0;
+    bool duplex = false;
+};
+
+// Wire: "AOIP=1;host=<h>;drv=<d>;conn=<0|1>;ch=<n>;rx=<p>;tx=<p>;dpx=<0|1>" — inserted before the
+// nonce, so pre-2.5 scanners (which read only fields 0..3) keep working.
+std::string encode_aoip_field(const AoipAnnounce& a);
+bool decode_aoip_field(const std::string& field, DiscoveredReceiver& out);
 
 // Enumerates active IPv4 network interfaces on this host.
 std::vector<NetInterfaceInfo> list_network_interfaces();
 
 // Returns the host's friendly machine/device name.
 std::string local_device_name();
+
+// Returns the network host name (gethostname).
+std::string local_host_name();
 
 // Returns current OS identifier ("windows", "linux", "android", "macos").
 const char* local_os_name();
@@ -52,7 +83,12 @@ public:
     void stop();
     bool is_running() const { return running_.load(std::memory_order_acquire); }
 
+    // Optional live AoIP announcement (call before or after start; thread-safe).
+    void set_aoip_provider(std::function<AoipAnnounce()> provider);
+
 private:
+    std::mutex aoip_mu_;
+    std::function<AoipAnnounce()> aoip_provider_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> running_{false};

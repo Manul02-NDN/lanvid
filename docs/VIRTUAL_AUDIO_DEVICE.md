@@ -68,6 +68,44 @@ is attached, its sample rate, buffer size and ring fill.
 ./build/receiver --audio-device virtual --audio-latency 20
 ```
 
+## Full-duplex 64×64 node, patchbay and AoIP discovery
+
+A duplex node streams the DAW outputs (TX ring) to a peer **and** receives the peer's 64 channels
+into the DAW inputs (RX ring) at the same time. Each direction has its own sockets and threads:
+the TX pump pushes into its sender, the RX pump pulls from its receiver, and the receiver keeps its
+own MasterClock + RTT towards the peer's sender. A node measures the *incoming* direction; the
+peer measures the other one.
+
+```bash
+# node A (192.168.1.10)                      # node B (192.168.1.20)
+sender --duplex --host 192.168.1.20 \         sender --duplex --host 192.168.1.10 \
+       --port 5004 --listen-port 5005                 --port 5005 --listen-port 5004
+sender --duplex --list-nodes                  # LAN scan for AoIP nodes
+```
+
+C ABI: `lv_duplex_create/start/stop/get_stats/set_latency_ms`, `lv_audio_set_tx_routing`,
+`lv_audio_set_rx_routing`, `lv_audio_get_routing`, `lv_audio_set_channel_mute_solo`,
+`lv_discovery_scan_audio_nodes` (types `LV_DuplexConfig`, `LV_DuplexStats`, `LV_AudioNode`,
+`LV_AudioDirection`). Core-only / mobile builds return `LV_ERR_UNSUPPORTED` from `lv_duplex_start`.
+
+**Patchbay** (`src/audio/channel_patchbay.*`, one per direction): `dst_of_src[64]` (−1 = off;
+several sources may feed one destination and are summed), changed live with a 5 ms route
+crossfade. Mute / Solo act on the source channel with 5 ms linear gain ramps; Solo on any channel
+silences all non-soloed ones. Steady state (1:1, unity) is a bit-exact copy. CLI:
+`--tx-route 1:2,2:1`, `--rx-route ...`, `--tx-mute/--rx-mute/--tx-solo/--rx-solo <c,...>`
+(1-based; `5:0` unroutes channel 5).
+
+**AoIP discovery** (port 5099): duplex nodes add an optional field before the nonce of the
+discovery reply — `AOIP=1;host=<hostname>;drv=<CoreAudio HAL|ASIO|JACK/PipeWire>;conn=<0|1>;ch=64;rx=<port>;tx=<port>;dpx=1`.
+Older scanners read only the first four fields and are unaffected. The driver name / DAW state are
+evaluated live on every probe. Nodes answering on several interfaces are merged (non-loopback
+address preferred).
+
+**LanVid Studio:** tab *AoIP Duplex 64x64* — *Discovered AoIP Nodes* list (one click fills the peer
+IP and ports; manual IP stays as fallback), start/stop, per-direction status, and the
+*Channel Routing & Solo/Mute* block (TX/RX, src → dst editor, 1:1 / reverse presets, 8×8 M/S grid).
+Starting the duplex node releases the single-direction virtual-device bridges of the other tabs.
+
 ## Verification
 
 * `shm_audio_bus_64ch_lockfree_roundtrip`: two processes' worth of mappings, multi-threaded
@@ -78,6 +116,11 @@ is attached, its sample rate, buffer size and ring fill.
   channels both ways through `ReadInput` / `WriteMix`.
 * CI checks the ASIO DLL exports (`dumpbin`), the HAL bundle (`Info.plist`, both Mach-O slices,
   `_LanVidAudioDriverFactory`) and the Linux bridge start-up behaviour.
+
+* `audio_64ch_fullduplex_and_patchbay_routing`: two duplex nodes on loopback, each with its own
+  bus and simulated DAW, exchange 64×64 channels simultaneously (A→B reversed + one muted source,
+  live Solo on A's RX), checking bit-level phase alignment, zero mute/solo leakage, zero loss,
+  both MasterClocks synced and AoIP discovery of node A; plus deterministic ramp / crossfade checks.
 
 Not covered automatically: loading by a real DAW, `coreaudiod`'s sandbox, and ASIO hosts on
 Windows — these need a manual check on target machines.

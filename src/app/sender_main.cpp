@@ -22,6 +22,7 @@
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/sender.hpp"
+#include "app/duplex_cli.hpp"
 #include "audio/shm_audio_host.hpp"
 #include "platform/audio_capture.hpp"
 #include "platform/camera_capture.hpp"
@@ -80,6 +81,7 @@ void print_usage(const char* prog) {
         "  --pace <mbps>            Optional token-bucket pacing in Mbps (default: 0=off)\n"
         "  --frames <n>             Stop after N frames (default: 0=infinite)\n"
         "  --duration <sec>         Stop after S seconds (default: 0=infinite)\n"
+        "  --duplex ...             Full-duplex 64x64 AoIP node (see: sender --duplex --help)\n"
         "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
         prog);
@@ -121,6 +123,7 @@ void print_devices() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (lv_cli_wants_duplex(argc, argv)) return lv_cli_run_duplex(argc, argv);
     lv::SenderConfig scfg;
     lv::CodecParams cp;
     double fps = 60.0;

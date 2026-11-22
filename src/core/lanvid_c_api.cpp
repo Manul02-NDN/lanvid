@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -23,6 +24,10 @@
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/discovery.hpp"
+#include "audio/channel_patchbay.hpp"
+#ifdef LV_HAVE_SHM_BUS
+#include "audio/shm_audio_host.hpp"
+#endif
 #include "net/receiver.hpp"
 #include "net/sender.hpp"
 
@@ -1286,6 +1291,271 @@ int lv_discovery_scan_peers(int timeout_ms, uint16_t discovery_port, LV_Discover
                       found[size_t(i)].device_name.c_str());
         std::snprintf(out_peers[i].os, sizeof(out_peers[i].os), "%s", found[size_t(i)].os.c_str());
         std::snprintf(out_peers[i].simd, sizeof(out_peers[i].simd), "%s", found[size_t(i)].simd.c_str());
+    }
+    return n;
+}
+
+/* ---- Full-duplex 64x64 AoIP transceiver ---- */
+}  // extern "C"
+
+struct LvDuplexHandle {
+    std::mutex api_mu;
+    LvSenderHandle* tx = nullptr;
+    LvReceiverHandle* rx = nullptr;
+#ifdef LV_HAVE_SHM_BUS
+    lv::ShmAudioHost tx_host;  // DAW TX ring -> patchbay -> network   (own thread)
+    lv::ShmAudioHost rx_host;  // network -> patchbay -> DAW RX ring   (own thread)
+#endif
+    lv::ChannelPatchbay tx_patch;
+    lv::ChannelPatchbay rx_patch;
+    std::unique_ptr<lv::DiscoveryResponder> disc;
+    LV_DuplexConfig cfg{};
+    std::atomic<bool> running{false};
+
+    void stop_internal() {
+        running.store(false, std::memory_order_release);
+        if (disc) {
+            disc->stop();
+            disc.reset();
+        }
+#ifdef LV_HAVE_SHM_BUS
+        tx_host.stop();
+        rx_host.stop();
+#endif
+        if (tx) { lv_sender_destroy(tx); tx = nullptr; }
+        if (rx) { lv_receiver_destroy(rx); rx = nullptr; }
+    }
+    ~LvDuplexHandle() { stop_internal(); }
+};
+
+extern "C" {
+
+void lv_duplex_config_default(LV_DuplexConfig* cfg) {
+    if (!cfg) return;
+    std::memset(cfg, 0, sizeof(*cfg));
+    std::snprintf(cfg->peer_host, sizeof(cfg->peer_host), "127.0.0.1");
+    cfg->peer_port = 5004;
+    cfg->listen_port = 5005;
+    std::snprintf(cfg->bind_ip, sizeof(cfg->bind_ip), "0.0.0.0");
+    cfg->latency_ms = 20;
+    cfg->sample_rate = 48000;
+    cfg->num_channels = 64;
+    cfg->discovery_port = lv::kDiscoveryPort;
+    cfg->enable_discovery = 1;
+}
+
+LvDuplexHandle* lv_duplex_create(void) { return new (std::nothrow) LvDuplexHandle(); }
+void lv_duplex_destroy(LvDuplexHandle* handle) { delete handle; }
+
+int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
+    if (!h || !cfg) return LV_ERR_INVALID_ARG;
+#ifndef LV_HAVE_SHM_BUS
+    (void)cfg;
+    return LV_ERR_UNSUPPORTED;
+#else
+    if (cfg->latency_ms < 2 || cfg->latency_ms > 2000 || (cfg->sample_rate != 48000 && cfg->sample_rate != 96000) ||
+        cfg->num_channels < 1 || cfg->num_channels > 64 || cfg->peer_port == 0 || !cfg->peer_host[0])
+        return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->stop_internal();
+    h->cfg = *cfg;
+    h->tx_patch.set_sample_rate(uint32_t(cfg->sample_rate));
+    h->rx_patch.set_sample_rate(uint32_t(cfg->sample_rate));
+
+    LV_AudioBusConfig bus;
+    lv_audio_bus_config_default(&bus);
+    bus.sample_rate = cfg->sample_rate;
+    bus.latency_ms = cfg->latency_ms;
+    bus.num_channels = cfg->num_channels;
+
+    // RX direction: our receiver (own socket, own MasterClock/RTT towards the peer's sender).
+    h->rx = lv_receiver_create();
+    lv_receiver_configure_audio_bus(h->rx, &bus);
+    LV_ReceiverConfig rc;
+    lv_sdk_receiver_config_default(&rc);
+    std::snprintf(rc.bind_ip, sizeof(rc.bind_ip), "%s", cfg->bind_ip[0] ? cfg->bind_ip : "0.0.0.0");
+    rc.bind_port = cfg->listen_port;
+    rc.enable_discovery = 0;  // the duplex node announces itself below
+    int r = lv_sdk_receiver_start(h->rx, &rc);
+    if (r != LV_OK) { h->stop_internal(); return r; }
+
+    // TX direction: our sender (own socket; answers the peer receiver's clock-sync pings).
+    h->tx = lv_sender_create();
+    lv_sender_configure_audio_bus(h->tx, &bus);
+    LV_SenderConfig sc;
+    lv_sdk_sender_config_default(&sc);
+    std::snprintf(sc.dest_ip, sizeof(sc.dest_ip), "%s", cfg->peer_host);
+    sc.dest_port = cfg->peer_port;
+    r = lv_sdk_sender_start(h->tx, &sc);
+    if (r != LV_OK) { h->stop_internal(); return r; }
+
+    lv::ShmAudioHost::Config hc;
+    hc.channels = uint32_t(cfg->num_channels);
+    hc.bus_name = cfg->bus_name;
+    LvDuplexHandle* self = h;
+    const bool ok_tx = h->tx_host.start(hc, [self](const float* const* p, uint32_t ch, uint32_t n, bool disc) {
+        static thread_local std::vector<float> buf;
+        static thread_local std::vector<float*> outp;
+        buf.resize(size_t(ch) * n);
+        outp.resize(ch);
+        for (uint32_t c = 0; c < ch; ++c) outp[c] = buf.data() + size_t(c) * n;
+        self->tx_patch.process(p, outp.data(), ch, n);
+        const uint64_t ts = disc ? lv_sender_get_master_clock_samples(self->tx) - n : LV_MEDIA_TS_AUTO;
+        lv_sender_push_audio_multichannel(self->tx, outp.data(), uint16_t(ch), n, LV_AUDIO_FORMAT_F32,
+                                          LV_AUDIO_LAYOUT_PLANAR, ts);
+    }, nullptr);
+    const bool ok_rx = h->rx_host.start(hc, nullptr, [self](float* const* p, uint32_t ch, uint32_t n) {
+        static thread_local std::vector<float> buf;
+        static thread_local std::vector<const float*> inp;
+        buf.resize(size_t(ch) * n);
+        inp.resize(ch);
+        lv_receiver_pop_audio_multichannel(self->rx, buf.data(), uint16_t(ch), n, LV_AUDIO_LAYOUT_PLANAR);
+        for (uint32_t c = 0; c < ch; ++c) inp[c] = buf.data() + size_t(c) * n;
+        self->rx_patch.process(inp.data(), p, ch, n);
+    });
+    if (!ok_tx || !ok_rx) { h->stop_internal(); return LV_ERR_INTERNAL; }
+
+    if (cfg->enable_discovery) {
+        h->disc = std::make_unique<lv::DiscoveryResponder>();
+        h->disc->set_aoip_provider([self]() {
+            lv::AoipAnnounce a;
+            a.enabled = true;
+            a.hostname = lv::local_host_name();
+            const auto st = self->rx_host.status();
+            a.audio_driver = st.driver_name;
+            a.driver_connected = st.driver_connected;
+            a.channels = uint16_t(self->cfg.num_channels);
+            a.rx_port = self->cfg.listen_port;
+            a.tx_port = self->cfg.peer_port;
+            a.duplex = true;
+            return a;
+        });
+        h->disc->start(cfg->listen_port, cfg->device_name,
+                       cfg->discovery_port ? cfg->discovery_port : lv::kDiscoveryPort);
+    }
+    h->running.store(true, std::memory_order_release);
+    return LV_OK;
+#endif
+}
+
+void lv_duplex_stop(LvDuplexHandle* h) {
+    if (!h) return;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->stop_internal();
+}
+
+int lv_duplex_set_latency_ms(LvDuplexHandle* h, uint32_t ms) {
+    if (!h || ms < 2 || ms > 2000) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->cfg.latency_ms = ms;
+    if (h->tx) lv_sender_set_audio_latency_ms(h->tx, ms);
+    if (h->rx) lv_receiver_set_audio_latency_ms(h->rx, ms);
+    return LV_OK;
+}
+
+int lv_duplex_get_stats(LvDuplexHandle* h, LV_DuplexStats* out) {
+    if (!h || !out) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    out->running = h->running.load() ? 1 : 0;
+    if (!out->running) return LV_ERR_NOT_RUNNING;
+#ifdef LV_HAVE_SHM_BUS
+    const auto rs = h->rx_host.status();
+    const auto ts = h->tx_host.status();
+    out->driver_connected = rs.driver_connected ? 1 : 0;
+    std::snprintf(out->driver_name, sizeof(out->driver_name), "%s", rs.driver_name.c_str());
+    out->sample_rate = rs.sample_rate;
+    out->buffer_size = rs.buffer_size;
+    out->rx_frames_to_daw = rs.rx_frames;
+    out->rx_underruns = rs.rx_underruns;
+    out->tx_frames_from_daw = ts.tx_frames;
+    out->tx_overruns = ts.tx_overruns;
+#endif
+    if (h->rx && h->rx->receiver) {
+        const auto& mc = h->rx->receiver->master_clock();
+        out->rx_clock_synced = mc.synced() ? 1 : 0;
+        out->rx_rtt_us = mc.min_rtt_us();
+        out->rx_clock_skew_ppm = mc.skew_ppm();
+        for (uint16_t c = 0; c < uint16_t(h->cfg.num_channels); ++c) {
+            const auto st = h->rx->receiver->audio_channel_rx_stats(c);
+            out->rx_packets += st.packets_rx;
+            out->rx_lost += st.packets_lost;
+        }
+    }
+    if (h->tx && h->tx->sender) {
+        out->tx_packets = h->tx->sender->audio2_stats().packets_sent;
+        out->tx_pongs_sent = h->tx->sender->stats().pongs_sent;
+    }
+    return LV_OK;
+}
+
+static lv::ChannelPatchbay* lv_duplex_patch(LvDuplexHandle* h, LV_AudioDirection dir) {
+    return dir == LV_AUDIO_DIR_TX ? &h->tx_patch : &h->rx_patch;
+}
+
+int lv_audio_set_tx_routing(LvDuplexHandle* h, const int8_t dst_of_src[64]) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    if (dst_of_src) h->tx_patch.set_routing(dst_of_src);
+    else h->tx_patch.reset_identity();
+    return LV_OK;
+}
+
+int lv_audio_set_rx_routing(LvDuplexHandle* h, const int8_t dst_of_src[64]) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    if (dst_of_src) h->rx_patch.set_routing(dst_of_src);
+    else h->rx_patch.reset_identity();
+    return LV_OK;
+}
+
+int lv_audio_get_routing(LvDuplexHandle* h, LV_AudioDirection dir, int8_t dst_of_src[64]) {
+    if (!h || !dst_of_src || (dir != LV_AUDIO_DIR_TX && dir != LV_AUDIO_DIR_RX)) return LV_ERR_INVALID_ARG;
+    lv_duplex_patch(h, dir)->get_routing(dst_of_src);
+    return LV_OK;
+}
+
+int lv_audio_set_channel_mute_solo(LvDuplexHandle* h, LV_AudioDirection dir, uint16_t ch, int mute, int solo) {
+    if (!h || ch >= 64 || (dir != LV_AUDIO_DIR_TX && dir != LV_AUDIO_DIR_RX)) return LV_ERR_INVALID_ARG;
+    lv::ChannelPatchbay* p = lv_duplex_patch(h, dir);
+    if (mute >= 0) p->set_mute(ch, mute != 0);
+    if (solo >= 0) p->set_solo(ch, solo != 0);
+    return LV_OK;
+}
+
+int lv_discovery_scan_audio_nodes(int timeout_ms, uint16_t discovery_port, LV_AudioNode* out, int max_nodes) {
+    if (!out || max_nodes <= 0) return 0;
+    const auto found = lv::discovery_scan(timeout_ms, discovery_port ? discovery_port : lv::kDiscoveryPort);
+    // One node may answer on several interfaces (LAN IP + 127.0.0.1): keep one entry per
+    // (hostname, name, rx_port), preferring a non-loopback address.
+    std::vector<const lv::DiscoveredReceiver*> uniq;
+    for (const auto& r : found) {
+        if (!r.aoip) continue;
+        bool merged = false;
+        for (auto& u : uniq) {
+            if (u->hostname == r.hostname && u->device_name == r.device_name && u->aoip_rx_port == r.aoip_rx_port) {
+                if (u->ip.rfind("127.", 0) == 0 && r.ip.rfind("127.", 0) != 0) u = &r;
+                merged = true;
+                break;
+            }
+        }
+        if (!merged) uniq.push_back(&r);
+    }
+    int n = 0;
+    for (const auto* rp : uniq) {
+        if (n >= max_nodes) break;
+        const auto& r = *rp;
+        LV_AudioNode& o = out[n++];
+        std::memset(&o, 0, sizeof(o));
+        std::snprintf(o.ip, sizeof(o.ip), "%s", r.ip.c_str());
+        std::snprintf(o.name, sizeof(o.name), "%s", r.device_name.c_str());
+        std::snprintf(o.hostname, sizeof(o.hostname), "%s", r.hostname.c_str());
+        std::snprintf(o.audio_driver, sizeof(o.audio_driver), "%s", r.audio_driver.c_str());
+        std::snprintf(o.os, sizeof(o.os), "%s", r.os.c_str());
+        o.rx_port = r.aoip_rx_port;
+        o.tx_port = r.aoip_tx_port;
+        o.channels = r.audio_channels;
+        o.duplex = r.duplex ? 1 : 0;
+        o.driver_connected = r.driver_connected ? 1 : 0;
+        o.rtt_ms = r.rtt_ms;
     }
     return n;
 }

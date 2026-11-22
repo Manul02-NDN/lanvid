@@ -85,6 +85,7 @@ set(LV_CORE_SOURCES
   src/net/receiver.cpp
   src/net/discovery.cpp
   src/core/lanvid_c_api.cpp
+  src/audio/channel_patchbay.cpp
 )
 
 # Desktop-only: LanVidAudioBus_v1 shared-memory bridge to the OS virtual audio devices
@@ -141,6 +142,9 @@ endif()
 
 if(LANVID_SDK_CORE_ONLY)
   list(APPEND LV_SIMD_DEFS LANVID_SDK_CORE_ONLY=1)
+endif()
+if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
+  list(APPEND LV_SIMD_DEFS LV_HAVE_SHM_BUS=1)  # virtual-device bridge + full-duplex C ABI available
 endif()
 
 # Platform-specific network, preview, capture, and audio backends
@@ -319,7 +323,7 @@ endif()
 
 # ---------------------------------------------------------------- CLI executables
 if(LANVID_BUILD_CLI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
-  add_executable(sender src/app/sender_main.cpp)
+  add_executable(sender src/app/sender_main.cpp src/app/duplex_cli.cpp)
   target_link_libraries(sender PRIVATE lanvid_core)
   lanvid_set_flags(sender)
 
@@ -389,8 +393,12 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_hal_driver.cpp
     tests/test_c_api.cpp
     tests/test_video_codecs.cpp
+    tests/test_audio_duplex.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
+  if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
+    target_compile_definitions(lanvid_tests PRIVATE LV_HAVE_SHM_BUS=1)
+  endif()
   if(TARGET LanVidAudio)
     add_dependencies(lanvid_tests LanVidAudio)
     target_compile_definitions(lanvid_tests PRIVATE
