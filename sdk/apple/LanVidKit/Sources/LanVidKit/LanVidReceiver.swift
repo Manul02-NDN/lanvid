@@ -114,6 +114,41 @@ public final class LanVidReceiver {
         if let h = handle { lv_receiver_set_volume(h, volume) }
     }
 
+    // MARK: - 64-channel phase-coherent bus
+
+    public func configureAudioBus(latencyMs: UInt32 = 20, channels: Int32 = 64, blockFrames: UInt32 = 240,
+                                  sampleRate: Int32 = 48000) throws {
+        guard let h = handle else { return }
+        var bus = LV_AudioBusConfig(sample_rate: sampleRate, latency_ms: latencyMs,
+                                    num_channels: channels, block_frames: blockFrames)
+        let rc = lv_receiver_configure_audio_bus(h, &bus)
+        if rc != LV_OK.rawValue {
+            throw LanVidError.coreError(code: rc, message: String(cString: lv_error_string(rc)))
+        }
+    }
+
+    /// Live latency change (2...2000 ms) without reconnecting.
+    public func setAudioLatencyMs(_ ms: UInt32) {
+        guard let h = handle else { return }
+        _ = lv_receiver_set_audio_latency_ms(h, ms)
+    }
+
+    /// Pull sample-aligned Float32 frames for channels 0..<channels (call from an AVAudioSourceNode
+    /// render block). `planar == true` writes channel-major (`out[ch * frames + i]`).
+    @discardableResult
+    public func popAudioMultichannel(into out: UnsafeMutablePointer<Float>, channels: UInt16, frames: UInt32,
+                                     planar: Bool = false) -> Int32 {
+        guard let h = handle else { return Int32(LV_ERR_NOT_RUNNING.rawValue) }
+        return lv_receiver_pop_audio_multichannel(h, out, channels, frames,
+                                                  planar ? LV_AUDIO_LAYOUT_PLANAR : LV_AUDIO_LAYOUT_INTERLEAVED)
+    }
+
+    public func channelStats(_ channel: UInt16) -> LV_AudioChannelStats {
+        var st = LV_AudioChannelStats()
+        if let h = handle { _ = lv_receiver_get_channel_stats(h, channel, &st) }
+        return st
+    }
+
     public var stats: LanVidStats {
         var s = LV_StreamStats()
         if let h = handle { lv_receiver_get_stream_stats(h, &s) }

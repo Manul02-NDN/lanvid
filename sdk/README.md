@@ -95,6 +95,31 @@ with LanVidReceiver(bind_port=5000) as rx:
         tx.push_frame(np.zeros((1080, 1920, 4), dtype=np.uint8))
 ```
 
+### 5. 64-канальна AoIP шина (C ABI, однаково для C++ / Swift / Kotlin / Python)
+
+```c
+LV_AudioBusConfig bus;
+lv_audio_bus_config_default(&bus);           /* 48 kHz, 20 ms, 64 канали, блоки по 240 */
+bus.latency_ms = 25;                          /* 2 (Ultra Low) .. 2000 (Bulletproof) */
+lv_sender_configure_audio_bus(tx, &bus);      /* до lv_sdk_sender_start() */
+lv_receiver_configure_audio_bus(rx, &bus);
+
+/* Відправка: окремий канал з будь-якого потоку або одразу N каналів (ASIO/CoreAudio/JACK) */
+lv_sender_push_audio_channel(tx, 17, mono_f32, 48, LV_AUDIO_FORMAT_F32, LV_MEDIA_TS_AUTO);
+lv_sender_push_audio_multichannel(tx, interleaved, 64, 240, LV_AUDIO_FORMAT_PCM24_PACKED,
+                                  LV_AUDIO_LAYOUT_INTERLEAVED, LV_MEDIA_TS_AUTO);
+
+/* Прийом: фазово-вирівняний блок у колбеку АБО pull з аудіоколбеку пристрою */
+lv_receiver_pop_audio_multichannel(rx, out_f32, 64, frames, LV_AUDIO_LAYOUT_PLANAR);
+lv_receiver_set_audio_latency_ms(rx, 500);    /* на льоту, без розриву з'єднання */
+LV_AudioChannelStats st; lv_receiver_get_channel_stats(rx, 17, &st); /* dBFS, втрати, FEC, NACK, джитер */
+```
+
+`LV_MEDIA_TS_AUTO` прив'язує перший push до Master Clock відправника і далі веде позицію безперервно; для DAW
+передавайте власну позицію в семплах (`lv_sender_get_master_clock_samples()`). Колбек і pull-режим
+взаємовиключні (`pop` повертає `LV_ERR_UNSUPPORTED`, поки колбек зареєстровано). Нові функції лише додані —
+`LV_SDK_ABI_VERSION` = 1 без змін, існуючі структури не змінено.
+
 ---
 
 ## Структура дистрибутиву `dist/LanVidSDK-v1.0.0/`

@@ -134,6 +134,9 @@ bool load_app_config(AppConfig& cfg) {
     read_flt(j, "volume", cfg.volume);
     read_int(j, "conceal_mode", cfg.conceal_mode);
     read_dbl(j, "audio_target_ms", cfg.audio_target_ms);
+    read_int(j, "aoip_channels", cfg.aoip_channels);
+    read_int(j, "aoip_latency_ms", cfg.aoip_latency_ms);
+    read_bool(j, "aoip_tone", cfg.aoip_tone);
     read_bool(j, "show_hud", cfg.show_hud);
     read_str(j, "preview_backend", cfg.preview_backend);
     read_int(j, "active_tab", cfg.active_tab);
@@ -146,6 +149,8 @@ bool load_app_config(AppConfig& cfg) {
     cfg.quality = std::clamp(cfg.quality, 1, 100);
     cfg.fps = std::clamp(cfg.fps, 5, 240);
     cfg.volume = std::clamp(cfg.volume, 0.0f, 1.5f);
+    cfg.aoip_channels = std::clamp(cfg.aoip_channels, 1, 64);
+    cfg.aoip_latency_ms = std::clamp(cfg.aoip_latency_ms, 2, 2000);
     return true;
 }
 
@@ -184,6 +189,9 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"volume\": " << cfg.volume << ",\n"
         << "  \"conceal_mode\": " << cfg.conceal_mode << ",\n"
         << "  \"audio_target_ms\": " << cfg.audio_target_ms << ",\n"
+        << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"
+        << "  \"aoip_latency_ms\": " << cfg.aoip_latency_ms << ",\n"
+        << "  \"aoip_tone\": " << (cfg.aoip_tone ? "true" : "false") << ",\n"
         << "  \"show_hud\": " << (cfg.show_hud ? "true" : "false") << ",\n"
         << "  \"preview_backend\": \"" << json_esc(cfg.preview_backend) << "\",\n"
         << "  \"active_tab\": " << cfg.active_tab << "\n"

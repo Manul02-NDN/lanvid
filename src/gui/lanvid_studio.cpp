@@ -1,6 +1,7 @@
 #include "gui/lanvid_studio.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -11,6 +12,16 @@
 namespace lv::gui {
 
 namespace {
+
+constexpr int kBusChoices[] = {2, 8, 16, 32, 64};
+
+const char* latency_mode_label(int ms) {
+    if (ms <= 10) return "Ultra Low Latency: 0.5-1 мс пакети, XOR FEC 1+1/2+1, без ARQ";
+    if (ms <= 100) return "Balanced / Live: 2.5-5 мс пакети, XOR FEC 4+1 + 1 NACK";
+    return "High-Reliability / Bulletproof: 10-20 мс пакети, інтерлівінг FEC + до 12 NACK + дублювання";
+}
+
+void noop_bus_callback(const LV_MultichannelAudioBlock*, void*) {}  // drives the playout clock + meters
 
 void push_hist(float* arr, int len, float val) {
     for (int i = 0; i < len - 1; ++i) arr[i] = arr[i + 1];
@@ -90,6 +101,7 @@ void LanVidStudioApp::shutdown() {
     if (disc_thread_.joinable()) disc_thread_.join();
 
     if (sender_) {
+        stop_tone();
         lv_sender_destroy(sender_);
         sender_ = nullptr;
     }
@@ -198,9 +210,16 @@ void LanVidStudioApp::start_sender() {
     sc.audio_device_index = cfg_.audio_device_index;
     sc.audio_chunk_ms = cfg_.audio_chunk_ms;
 
+    LV_AudioBusConfig bus;
+    lv_audio_bus_config_default(&bus);
+    bus.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
+    bus.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
+    lv_sender_configure_audio_bus(sender_, &bus);
+
     last_tx_preview_fid_ = 0;
     if (lv_sender_start(sender_, &sc)) {
         sender_running_ = true;
+        if (cfg_.aoip_tone) start_tone();
         toast_msg_ = "Передача запущена -> " + cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
         toast_until_us_ = now_us() + 3000000ull;
     } else {
@@ -210,7 +229,40 @@ void LanVidStudioApp::start_sender() {
     }
 }
 
+void LanVidStudioApp::start_tone() {
+    stop_tone();
+    tone_channels_.store(std::clamp(cfg_.aoip_channels, 1, 64));
+    tone_stop_.store(false);
+    tone_thread_ = std::thread([this]() {
+        constexpr uint32_t kRate = 48000, kBlk = 240;  // 5 ms blocks
+        std::vector<float> planes(size_t(LV_AUDIO_MAX_CHANNELS) * kBlk);
+        const void* ptrs[LV_AUDIO_MAX_CHANNELS];
+        for (int c = 0; c < LV_AUDIO_MAX_CHANNELS; ++c) ptrs[c] = planes.data() + size_t(c) * kBlk;
+        uint64_t pos = 0;
+        uint64_t next = now_us();
+        while (!tone_stop_.load()) {
+            next += uint64_t(kBlk) * 1000000ull / kRate;
+            sleep_until_us(next, [] {});
+            const int n = tone_channels_.load();
+            for (int c = 0; c < n; ++c) {
+                const double w = 6.283185307179586 * 110.0 * double(c + 1) / kRate;
+                float* d = planes.data() + size_t(c) * kBlk;
+                for (uint32_t i = 0; i < kBlk; ++i) d[i] = float(0.2 * std::sin(w * double(pos + i)));
+            }
+            pos += kBlk;
+            lv_sender_push_audio_multichannel(sender_, ptrs, uint16_t(n), kBlk, LV_AUDIO_FORMAT_F32,
+                                              LV_AUDIO_LAYOUT_PLANAR, LV_MEDIA_TS_AUTO);
+        }
+    });
+}
+
+void LanVidStudioApp::stop_tone() {
+    tone_stop_.store(true);
+    if (tone_thread_.joinable()) tone_thread_.join();
+}
+
 void LanVidStudioApp::stop_sender() {
+    stop_tone();
     if (sender_) lv_sender_stop(sender_);
     sender_running_ = false;
 }
@@ -227,10 +279,13 @@ void LanVidStudioApp::start_receiver() {
     rc.enable_audio = 1;
     rc.enable_discovery = 1;
 
+    apply_receiver_bus();
+
     last_rx_fid_ = 0;
     lv_receiver_set_volume(receiver_, cfg_.volume);
     if (lv_receiver_start(receiver_, &rc)) {
         receiver_running_ = true;
+        lv_receiver_set_multichannel_audio_callback(receiver_, &noop_bus_callback, nullptr);
         toast_msg_ = "Прийом запущено на UDP :" + std::to_string(rc.bind_port) + " (LAN автопошук увімкнено)";
         toast_until_us_ = now_us() + 3000000ull;
     } else {
@@ -238,6 +293,83 @@ void LanVidStudioApp::start_receiver() {
         toast_msg_ = "Не вдалося відкрити UDP порт " + std::to_string(rc.bind_port) + " (можливо, зайнятий)";
         toast_until_us_ = now_us() + 4500000ull;
     }
+}
+
+void LanVidStudioApp::apply_receiver_bus() {
+    LV_AudioBusConfig bus;
+    lv_audio_bus_config_default(&bus);
+    bus.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
+    bus.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
+    lv_receiver_configure_audio_bus(receiver_, &bus);
+}
+
+void LanVidStudioApp::draw_aoip_sender_controls() {
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "AoIP шина (до 64 каналів, Master Clock)");
+    ImGui::Separator();
+    int bus_idx = 1;
+    for (int i = 0; i < 5; ++i) if (kBusChoices[i] == cfg_.aoip_channels) bus_idx = i;
+    const char* bus_items[] = {"2 канали", "8 каналів", "16 каналів", "32 канали", "64 канали"};
+    if (ImGui::Combo("Канали", &bus_idx, bus_items, 5)) {
+        cfg_.aoip_channels = kBusChoices[bus_idx];
+        tone_channels_.store(cfg_.aoip_channels);
+        config_dirty_ = true;
+    }
+    if (ImGui::SliderInt("Буфер затримки та надійності", &cfg_.aoip_latency_ms, 2, 2000, "%d мс",
+                         ImGuiSliderFlags_Logarithmic)) {
+        if (sender_) lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
+        config_dirty_ = true;
+    }
+    ImGui::TextDisabled("2 мс — Ultra Low Latency  <->  2000 мс — Bulletproof");
+    ImGui::TextWrapped("%s", latency_mode_label(cfg_.aoip_latency_ms));
+    if (ImGui::Checkbox("Тестовий тон (N каналів, 110 Гц x номер каналу)", &cfg_.aoip_tone)) {
+        if (sender_running_) {
+            if (cfg_.aoip_tone) start_tone();
+            else stop_tone();
+        }
+        config_dirty_ = true;
+    }
+}
+
+void LanVidStudioApp::draw_aoip_meter_grid() {
+    const int n = std::clamp(cfg_.aoip_channels, 1, 64);
+    const int cols = std::min(n, 16);
+    const int rows = (n + cols - 1) / cols;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float cell_w = std::max(18.0f, (avail - 4.0f) / float(cols)) - 4.0f;
+    const float cell_h = 22.0f;
+    for (int c = 0; c < n; ++c) {
+        const int r = c / cols, k = c % cols;
+        const ImVec2 p0(origin.x + float(k) * (cell_w + 4.0f), origin.y + float(r) * (cell_h + 4.0f));
+        const ImVec2 p1(p0.x + cell_w, p0.y + cell_h);
+        const LV_AudioChannelStats& st = ch_stats_[c];
+        dl->AddRectFilled(p0, p1, IM_COL32(28, 32, 40, 255), 3.0f);
+        if (st.active) {
+            // -60..0 dBFS -> bar fill; green < -18, yellow < -6, red above.
+            const float t = std::clamp((st.level_dbfs + 60.0f) / 60.0f, 0.0f, 1.0f);
+            const ImU32 col = st.level_dbfs > -6.0f    ? IM_COL32(240, 80, 70, 255)
+                              : st.level_dbfs > -18.0f ? IM_COL32(240, 200, 60, 255)
+                                                       : IM_COL32(60, 220, 120, 255);
+            dl->AddRectFilled(p0, ImVec2(p0.x + cell_w * t, p1.y), col, 3.0f);
+        }
+        const bool trouble = st.packets_lost > 0 || st.underruns > 0;
+        dl->AddRect(p0, p1, trouble ? IM_COL32(255, 70, 70, 255) : IM_COL32(70, 78, 92, 255), 3.0f);
+        char lbl[8];
+        std::snprintf(lbl, sizeof(lbl), "%d", c + 1);
+        dl->AddText(ImVec2(p0.x + 3.0f, p0.y + 3.0f), IM_COL32(230, 235, 245, 255), lbl);
+        if (ImGui::IsMouseHoveringRect(p0, p1)) {
+            ImGui::SetTooltip("Канал %d: %.1f dBFS%s\nПакети: %llu | втрачено: %llu\nFEC: %llu | NACK: %llu (запитів %llu)\n"
+                              "Underruns: %llu | пізні: %llu | джитер: %.2f мс",
+                              c + 1, st.level_dbfs, st.active ? "" : " (неактивний)",
+                              (unsigned long long)st.packets_rx, (unsigned long long)st.packets_lost,
+                              (unsigned long long)st.fec_recovered, (unsigned long long)st.nack_recovered,
+                              (unsigned long long)st.nacks_sent, (unsigned long long)st.underruns,
+                              (unsigned long long)st.late_packets, double(st.jitter_us) / 1000.0);
+        }
+    }
+    ImGui::Dummy(ImVec2(avail, float(rows) * (cell_h + 4.0f)));
 }
 
 void LanVidStudioApp::stop_receiver() {
@@ -292,6 +424,11 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
                 push_hist(tx_mbps_hist_, kHistLen, float(tx_stats_.tx_mbps));
                 push_hist(tx_loss_hist_, kHistLen, float(tx_stats_.rx_loss_pct));
             }
+        }
+        if (receiver_ && receiver_running_ && now - ch_stats_us_ >= 100000) {
+            ch_stats_us_ = now;
+            for (int c = 0; c < std::clamp(cfg_.aoip_channels, 1, 64); ++c)
+                lv_receiver_get_channel_stats(receiver_, uint16_t(c), &ch_stats_[c]);
         }
         if (receiver_) {
             lv_receiver_get_stats(receiver_, &rx_stats_);
@@ -466,6 +603,8 @@ void LanVidStudioApp::draw_sender_tab() {
             config_dirty_ = true;
         }
     }
+
+    draw_aoip_sender_controls();
 
     ImGui::Spacing();
     ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "2. Отримувач у LAN");
@@ -662,11 +801,39 @@ void LanVidStudioApp::draw_receiver_tab() {
 
     ImGui::SameLine();
     if (ImGui::Checkbox("HUD", &cfg_.show_hud)) config_dirty_ = true;
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(90.0f);
+    int bus_idx = 1;
+    for (int i = 0; i < 5; ++i) if (kBusChoices[i] == cfg_.aoip_channels) bus_idx = i;
+    const char* bus_items[] = {"2 кан.", "8 кан.", "16 кан.", "32 кан.", "64 кан."};
+    if (ImGui::Combo("AoIP", &bus_idx, bus_items, 5)) {
+        cfg_.aoip_channels = kBusChoices[bus_idx];
+        if (receiver_) apply_receiver_bus();
+        config_dirty_ = true;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(200.0f);
+    if (ImGui::SliderInt("Затримка", &cfg_.aoip_latency_ms, 2, 2000, "%d мс", ImGuiSliderFlags_Logarithmic)) {
+        if (receiver_) lv_receiver_set_audio_latency_ms(receiver_, uint32_t(cfg_.aoip_latency_ms));
+        config_dirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", latency_mode_label(cfg_.aoip_latency_ms));
+    ImGui::EndChild();
+
+    // 64-channel LED meter grid (phase-aligned playout bus)
+    const int bus_n = std::clamp(cfg_.aoip_channels, 1, 64);
+    const int bus_rows = (bus_n + 15) / 16;
+    const float meter_h = 30.0f + float(bus_rows) * 26.0f;
+    ImGui::BeginChild("##AoipMeters", ImVec2(0, meter_h), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::TextDisabled("AoIP шина: %d кан. | затримка %d мс — %s", bus_n, cfg_.aoip_latency_ms,
+                        cfg_.aoip_latency_ms <= 10 ? "Ultra Low" : (cfg_.aoip_latency_ms <= 100 ? "Balanced" : "Bulletproof"));
+    draw_aoip_meter_grid();
     ImGui::EndChild();
 
     // Live GPU Video Viewport
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const float vid_h = std::max(200.0f, avail.y - 86.0f);
+    const float vid_h = std::max(160.0f, avail.y - 86.0f);
     ImGui::BeginChild("##RxCanvas", ImVec2(0, vid_h), false, ImGuiWindowFlags_NoScrollbar);
     draw_aspect_image(receiver_running_ ? receiver_tex_ : nullptr, ImGui::GetContentRegionAvail(),
                       receiver_running_ ? "Очікування відеопотоку по UDP..."

@@ -13,7 +13,12 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       user_on_frame_(std::move(on_frame)),
       pool_(cfg.decode_threads),
       assembler_(cfg.assembler, [this](const CompletedFrame& cf) { on_frame_internal(cf); }, &pool_),
-      audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms) {
+      audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms),
+      matrix_(cfg.audio_sample_rate),
+      arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
+          return has_sender_ && sock_.send_to(d, n, sender_ep_) == int(n);
+      }) {
+    arx_.set_latency_ms(cfg.audio_latency_ms);
     assembler_.set_pli_callback([this](uint32_t) { send_pli_now(now_us()); });
 }
 
@@ -147,6 +152,14 @@ void UdpReceiver::send_pli_now(uint64_t now) {
 void UdpReceiver::handle_pong(const uint8_t* payload, size_t len, uint32_t t4_us) {
     PingPongPayload pp;
     if (!parse_ping_pong(payload, len, pp)) return;
+    if (len >= kPingPongSize + kPongMasterTailSize) {
+        uint64_t t2m = 0, t3m = 0;
+        if (parse_pong_master_tail(payload + kPingPongSize, len - kPingPongSize, t2m, t3m)) {
+            const uint64_t t4_64 = now_us();
+            const uint64_t t1_64 = t4_64 - uint64_t(uint32_t(t4_us - pp.t1_client_send_us));
+            mclock_.on_exchange(t1_64, t2m, t3m, t4_64);
+        }
+    }
     const int64_t rtt = int64_t(diff_us32(t4_us, pp.t1_client_send_us)) -
                         int64_t(diff_us32(pp.t3_server_send_us, pp.t2_server_recv_us));
     if (rtt < 0 || rtt > 500000) return;
@@ -188,6 +201,12 @@ void UdpReceiver::step_once() {
                     has_sender_ = true;
                 }
                 assembler_.ingest_video_packet(h, payload, n, now);
+            } else if (h.type == PacketType::kAudio2) {
+                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
+                    sender_ep_ = batch[i].src;
+                    has_sender_ = true;
+                }
+                arx_.on_packet(h, payload, h.payload_size, now);
             } else if (h.type == PacketType::kAudio) {
                 if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
                     sender_ep_ = batch[i].src;
@@ -205,6 +224,7 @@ void UdpReceiver::step_once() {
     }
 
     assembler_.poll(now);
+    arx_.service(now);
     maybe_send_ping(now);
     maybe_send_feedback(now);
 }

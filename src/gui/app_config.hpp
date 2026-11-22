@@ -25,6 +25,11 @@ struct AppConfig {
     int audio_device_index = -1;
     double audio_chunk_ms = 5.0;
 
+    // 64-channel AoIP bus
+    int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
+    int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
+    bool aoip_tone = false;    // sender: N-channel test tone bus
+
     int preset = 0;            // 0=1080p60 Low Latency, 1=Ultra 4K60, 2=Wi-Fi Adaptive, 3=Custom
     int codec = 0;             // 0=LanVid DCT, 1=H.264, 2=H.265 (HEVC)
     int bitrate_mbps = 8;      // 1..50 Mbps target for H.264/H.265

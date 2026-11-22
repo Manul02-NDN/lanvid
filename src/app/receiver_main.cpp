@@ -2,6 +2,7 @@
 // Console telemetry + Direct3D 11 / GDI / SDL2 preview window + WASAPI low-latency audio playback.
 
 #include <algorithm>
+#include <vector>
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -35,6 +36,9 @@ void print_usage(const char* prog) {
         "  --no-sync                Disable PING/PONG clock offset estimation\n"
         "  --no-audio               Disable WASAPI audio playback\n"
         "  --audio-target-ms <ms>   Audio jitter buffer target in ms (default: 12)\n"
+        "  --audio-channels <1..64> Enable the 64-ch AoIP bus: per-channel telemetry + ch1/ch2 monitor (default: off)\n"
+        "  --audio-latency <2..2000> AoIP playout latency in ms, phase-aligned across channels (default: 20)\n"
+        "  --audio-rate <48000|96000> AoIP bus sample rate (default: 48000)\n"
         "  --preview, --window      Open live video preview window (D3D11/GDI on Win, SDL2 on UNIX)\n"
         "                           Hotkeys: Esc/Q=quit, F/dblclick=fullscreen, C=conceal, S=snapshot\n"
         "  --preview-backend <name> auto | d3d11 | gdi (Windows only; default: auto)\n"
@@ -55,6 +59,7 @@ int main(int argc, char** argv) {
     bool enable_preview = false;
     bool force_gdi = false;
     bool enable_audio = true;
+    int aoip_channels = 0;
     int win_w = 1280, win_h = 720;
     std::string dump_prefix;
     uint64_t dump_every = 60;
@@ -80,6 +85,9 @@ int main(int argc, char** argv) {
         else if (arg == "--no-simd") lv::set_simd_disabled(true);
         else if (arg == "--no-sync") rcfg.enable_clock_sync = false;
         else if (arg == "--no-audio") enable_audio = false;
+        else if (arg == "--audio-channels") aoip_channels = std::atoi(need_val("--audio-channels"));
+        else if (arg == "--audio-latency") rcfg.audio_latency_ms = uint32_t(std::clamp(std::atoi(need_val("--audio-latency")), 2, 2000));
+        else if (arg == "--audio-rate") rcfg.audio_sample_rate = uint32_t(std::atoi(need_val("--audio-rate")) == 96000 ? 96000 : 48000);
         else if (arg == "--audio-target-ms") rcfg.audio_target_ms = std::atof(need_val("--audio-target-ms"));
         else if (arg == "--preview" || arg == "--window") enable_preview = true;
         else if (arg == "--preview-backend") {
@@ -211,8 +219,52 @@ int main(int argc, char** argv) {
         enable_audio ? "auto" : "off", lv::dct_kernels_best().name);
     std::fflush(stdout);
 
+    uint64_t next_mon_us = lv::now_us();
+    uint64_t next_aoip_report_us = next_mon_us + 1000000;
+    std::vector<float> mon_f(480 * 2);
+    std::vector<int16_t> mon_i(480 * 2);
     while (!g_stop.load(std::memory_order_relaxed)) {
         receiver.step_once();
+
+        if (aoip_channels > 0) {
+            const uint64_t tnow = lv::now_us();
+            const uint32_t blk = rcfg.audio_sample_rate / 200;  // 5 ms
+            if (tnow > next_mon_us + 200000) next_mon_us = tnow;  // stalled > 200 ms: re-anchor
+            while (tnow >= next_mon_us) {  // render every due block so the cursor keeps real time
+                next_mon_us += uint64_t(blk) * 1000000ull / rcfg.audio_sample_rate;
+                // Stereo monitor of channels 1/2 (the matrix is rendered once; meters track all channels).
+                receiver.pop_audio_multichannel_interleaved(mon_f.data(), 2, std::min<uint32_t>(blk, 480));
+                if (enable_audio && rcfg.audio_sample_rate == 48000) {
+                    for (uint32_t i = 0; i < blk * 2 && i < mon_i.size(); ++i)
+                        mon_i[i] = int16_t(std::clamp(mon_f[i], -1.0f, 1.0f) * 32767.0f);
+                    receiver.audio_buffer().push_pcm16(mon_i.data(), std::min<uint32_t>(blk, 480));
+                }
+            }
+            if (tnow >= next_aoip_report_us) {
+                next_aoip_report_us = tnow + 1000000;
+                int active = 0;
+                uint64_t under = 0, lost = 0, fec = 0, nack = 0;
+                const int n = std::min(aoip_channels, 64);
+                for (int c = 0; c < n; ++c) {
+                    const auto m = receiver.audio_matrix().meter(uint16_t(c));
+                    const auto rs = receiver.audio_channel_rx_stats(uint16_t(c));
+                    active += m.active ? 1 : 0;
+                    under += m.underruns;
+                    lost += rs.packets_lost;
+                    fec += rs.fec_recovered;
+                    nack += rs.nack_recovered;
+                }
+                const auto& mc = receiver.master_clock();
+                std::printf("[AUDIO64] ch active %d/%d | latency=%u ms | clk %s skew=%+.1f ppm rtt=%u us | "
+                            "lost=%llu fec_rec=%llu nack_rec=%llu underruns=%llu | resample=%+.1f ppm | L1=%.1f dBFS\n",
+                            active, n, receiver.audio_latency_ms(), mc.synced() ? "synced" : "free-run",
+                            mc.skew_ppm(), mc.min_rtt_us(), (unsigned long long)lost, (unsigned long long)fec,
+                            (unsigned long long)nack, (unsigned long long)under,
+                            receiver.audio_matrix().resample_ppm(),
+                            double(receiver.audio_matrix().meter(0).level_dbfs));
+                std::fflush(stdout);
+            }
+        }
 
         // Start WASAPI playback lazily on first received audio packet (avoids opening audio device on video-only streams).
         if (enable_audio && !audio_started && receiver.audio_stats().packets_rx > 0) {

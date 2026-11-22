@@ -8,6 +8,8 @@
 #include <mutex>
 #include <string>
 
+#include "common/clock.hpp"
+#include "audio/audio_tx.hpp"
 #include "codec/frame_codec.hpp"
 #include "codec/video_encoder.hpp"
 #include "common/image.hpp"
@@ -34,6 +36,8 @@ struct SenderConfig {
     uint32_t keyframe_interval_frames = 120; // IDR interval for H.264 / H.265
     double fps = 60.0;
     AdaptiveQualityConfig adaptive{};
+    uint32_t audio_sample_rate = 48000;  // 48000 / 96000 for the 64-channel audio bus
+    uint32_t audio_latency_ms = 20;      // 2..2000: selects chunk size / FEC / NACK profile
 };
 
 struct SenderStats {
@@ -83,6 +87,27 @@ public:
                         uint16_t num_frames, uint32_t sample_rate, uint8_t channels,
                         AudioSampleFormat fmt);
 
+    // ---- 64-channel AoIP (LVSP audio v2) ----
+    // Pushes samples of one channel (0..63). `media_ts` = master-clock sample position of the first
+    // sample, or kAutoMediaTs to continue the channel (anchored to the master clock on first push).
+    static constexpr uint64_t kAutoMediaTs = UINT64_MAX;
+    int push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
+                           AudioFormat2 fmt, uint64_t media_ts);
+    // Next contiguous timestamp for a multi-channel push (anchored to the master clock on first use).
+    uint64_t next_auto_media_ts(uint32_t num_samples) const;
+    void set_next_auto_media_ts(uint64_t ts) { for (auto& n : next_auto_ts_) n.store(ts, std::memory_order_relaxed); }
+    AudioReliabilityProfile audio2_profile() const {
+        return atx_ ? atx_->profile(AudioFormat2::kPcm16)
+                    : audio_profile_for_latency(cfg_.audio_latency_ms, cfg_.audio_sample_rate, cfg_.mtu, AudioFormat2::kPcm16);
+    }
+    void set_audio_latency_ms(uint32_t ms);
+    uint32_t audio_latency_ms() const { return atx_ ? atx_->latency_ms() : cfg_.audio_latency_ms; }
+    void flush_audio();
+    // Current master-clock position in samples (sender epoch = construction time).
+    uint64_t master_samples_now() const;
+    uint64_t master_us_now() const { return now_us() - epoch_us_; }
+    AudioTxStats audio2_stats() const { return atx_ ? atx_->stats() : AudioTxStats{}; }
+
     // Non-blocking poll for incoming control packets (PING -> PONG, FEEDBACK -> AIMD).
     void service_control();
 
@@ -115,6 +140,10 @@ private:
                             const uint8_t* data, size_t size, uint8_t extra_flags = 0);
 
     SenderConfig cfg_;
+    uint64_t epoch_us_ = 0;
+    std::mutex ctl_mu_;
+    std::unique_ptr<AudioTxEngine> atx_;
+    std::atomic<uint64_t> next_auto_ts_[kMaxAudioChannels]{};
     Endpoint dst_{};
     UdpSocket sock_;
     ThreadPool pool_;

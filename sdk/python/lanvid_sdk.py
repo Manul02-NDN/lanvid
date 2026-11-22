@@ -32,6 +32,12 @@ LV_PIXEL_FORMAT_NV21 = 4
 
 LV_AUDIO_FORMAT_PCM16 = 0
 LV_AUDIO_FORMAT_F32 = 1
+LV_AUDIO_FORMAT_PCM24_PACKED = 2
+
+LV_AUDIO_MAX_CHANNELS = 64
+LV_AUDIO_LAYOUT_INTERLEAVED = 0
+LV_AUDIO_LAYOUT_PLANAR = 1
+LV_MEDIA_TS_AUTO = 0xFFFFFFFFFFFFFFFF
 
 LV_CODEC_LANVID_DCT = 0
 LV_CODEC_H264 = 1
@@ -171,6 +177,60 @@ AUDIO_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.POINTER(LV_AudioChunkView), ctypes
 STATE_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 
 
+class LV_AudioBusConfig(ctypes.Structure):
+    _fields_ = [
+        ("sample_rate", ctypes.c_int32),
+        ("latency_ms", ctypes.c_uint32),
+        ("num_channels", ctypes.c_int32),
+        ("block_frames", ctypes.c_uint32),
+    ]
+
+
+class LV_MultichannelAudioBlock(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.POINTER(ctypes.c_float)),
+        ("num_channels", ctypes.c_int32),
+        ("num_frames", ctypes.c_int32),
+        ("sample_rate", ctypes.c_int32),
+        ("reserved", ctypes.c_uint32),
+        ("playout_position_samples", ctypes.c_uint64),
+        ("block_index", ctypes.c_uint64),
+    ]
+
+
+class LV_AudioChannelStats(ctypes.Structure):
+    _fields_ = [
+        ("packets_rx", ctypes.c_uint64),
+        ("packets_lost", ctypes.c_uint64),
+        ("fec_recovered", ctypes.c_uint64),
+        ("nack_recovered", ctypes.c_uint64),
+        ("nacks_sent", ctypes.c_uint64),
+        ("underruns", ctypes.c_uint64),
+        ("late_packets", ctypes.c_uint64),
+        ("level_dbfs", ctypes.c_float),
+        ("active", ctypes.c_int32),
+        ("jitter_us", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+
+MC_AUDIO_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.POINTER(LV_MultichannelAudioBlock), ctypes.c_void_p)
+
+
+def _as_audio_buffer(samples, fmt: int):
+    """Returns (ctypes pointer, keep-alive object, number of samples) for numpy arrays or bytes."""
+    if _HAS_NUMPY and isinstance(samples, np.ndarray):
+        dtype = {LV_AUDIO_FORMAT_PCM16: np.int16, LV_AUDIO_FORMAT_F32: np.float32,
+                 LV_AUDIO_FORMAT_PCM24_PACKED: np.uint8}[fmt]
+        arr = np.ascontiguousarray(samples, dtype=dtype)
+        n = arr.size if fmt != LV_AUDIO_FORMAT_PCM24_PACKED else arr.size // 3
+        return arr.ctypes.data_as(ctypes.c_void_p), arr, n
+    raw = bytes(samples)
+    bps = {LV_AUDIO_FORMAT_PCM16: 2, LV_AUDIO_FORMAT_F32: 4, LV_AUDIO_FORMAT_PCM24_PACKED: 3}[fmt]
+    buf = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
+    return ctypes.cast(buf, ctypes.c_void_p), buf, len(raw) // bps
+
+
 def _find_library(explicit_path: Optional[str] = None) -> str:
     if explicit_path:
         return explicit_path
@@ -261,6 +321,36 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_receiver_set_volume.argtypes = [ctypes.c_void_p, ctypes.c_float]
     lib.lv_receiver_get_stream_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_StreamStats)]
     lib.lv_receiver_get_stream_stats.restype = ctypes.c_int
+
+    # ---- 64-channel AoIP bus ----
+    lib.lv_audio_bus_config_default.argtypes = [ctypes.POINTER(LV_AudioBusConfig)]
+    lib.lv_sender_configure_audio_bus.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_AudioBusConfig)]
+    lib.lv_sender_configure_audio_bus.restype = ctypes.c_int
+    lib.lv_sender_push_audio_channel.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint64,
+    ]
+    lib.lv_sender_push_audio_channel.restype = ctypes.c_int
+    lib.lv_sender_push_audio_multichannel.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int, ctypes.c_int,
+        ctypes.c_uint64,
+    ]
+    lib.lv_sender_push_audio_multichannel.restype = ctypes.c_int
+    lib.lv_sender_set_audio_latency_ms.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.lv_sender_set_audio_latency_ms.restype = ctypes.c_int
+    lib.lv_sender_get_master_clock_samples.argtypes = [ctypes.c_void_p]
+    lib.lv_sender_get_master_clock_samples.restype = ctypes.c_uint64
+    lib.lv_receiver_configure_audio_bus.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_AudioBusConfig)]
+    lib.lv_receiver_configure_audio_bus.restype = ctypes.c_int
+    lib.lv_receiver_set_audio_latency_ms.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.lv_receiver_set_audio_latency_ms.restype = ctypes.c_int
+    lib.lv_receiver_set_multichannel_audio_callback.argtypes = [ctypes.c_void_p, MC_AUDIO_CB_TYPE, ctypes.c_void_p]
+    lib.lv_receiver_set_multichannel_audio_callback.restype = ctypes.c_int
+    lib.lv_receiver_pop_audio_multichannel.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int,
+    ]
+    lib.lv_receiver_pop_audio_multichannel.restype = ctypes.c_int
+    lib.lv_receiver_get_channel_stats.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.POINTER(LV_AudioChannelStats)]
+    lib.lv_receiver_get_channel_stats.restype = ctypes.c_int
 
     lib.lv_discovery_scan_peers.argtypes = [
         ctypes.c_int, ctypes.c_uint16, ctypes.POINTER(LV_DiscoveredPeer), ctypes.c_int,
@@ -367,6 +457,47 @@ class LanVidSender:
         if rc != LV_OK:
             raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
 
+    # ---- 64-channel AoIP bus ----
+    def configure_audio_bus(self, latency_ms: int = 20, sample_rate: int = 48000) -> None:
+        """Call before start() to pick 48/96 kHz; latency may also be changed live."""
+        bus = LV_AudioBusConfig()
+        self._lib.lv_audio_bus_config_default(ctypes.byref(bus))
+        bus.latency_ms = int(latency_ms)
+        bus.sample_rate = int(sample_rate)
+        rc = self._lib.lv_sender_configure_audio_bus(self._handle, ctypes.byref(bus))
+        if rc != LV_OK:
+            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def push_audio_channel(self, channel: int, samples, fmt: int = LV_AUDIO_FORMAT_F32,
+                           media_ts: Optional[int] = None) -> None:
+        """Pushes one channel (0..63); `samples` is a 1-D numpy array or raw bytes."""
+        ptr, _keep, n = _as_audio_buffer(samples, fmt)
+        ts = LV_MEDIA_TS_AUTO if media_ts is None else int(media_ts)
+        rc = self._lib.lv_sender_push_audio_channel(self._handle, int(channel), ptr, n, fmt, ts)
+        if rc != LV_OK:
+            raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def push_audio_multichannel(self, frames, fmt: int = LV_AUDIO_FORMAT_F32,
+                                media_ts: Optional[int] = None) -> None:
+        """Pushes an interleaved `(num_samples, num_channels)` numpy array (all channels phase-locked)."""
+        if not (_HAS_NUMPY and isinstance(frames, np.ndarray) and frames.ndim == 2):
+            raise TypeError("push_audio_multichannel expects a 2-D numpy array (num_samples, num_channels)")
+        n, ch = frames.shape
+        ptr, _keep, _ = _as_audio_buffer(frames, fmt)
+        ts = LV_MEDIA_TS_AUTO if media_ts is None else int(media_ts)
+        rc = self._lib.lv_sender_push_audio_multichannel(self._handle, ptr, ch, n, fmt,
+                                                         LV_AUDIO_LAYOUT_INTERLEAVED, ts)
+        if rc != LV_OK:
+            raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def set_audio_latency_ms(self, latency_ms: int) -> None:
+        rc = self._lib.lv_sender_set_audio_latency_ms(self._handle, int(latency_ms))
+        if rc != LV_OK:
+            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def master_clock_samples(self) -> int:
+        return int(self._lib.lv_sender_get_master_clock_samples(self._handle))
+
     def set_quality(self, quality: int) -> None:
         self._lib.lv_sender_request_keyframe_quality(self._handle, int(quality))
 
@@ -466,6 +597,50 @@ class LanVidReceiver:
             return arr, w.value, h.value
         return bytes(self._poll_buf), w.value, h.value
 
+    # ---- 64-channel phase-coherent bus ----
+    def configure_audio_bus(self, latency_ms: int = 20, sample_rate: int = 48000,
+                            num_channels: int = 64, block_frames: int = 240) -> None:
+        bus = LV_AudioBusConfig(int(sample_rate), int(latency_ms), int(num_channels), int(block_frames))
+        rc = self._lib.lv_receiver_configure_audio_bus(self._handle, ctypes.byref(bus))
+        if rc != LV_OK:
+            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def set_audio_latency_ms(self, latency_ms: int) -> None:
+        """Live change 2..2000 ms without reconnecting."""
+        rc = self._lib.lv_receiver_set_audio_latency_ms(self._handle, int(latency_ms))
+        if rc != LV_OK:
+            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def pop_audio_multichannel(self, num_channels: int, num_frames: int):
+        """Returns a `(num_frames, num_channels)` float32 array (or list of floats without numpy)."""
+        buf = (ctypes.c_float * (int(num_channels) * int(num_frames)))()
+        rc = self._lib.lv_receiver_pop_audio_multichannel(self._handle, buf, int(num_channels),
+                                                          int(num_frames), LV_AUDIO_LAYOUT_INTERLEAVED)
+        if rc < 0:
+            raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
+        if _HAS_NUMPY:
+            return np.ctypeslib.as_array(buf).reshape((int(num_frames), int(num_channels))).copy()
+        return list(buf)
+
+    def on_multichannel_audio(self, callback: Callable[[object, int], None]) -> None:
+        """callback(frames, playout_position_samples); frames is (num_frames, num_channels) float32."""
+        def _trampoline(blk_ptr, _ud):
+            b = blk_ptr.contents
+            count = b.num_frames * b.num_channels
+            if _HAS_NUMPY:
+                arr = np.ctypeslib.as_array(b.data, shape=(count,)).reshape((b.num_frames, b.num_channels)).copy()
+            else:
+                arr = [b.data[i] for i in range(count)]
+            callback(arr, int(b.playout_position_samples))
+
+        self._mc_cb_ref = MC_AUDIO_CB_TYPE(_trampoline) if callback else MC_AUDIO_CB_TYPE(0)
+        self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, self._mc_cb_ref, None)
+
+    def channel_stats(self, channel: int) -> LV_AudioChannelStats:
+        st = LV_AudioChannelStats()
+        self._lib.lv_receiver_get_channel_stats(self._handle, int(channel), ctypes.byref(st))
+        return st
+
     def stats(self) -> LV_StreamStats:
         s = LV_StreamStats()
         self._lib.lv_receiver_get_stream_stats(self._handle, ctypes.byref(s))
@@ -478,6 +653,7 @@ class LanVidReceiver:
     def close(self) -> None:
         if self._handle:
             self._lib.lv_receiver_set_video_callback(self._handle, VIDEO_CB_TYPE(0), None)
+            self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, MC_AUDIO_CB_TYPE(0), None)
             self._lib.lv_receiver_destroy(self._handle)
             self._handle = None
 

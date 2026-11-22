@@ -28,6 +28,7 @@ typedef struct LvReceiverHandle LvReceiverHandle;
 /* ---- Zero-Copy Callback Prototypes ---- */
 typedef void (*LV_VideoFrameCallback)(const LV_VideoFrameView* frame, void* user_data);
 typedef void (*LV_AudioSamplesCallback)(const LV_AudioChunkView* audio, void* user_data);
+typedef void (*LV_MultichannelAudioCallback)(const LV_MultichannelAudioBlock* block, void* user_data);
 typedef void (*LV_StateChangedCallback)(int new_state, int error_code, const char* message,
                                         void* user_data);
 
@@ -81,6 +82,27 @@ LV_API int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, 
                                       int sample_rate, int channels, int audio_format,
                                       uint32_t timestamp_us);
 
+/* ---- 64-channel AoIP bus (additive; LV_SDK_ABI_VERSION unchanged) ---- */
+/* Fills defaults: 48 kHz, 20 ms, 64 channels, 240-frame blocks. */
+LV_API void lv_audio_bus_config_default(LV_AudioBusConfig* cfg);
+/* Must be called before lv_sdk_sender_start() (sample rate); latency can be changed any time. */
+LV_API int lv_sender_configure_audio_bus(LvSenderHandle* handle, const LV_AudioBusConfig* cfg);
+/* Independent push of ONE channel (0..63). media_timestamp_samples = master-clock position of the
+ * first sample, or LV_MEDIA_TS_AUTO. Any thread; each channel may be fed from its own thread. */
+LV_API int lv_sender_push_audio_channel(LvSenderHandle* handle, uint16_t channel_index,
+                                        const void* samples, uint32_t num_samples,
+                                        LV_AudioFormat format, uint64_t media_timestamp_samples);
+/* Pushes num_channels channels at once (ASIO / CoreAudio / JACK / DAW). For LV_AUDIO_LAYOUT_PLANAR
+ * `data` is an array of num_channels buffer pointers. All channels share one timestamp. */
+LV_API int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void* data,
+                                             uint16_t num_channels, uint32_t num_samples,
+                                             LV_AudioFormat format, LV_AudioLayout layout,
+                                             uint64_t media_timestamp_samples);
+/* Sender-side latency budget: selects chunk size, FEC and retransmission policy (2..2000 ms). */
+LV_API int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms);
+/* Current master-clock position in samples (use to timestamp pushes from a DAW callback). */
+LV_API uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle);
+
 /* Live runtime encoding & transport controls (lock-free / thread-safe): */
 LV_API int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality);
 LV_API int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps);
@@ -109,6 +131,23 @@ LV_API uint16_t lv_receiver_get_local_port(LvReceiverHandle* handle);
 
 /* Pulls stereo 48 kHz PCM16 frames from the lock-free audio jitter buffer (AAudio / AVAudioEngine). */
 LV_API int lv_receiver_pop_audio_pcm16(LvReceiverHandle* handle, int16_t* out_stereo, int num_frames);
+
+/* ---- 64-channel phase-coherent receiver bus ---- */
+LV_API int lv_receiver_configure_audio_bus(LvReceiverHandle* handle, const LV_AudioBusConfig* cfg);
+/* Dynamic playout latency 2..2000 ms, applied seamlessly while streaming. */
+LV_API int lv_receiver_set_audio_latency_ms(LvReceiverHandle* handle, uint32_t latency_ms);
+/* Registers a callback receiving synchronised blocks (paced internally every block_frames).
+ * While registered, lv_receiver_pop_audio_multichannel() returns LV_ERR_UNSUPPORTED. NULL clears. */
+LV_API int lv_receiver_set_multichannel_audio_callback(LvReceiverHandle* handle,
+                                                       LV_MultichannelAudioCallback cb,
+                                                       void* user_data);
+/* Pull mode for audio-device callbacks: renders num_frames sample-aligned float32 frames for
+ * channels [0, num_channels). Returns frames rendered (>= 0) or a negative LV_ErrorCode. */
+LV_API int lv_receiver_pop_audio_multichannel(LvReceiverHandle* handle, float* out,
+                                              uint16_t num_channels, uint32_t num_frames,
+                                              LV_AudioLayout layout);
+LV_API int lv_receiver_get_channel_stats(LvReceiverHandle* handle, uint16_t channel_index,
+                                         LV_AudioChannelStats* out);
 
 /* Optional polling helper for clients that prefer pull over video callbacks (e.g. Python/OpenGL loops). */
 LV_API int lv_receiver_get_latest_frame(LvReceiverHandle* handle, uint8_t* out_buf, size_t cap,

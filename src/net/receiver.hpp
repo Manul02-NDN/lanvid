@@ -7,7 +7,11 @@
 #include <functional>
 #include <string>
 
+#include "common/clock.hpp"
 #include "audio/audio_jitter_buffer.hpp"
+#include "audio/audio_rx.hpp"
+#include "audio/audio_sync_matrix.hpp"
+#include "audio/master_clock.hpp"
 #include "net/assembler.hpp"
 #include "net/udp_socket.hpp"
 #include "parallel/thread_pool.hpp"
@@ -26,6 +30,8 @@ struct ReceiverConfig {
     bool enable_feedback = true;
     uint64_t feedback_interval_us = 100000;  // 100 ms
     double audio_target_ms = 12.0;           // 10-15 ms jitter buffer target
+    uint32_t audio_sample_rate = 48000;      // 64-channel bus rate (48000 / 96000)
+    uint32_t audio_latency_ms = 20;          // 2..2000 ms multichannel playout latency
 };
 
 struct ClockSyncInfo {
@@ -67,6 +73,20 @@ public:
     AudioJitterBuffer& audio_buffer() { return audio_buf_; }
     AudioStats audio_stats() const { return audio_buf_.stats(); }
 
+    // ---- 64-channel phase-coherent audio bus ----
+    void set_audio_latency_ms(uint32_t ms) { arx_.set_latency_ms(ms); }
+    uint32_t audio_latency_ms() const { return arx_.latency_ms(); }
+    // Renders `frames` synchronised frames for channels [0, num_channels) (interleaved or planar).
+    void pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames) {
+        matrix_.pop_interleaved(mclock_, now_us(), out, num_channels, frames);
+    }
+    void pop_audio_multichannel_planar(float* const* out, uint32_t num_channels, uint32_t frames) {
+        matrix_.pop_planar(mclock_, now_us(), out, num_channels, frames);
+    }
+    AudioSyncMatrix& audio_matrix() { return matrix_; }
+    const MasterClock& master_clock() const { return mclock_; }
+    AudioChannelRxStats audio_channel_rx_stats(uint16_t ch) const { return arx_.channel_stats(ch); }
+
     void set_conceal_mode(ConcealMode m) { assembler_.set_conceal_mode(m); }
     ConcealMode conceal_mode() const { return assembler_.conceal_mode(); }
 
@@ -87,6 +107,9 @@ private:
     ThreadPool pool_;
     FrameAssembler assembler_;
     AudioJitterBuffer audio_buf_;
+    AudioSyncMatrix matrix_;
+    MasterClock mclock_;
+    AudioRxEngine arx_;
 
     Endpoint sender_ep_{};
     bool has_sender_ = false;

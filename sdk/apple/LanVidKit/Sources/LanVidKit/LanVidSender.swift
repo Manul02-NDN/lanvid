@@ -158,6 +158,54 @@ public final class LanVidSender {
         )
     }
 
+    // MARK: - 64-channel AoIP bus
+
+    /// Call before `start` to choose 48/96 kHz; the latency budget can also be changed live.
+    public func configureAudioBus(latencyMs: UInt32 = 20, sampleRate: Int32 = 48000) throws {
+        guard let h = handle else { return }
+        var bus = LV_AudioBusConfig()
+        lv_audio_bus_config_default(&bus)
+        bus.latency_ms = latencyMs
+        bus.sample_rate = sampleRate
+        let rc = lv_sender_configure_audio_bus(h, &bus)
+        if rc != LV_OK.rawValue {
+            throw LanVidError.coreError(code: rc, message: String(cString: lv_error_string(rc)))
+        }
+    }
+
+    /// Independent push of one channel (0..63). `mediaTimestamp == .max` continues the channel.
+    public func pushAudioChannel(_ channel: UInt16, samples: UnsafePointer<Float>, count: UInt32,
+                                 mediaTimestamp: UInt64 = .max) throws {
+        guard let h = handle else { return }
+        let rc = lv_sender_push_audio_channel(h, channel, samples, count, LV_AUDIO_FORMAT_F32, mediaTimestamp)
+        if rc != LV_OK.rawValue {
+            throw LanVidError.coreError(code: rc, message: String(cString: lv_error_string(rc)))
+        }
+    }
+
+    /// Interleaved Float32 push of `channels` channels sharing one master-clock timestamp
+    /// (CoreAudio / AVAudioEngine tap).
+    public func pushAudioMultichannel(interleaved: UnsafePointer<Float>, channels: UInt16, frames: UInt32,
+                                      mediaTimestamp: UInt64 = .max) throws {
+        guard let h = handle else { return }
+        let rc = lv_sender_push_audio_multichannel(h, interleaved, channels, frames, LV_AUDIO_FORMAT_F32,
+                                                   LV_AUDIO_LAYOUT_INTERLEAVED, mediaTimestamp)
+        if rc != LV_OK.rawValue {
+            throw LanVidError.coreError(code: rc, message: String(cString: lv_error_string(rc)))
+        }
+    }
+
+    /// 2 ms (ultra-low latency) ... 2000 ms (bulletproof): selects chunking, FEC and NACK policy.
+    public func setAudioLatencyMs(_ ms: UInt32) {
+        guard let h = handle else { return }
+        _ = lv_sender_set_audio_latency_ms(h, ms)
+    }
+
+    public var masterClockSamples: UInt64 {
+        guard let h = handle else { return 0 }
+        return lv_sender_get_master_clock_samples(h)
+    }
+
     public func requestQuality(_ quality: Int32) {
         guard let h = handle else { return }
         _ = lv_sender_request_keyframe_quality(h, quality)

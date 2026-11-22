@@ -54,6 +54,22 @@ class LanVidSender : Closeable {
         return NativeBridge.senderPushAudioPcm16(handle, pcm, numFrames, sampleRate, channels) == 0
     }
 
+    // ---- 64-channel AoIP bus ----
+    /** Call before start() to choose 48/96 kHz; [latencyMs] 2..2000 may also be changed live. */
+    fun configureAudioBus(latencyMs: Int = 20, sampleRate: Int = 48000): Boolean =
+        handle != 0L && NativeBridge.senderConfigureAudioBus(handle, sampleRate, latencyMs) == 0
+
+    /** Independent push of one channel (0..63); [mediaTs] = -1 continues the channel automatically. */
+    fun pushAudioChannel(channel: Int, samples: FloatArray, count: Int = samples.size, mediaTs: Long = -1L): Boolean =
+        handle != 0L && NativeBridge.senderPushAudioChannelF32(handle, channel, samples, count, mediaTs) == 0
+
+    /** Interleaved Float32 push of [channels] channels sharing one master-clock timestamp. */
+    fun pushAudioMultichannel(interleaved: FloatArray, channels: Int, frames: Int, mediaTs: Long = -1L): Boolean =
+        handle != 0L && NativeBridge.senderPushAudioMultichannelF32(handle, interleaved, channels, frames, mediaTs) == 0
+
+    fun setAudioLatencyMs(latencyMs: Int) { if (handle != 0L) NativeBridge.senderSetAudioLatency(handle, latencyMs) }
+    fun masterClockSamples(): Long = if (handle != 0L) NativeBridge.senderMasterClockSamples(handle) else 0L
+
     fun setQuality(quality: Int) { if (handle != 0L) NativeBridge.senderSetQuality(handle, quality) }
     fun setBitrateKbps(bitrateKbps: Int) { if (handle != 0L) NativeBridge.senderSetBitrate(handle, bitrateKbps) }
     fun forceKeyframe() { if (handle != 0L) NativeBridge.senderForceKeyframe(handle) }

@@ -3,6 +3,8 @@
 // Audio:   none | loopback (WASAPI system audio) | mic (WASAPI microphone)
 
 #include <algorithm>
+#include <thread>
+#include <cmath>
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -40,7 +42,11 @@ void print_usage(const char* prog) {
         "  --monitor <idx>          Monitor index for --source screen (default: 0)\n"
         "  --capture-backend <name> auto | dxgi | gdi for screen capture (default: auto)\n"
         "  --device <idx>           Camera index for --source camera (default: 0)\n"
-        "  --audio <mode>           none | loopback | mic (default: none)\n"
+        "  --audio <mode>           none | loopback | mic | tone (default: none)\n"
+        "                           tone = N-channel test bus (see --audio-channels)\n"
+        "  --audio-channels <1..64> Channels of the 64-ch AoIP bus for --audio tone (default: 2)\n"
+        "  --audio-latency <2..2000> Latency budget in ms: picks chunk size / FEC / NACK profile (default: 20)\n"
+        "  --audio-rate <48000|96000> Sample rate of the AoIP bus (default: 48000)\n"
         "  --audio-device <idx>     Audio endpoint index, -1=system default (default: -1)\n"
         "  --audio-ms <2.5|5>       Audio packet duration in ms (default: 5)\n"
         "  --list-devices           List monitors, cameras, and audio devices and exit\n"
@@ -130,6 +136,10 @@ int main(int argc, char** argv) {
     lv::AudioCaptureMode audio_mode = lv::AudioCaptureMode::kNone;
     int audio_device_idx = -1;
     double audio_chunk_ms = 5.0;
+    bool audio_tone = false;
+    int audio_channels = 2;
+    int audio_latency_ms = 20;
+    int audio_rate = 48000;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -187,13 +197,17 @@ int main(int argc, char** argv) {
         else if (arg == "--audio-ms") audio_chunk_ms = std::atof(need_val("--audio-ms"));
         else if (arg == "--input") { input_path = need_val("--input"); src_kind = SourceKind::kFile; }
         else if (arg == "--input-fmt") input_rgba = (std::string(need_val("--input-fmt")) == "rgba");
+        else if (arg == "--audio-channels") audio_channels = std::atoi(need_val("--audio-channels"));
+        else if (arg == "--audio-latency") audio_latency_ms = std::atoi(need_val("--audio-latency"));
+        else if (arg == "--audio-rate") audio_rate = std::atoi(need_val("--audio-rate"));
         else if (arg == "--audio") {
             const std::string a = need_val("--audio");
             if (a == "none") audio_mode = lv::AudioCaptureMode::kNone;
+            else if (a == "tone") audio_tone = true;
             else if (a == "loopback") audio_mode = lv::AudioCaptureMode::kLoopback;
             else if (a == "mic") audio_mode = lv::AudioCaptureMode::kMic;
             else {
-                std::fprintf(stderr, "Invalid --audio: %s (expected none|loopback|mic)\n", a.c_str());
+                std::fprintf(stderr, "Invalid --audio: %s (expected none|loopback|mic|tone)\n", a.c_str());
                 return 2;
             }
         } else if (arg == "--source") {
@@ -281,6 +295,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (audio_channels < 1 || audio_channels > 64 || audio_latency_ms < 2 || audio_latency_ms > 2000 ||
+        (audio_rate != 48000 && audio_rate != 96000)) {
+        std::fprintf(stderr, "Invalid audio bus options: --audio-channels 1..64, --audio-latency 2..2000, --audio-rate 48000|96000\n");
+        return 2;
+    }
+    scfg.audio_sample_rate = uint32_t(audio_rate);
+    scfg.audio_latency_ms = uint32_t(audio_latency_ms);
     scfg.fps = fps;
     scfg.adaptive.initial_bitrate_kbps = scfg.bitrate_kbps;
     if (scfg.adaptive.enabled) {
@@ -319,6 +340,41 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Warning: failed to start audio capture (mode=%d); continuing video-only.\n",
                          int(audio_mode));
         }
+    }
+
+    // 64-channel AoIP test bus: one distinct sine per channel, all channels share one timestamp.
+    std::thread tone_thread;
+    if (audio_tone) {
+        const lv::AudioReliabilityProfile prof = sender.audio2_profile();
+        audio_desc = "tone x" + std::to_string(audio_channels) + " @" + std::to_string(audio_rate) + " Hz, " +
+                     std::to_string(audio_latency_ms) + " ms [" + lv::audio_mode_name(prof.mode) +
+                     ", chunk=" + std::to_string(prof.chunk_samples) + ", FEC " + std::to_string(prof.fec_k) +
+                     "+1 x" + std::to_string(prof.fec_interleave) + ", NACK x" +
+                     std::to_string(prof.nack_attempts) + "]";
+        tone_thread = std::thread([&]() {
+            const uint32_t blk = std::max<uint32_t>(prof.chunk_samples, uint32_t(audio_rate / 200));  // >= 5 ms
+            std::vector<std::vector<int16_t>> bufs(static_cast<size_t>(audio_channels));
+            for (auto& b : bufs) b.assign(blk, 0);
+            std::vector<double> phase(static_cast<size_t>(audio_channels), 0.0);
+            const uint64_t period_us = uint64_t(blk) * 1000000ull / uint64_t(audio_rate);
+            uint64_t next = lv::now_us() + period_us;
+            while (!g_stop.load(std::memory_order_relaxed)) {
+                lv::sleep_until_us(next, [] {});
+                next += period_us;
+                const uint64_t ts = sender.next_auto_media_ts(blk);
+                for (int c = 0; c < audio_channels; ++c) {
+                    const double w = 6.283185307179586 * (110.0 * (c + 1)) / double(audio_rate);
+                    for (uint32_t i = 0; i < blk; ++i) {
+                        bufs[size_t(c)][i] = int16_t(std::sin(phase[size_t(c)]) * 6000.0);
+                        phase[size_t(c)] += w;
+                    }
+                    phase[size_t(c)] = std::fmod(phase[size_t(c)], 6.283185307179586);
+                    sender.push_audio_channel(uint16_t(c), bufs[size_t(c)].data(), blk,
+                                              lv::AudioFormat2::kPcm16, ts);
+                }
+                sender.set_next_auto_media_ts(ts + blk);
+            }
+        });
     }
 
     std::signal(SIGINT, on_signal);
@@ -456,6 +512,17 @@ int main(int argc, char** argv) {
     }
 
     audio_cap.stop();
+    if (tone_thread.joinable()) {
+        g_stop.store(true, std::memory_order_relaxed);
+        tone_thread.join();
+    }
+    if (audio_tone) {
+        const auto a2 = sender.audio2_stats();
+        std::printf("[AUDIO64] mode=%s pkts=%llu parity=%llu retransmits=%llu nacks=%llu dup=%llu streams=%u\n",
+                    lv::audio_mode_name(a2.mode), (unsigned long long)a2.packets_sent,
+                    (unsigned long long)a2.parity_sent, (unsigned long long)a2.retransmits,
+                    (unsigned long long)a2.nacks_received, (unsigned long long)a2.duplicates, a2.active_streams);
+    }
     const auto st = sender.stats();
     const double tot_s = std::max(1e-6, double(lv::now_us() - t_start) / 1e6);
     std::printf(

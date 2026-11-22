@@ -16,7 +16,7 @@ Ultra-low-latency intra-only LAN video + audio streaming protocol and slice-para
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
 | 0 | 2 | `magic` | `0x4C 0x56` (`"LV"`) |
-| 2 | 1 | `ver_type` | high nibble `version=1`, low nibble `type`: `1=VIDEO_SLICE, 2=PING, 3=AUDIO, 4=FEEDBACK, 5=PONG` |
+| 2 | 1 | `ver_type` | high nibble `version=1`, low nibble `type`: `1=VIDEO_SLICE, 2=PING, 3=AUDIO, 4=FEEDBACK, 5=PONG, 6=AUDIO2, 7=AUDIO_NACK` |
 | 3 | 1 | `flags` | bit0 `HAS_CRC` (`0x01`), bit1 `LAST_FRAG` (`0x02`), bit2 `LAST_SLICE_OF_FRAME` (`0x04`), bit3 `FEC_PARITY` (`0x08`), bit4 `KEYFRAME` (`0x10`, IDR), bit5 `CODEC_CONFIG` (`0x20`, SPS/PPS/VPS present), bits 6–7 `codec_id` (`0xC0`: `0=LANVID_DCT`, `1=H264`, `2=H265`) |
 | 4 | 4 | `frame_id` | u32 monotonic video `frame_id` or `audio_seq_id` (RFC 1982 wrap comparison) |
 | 8 | 4 | `timestamp_us` | u32 shared monotonic clock (`steady_clock`/QPC) for A/V sync & E2E latency |
@@ -70,6 +70,59 @@ Each chunk is 2.5 ms (120 frames = 480 B) or 5 ms (240 frames = 960 B) at 48 kHz
   - **Android:** NDK `AMediaCodec` (`video/avc`, `video/hevc`, `KEY_LOW_LATENCY=1`).
   - **Linux:** Optional FFmpeg `libavcodec` (`h264_nvenc` / `hevc_nvenc` / `h264_vaapi` / `hevc_vaapi` -> `libx264` / `libx265` `ultrafast`/`zerolatency`).
 
+### 7. 64-Channel AoIP Audio v2 (`type=AUDIO2 (6)`, `type=AUDIO_NACK (7)`)
+Independent per-channel streams (up to 64) aligned to one **Master Clock** for sample-accurate,
+comb-filter-free playout. The legacy stereo `AUDIO (3)` path is unchanged and still supported.
+
+**LVSP header usage:** `frame_id` = per-stream packet sequence (u32, RFC 1982), `slice_id` = `stream_id`,
+`timestamp_us` = sender wallclock.
+
+**`AudioHeader2` — 24 bytes** (the requested fields sum to 24, not 16):
+
+| Offset | Size | Field | Notes |
+|---:|---:|---|---|
+| 0 | 2 | `stream_id` | 0..63 independent transport stream (own seq / FEC / NACK state) |
+| 2 | 2 | `channel_index` | 0..63 destination slot on the receiver's 64-channel bus |
+| 4 | 4 | `sample_rate` | 48000 / 96000 |
+| 8 | 2 | `num_samples` | samples of this single channel in the packet |
+| 10 | 1 | `sample_format` | `1=PCM16`, `2=PCM24_PACKED`, `3=F32` (C ABI `LV_AudioFormat` keeps `PCM16=0, F32=1, PCM24=2`) |
+| 11 | 1 | `flags` | `0x01 FEC_PARITY`, `0x02 RETRANSMIT`, `0x04 DUPLICATE` |
+| 12 | 8 | `media_timestamp_samples` | master-clock sample position of the first sample |
+| 20 | 4 | `wallclock_us` | sender steady clock at transmit (jitter / RTT) |
+
+Data packets carry `num_samples * bytes_per_sample` bytes after the header.
+**Parity packets** (`FEC_PARITY`) carry a 4-byte `AudioFecInfo` (`group_size k`, `interleave d`, `u16 reserved`)
+plus the XOR of the members' sample bytes. Members are `seq = frame_id + j*d`, `j = 0..k-1`; `media_timestamp_samples`
+is the first member's position, so a single missing member is rebuilt bit-exactly with its exact timestamp.
+
+**`AUDIO_NACK` payload — 16 bytes:** `stream_id u16 | reserved u16 | base_seq u32 | mask u64` (bit `i` set ⇒
+`base_seq + i` missing). The sender answers from a per-stream history ring with `RETRANSMIT` set.
+
+**Master Clock (extended PONG):** the sender's master timeline is `master_us = steady_us - epoch`. PONG carries a
+16-byte tail after the 12-byte `PingPongPayload`: `t2_master_us u64 | t3_master_us u64`. The receiver computes
+`θ = ((t2−t1)+(t3−t4))/2`, `δ = (t4−t1)−(t3−t2)`, keeps only exchanges within 150 µs (or 25 %) of the 64-sample
+minimum RTT, and runs a 2-state Kalman filter (offset + skew) with noise proportional to the excess delay.
+Old receivers ignore the tail; old senders simply don't send it (the receiver then free-runs on newest arrivals).
+
+**Phase-coherent playout (`AudioSyncMatrix`):** 64 lock-free sample-addressed float32 rings (2.5 s each;
+allocated per active channel; ~33 MB float + 17 MB tags at 64 ch / 48 kHz). All channels are rendered from one
+cursor `T_playout = T_master_now − TargetLatencySamples`, so different network paths cannot skew channels.
+Clock drift between master and the local audio device is absorbed by a single shared ±100 ppm 4-point Hermite
+micro-resampler (exact copy when the phase error is within the 1.5-sample deadband). Latency changes are applied
+live with a 96-sample crossfade.
+
+**Reliability profiles (`target_latency_ms` 2..2000):**
+
+| Latency | Mode | Chunk | XOR FEC | ARQ |
+|---|---|---|---|---|
+| 2 – 10 ms | Ultra-Low | 0.5 ms (≤ 4 ms) / 1 ms | 1+1 or 2+1 | none |
+| 10 – 100 ms | Balanced / Live | 2.5 ms (≤ 40 ms) / 5 ms | up to 4+1 | 1 fast NACK |
+| 100 – 2000 ms | High-Reliability | 10 ms (≤ 500 ms) / 20 ms | up to 4+1, interleave ≤ 4 | 5..12 NACK rounds + duplication when NACK rate > 5 % |
+
+Rules: an FEC group never spans more than `latency/3`; chunks are clamped so packet + header stay within the MTU
+(e.g. 20 ms PCM16 at 48 kHz → 672 samples = 14 ms per packet at MTU 1400); NACK first wait = `clamp(latency·0.1, 2, 100) ms`,
+retry spacing = `latency·0.6 / attempts`; a hole is abandoned once its samples have passed the playout cursor.
+
 ## Platform Backends & Build
 
 | Feature | Windows | Linux | macOS |
@@ -84,7 +137,7 @@ Each chunk is 2.5 ms (120 frames = 480 B) or 5 ms (240 frames = 960 B) at 48 kHz
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Unit tests (27 tests: DCT/AVX2 4K parity, FEC, AIMD, Audio jitter buffer, Y4M/PPM, A/V loopback)
+# Unit tests (41 tests: DCT/AVX2 4K parity, FEC, AIMD, audio jitter buffer, 64-ch AoIP sync/reliability, Y4M/PPM, A/V loopback)
 ./build/lanvid_tests
 
 # Benchmark 1080p & 4K60 (scalar vs AVX2/NEON)
@@ -97,6 +150,12 @@ cmake --build build
 # Linux / macOS streaming from Y4M / PPM / pattern
 ./build/receiver --port 5000 --preview
 ./build/sender --source file --input sample.y4m --host 127.0.0.1 --port 5000
+```
+
+```bash
+# 64-channel AoIP test bus (N sine tones), 40 ms budget, receiver prints per-second bus telemetry
+./build/receiver --port 5000 --audio-channels 64 --audio-latency 40
+./build/sender --host 127.0.0.1 --port 5000 --audio tone --audio-channels 64 --audio-latency 40
 ```
 
 ### Preview Window Hotkeys (`receiver --preview`)

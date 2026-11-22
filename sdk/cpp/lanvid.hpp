@@ -163,6 +163,31 @@ public:
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
     }
 
+    // ---- 64-channel AoIP bus ----
+    Result<void> configure_audio_bus(const LV_AudioBusConfig& bus) {
+        const int rc = lv_sender_configure_audio_bus(handle_, &bus);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    Result<void> push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
+                                    LV_AudioFormat fmt = LV_AUDIO_FORMAT_F32,
+                                    uint64_t media_ts = LV_MEDIA_TS_AUTO) {
+        const int rc = lv_sender_push_audio_channel(handle_, channel, samples, num_samples, fmt, media_ts);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    Result<void> push_audio_multichannel(const void* data, uint16_t num_channels, uint32_t num_samples,
+                                         LV_AudioFormat fmt = LV_AUDIO_FORMAT_F32,
+                                         LV_AudioLayout layout = LV_AUDIO_LAYOUT_INTERLEAVED,
+                                         uint64_t media_ts = LV_MEDIA_TS_AUTO) {
+        const int rc = lv_sender_push_audio_multichannel(handle_, data, num_channels, num_samples, fmt,
+                                                         layout, media_ts);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    Result<void> set_audio_latency_ms(uint32_t ms) {
+        const int rc = lv_sender_set_audio_latency_ms(handle_, ms);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    uint64_t master_clock_samples() const { return lv_sender_get_master_clock_samples(handle_); }
+
     Result<void> set_quality(int quality) {
         const int rc = lv_sender_request_keyframe_quality(handle_, quality);
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
@@ -256,6 +281,31 @@ public:
     int pop_audio_pcm16(int16_t* stereo_out, int num_frames) {
         return lv_receiver_pop_audio_pcm16(handle_, stereo_out, num_frames);
     }
+
+    // ---- 64-channel phase-coherent bus ----
+    using MultichannelCallback = std::function<void(const LV_MultichannelAudioBlock&)>;
+    Result<void> configure_audio_bus(const LV_AudioBusConfig& bus) {
+        const int rc = lv_receiver_configure_audio_bus(handle_, &bus);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    Result<void> set_audio_latency_ms(uint32_t ms) {
+        const int rc = lv_receiver_set_audio_latency_ms(handle_, ms);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    void on_multichannel_audio(MultichannelCallback cb) {
+        mc_cb_ = std::move(cb);
+        lv_receiver_set_multichannel_audio_callback(handle_, mc_cb_ ? &Receiver::mc_trampoline : nullptr, this);
+    }
+    // Returns frames rendered (>= 0) or a negative LV_ErrorCode.
+    int pop_audio_multichannel(float* out, uint16_t num_channels, uint32_t num_frames,
+                               LV_AudioLayout layout = LV_AUDIO_LAYOUT_INTERLEAVED) {
+        return lv_receiver_pop_audio_multichannel(handle_, out, num_channels, num_frames, layout);
+    }
+    LV_AudioChannelStats channel_stats(uint16_t channel) const {
+        LV_AudioChannelStats st{};
+        lv_receiver_get_channel_stats(handle_, channel, &st);
+        return st;
+    }
     LV_StreamStats stats() const {
         LV_StreamStats s{};
         lv_receiver_get_stream_stats(handle_, &s);
@@ -271,6 +321,10 @@ private:
         auto* self = static_cast<Receiver*>(ud);
         if (self->audio_cb_ && a) self->audio_cb_(*a);
     }
+    static void mc_trampoline(const LV_MultichannelAudioBlock* b, void* ud) {
+        auto* self = static_cast<Receiver*>(ud);
+        if (self->mc_cb_ && b) self->mc_cb_(*b);
+    }
     static void state_trampoline(int st, int err, const char* msg, void* ud) {
         auto* self = static_cast<Receiver*>(ud);
         if (self->state_cb_) self->state_cb_(LV_StreamState(st), LV_ErrorCode(err), msg ? msg : "");
@@ -280,6 +334,7 @@ private:
     VideoCallback video_cb_;
     AudioCallback audio_cb_;
     StateCallback state_cb_;
+    MultichannelCallback mc_cb_;
 };
 
 }  // namespace lanvid

@@ -66,6 +66,10 @@ set(LV_CORE_SOURCES
   src/codec/video_codec_common.cpp
   src/parallel/thread_pool.cpp
   src/audio/audio_jitter_buffer.cpp
+  src/audio/master_clock.cpp
+  src/audio/audio_sync_matrix.cpp
+  src/audio/audio_tx.cpp
+  src/audio/audio_rx.cpp
   src/net/packet.cpp
   src/net/packetizer.cpp
   src/net/assembler.cpp
@@ -315,6 +319,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_assembler.cpp
     tests/test_fec.cpp
     tests/test_audio.cpp
+    tests/test_audio_64ch.cpp
     tests/test_c_api.cpp
     tests/test_video_codecs.cpp
   )

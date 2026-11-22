@@ -25,8 +25,54 @@ typedef enum LV_PixelFormat {
 /* ---- Audio Sample Formats ---- */
 typedef enum LV_AudioFormat {
     LV_AUDIO_FORMAT_PCM16 = 0, /* Interleaved signed 16-bit little-endian PCM */
-    LV_AUDIO_FORMAT_F32   = 1  /* Interleaved 32-bit IEEE float [-1.0, 1.0] */
+    LV_AUDIO_FORMAT_F32   = 1, /* Interleaved 32-bit IEEE float [-1.0, 1.0] */
+    LV_AUDIO_FORMAT_PCM24_PACKED = 2 /* 3 bytes / sample, little-endian signed (64-channel bus only) */
 } LV_AudioFormat;
+
+/* ---- 64-channel audio bus (LVSP audio v2) ---- */
+#define LV_AUDIO_MAX_CHANNELS 64
+#define LV_AUDIO_LATENCY_MIN_MS 2
+#define LV_AUDIO_LATENCY_MAX_MS 2000
+#define LV_MEDIA_TS_AUTO UINT64_MAX /* sender continues the channel / anchors to the master clock */
+
+typedef enum LV_AudioLayout {
+    LV_AUDIO_LAYOUT_INTERLEAVED = 0, /* data[frame * channels + ch] */
+    LV_AUDIO_LAYOUT_PLANAR      = 1  /* data is `const void* const[channels]`, one buffer per channel */
+} LV_AudioLayout;
+
+/* Optional bus configuration; call BEFORE start (rate) - latency may also be changed live. */
+typedef struct LV_AudioBusConfig {
+    int32_t sample_rate;       /* 48000 (default) or 96000 */
+    uint32_t latency_ms;       /* 2..2000 (default 20) */
+    int32_t num_channels;      /* receiver: channels delivered by callback/pop (1..64, default 64) */
+    uint32_t block_frames;     /* receiver callback block size in frames (default 240 = 5 ms @ 48k) */
+} LV_AudioBusConfig;
+
+/* Synchronised multichannel block delivered by the receiver callback (interleaved float32). */
+typedef struct LV_MultichannelAudioBlock {
+    const float* data;         /* num_frames * num_channels samples, valid during the callback only */
+    int32_t num_channels;
+    int32_t num_frames;
+    int32_t sample_rate;
+    uint32_t reserved;
+    uint64_t playout_position_samples; /* master-clock position of the first frame */
+    uint64_t block_index;
+} LV_MultichannelAudioBlock;
+
+/* Per-channel receiver telemetry (index 0..63). */
+typedef struct LV_AudioChannelStats {
+    uint64_t packets_rx;
+    uint64_t packets_lost;      /* never recovered */
+    uint64_t fec_recovered;
+    uint64_t nack_recovered;
+    uint64_t nacks_sent;
+    uint64_t underruns;
+    uint64_t late_packets;
+    float level_dbfs;           /* peak with release, -120 = silence */
+    int32_t active;             /* data received within the last second */
+    uint32_t jitter_us;
+    uint32_t reserved;
+} LV_AudioChannelStats;
 
 /* ---- SDK Error Codes ---- */
 typedef enum LV_ErrorCode {

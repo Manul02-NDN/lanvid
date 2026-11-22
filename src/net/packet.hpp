@@ -23,6 +23,8 @@ enum class PacketType : uint8_t {
     kFeedback = 0x4,
     kRxReport = 0x4,  // alias
     kPong = 0x5,
+    kAudio2 = 0x6,     // AudioHeader v2: independent per-channel stream (up to 64), media-clock timestamps
+    kAudioNack = 0x7,  // Receiver -> Sender selective retransmission request (bitmask of missing seq)
 };
 
 enum class VideoCodecId : uint8_t {
@@ -120,6 +122,77 @@ inline size_t audio_bytes_per_sample(AudioSampleFormat fmt) {
 
 void write_audio_header(uint8_t* out, const AudioHeader& a);
 bool parse_audio_header(const uint8_t* in, size_t len, AudioHeader& a);
+
+// ---------------------------------------------------------------------------------------------
+// LVSP audio v2 (PacketType::kAudio2): 64-channel AoIP, master-clock aligned.
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kAudioHeader2Size = 24;
+constexpr size_t kAudioFecInfoSize = 4;
+constexpr size_t kAudioNackSize = 16;
+constexpr uint16_t kMaxAudioChannels = 64;
+
+// NOTE: the wire values differ from the C ABI LV_AudioFormat (PCM16=0, F32=1): PCM16=1, PCM24=2, F32=3.
+enum class AudioFormat2 : uint8_t {
+    kPcm16 = 1,
+    kPcm24Packed = 2,  // 3 bytes / sample, little-endian signed
+    kFloat32 = 3,
+};
+
+enum AudioFlags2 : uint8_t {
+    kAudioFlagFecParity = 0x01,   // payload = AudioFecInfo + XOR of the member payloads
+    kAudioFlagRetransmit = 0x02,  // answer to a kAudioNack
+    kAudioFlagDuplicate = 0x04,   // proactive duplicate (loss > 5% in high-reliability mode)
+};
+
+inline size_t audio2_bytes_per_sample(AudioFormat2 f) {
+    return f == AudioFormat2::kPcm16 ? 2 : (f == AudioFormat2::kPcm24Packed ? 3 : 4);
+}
+
+// 24-byte header (the requested fields sum to 24 bytes, not 16). Little-endian:
+//  0 stream_id u16 | 2 channel_index u16 | 4 sample_rate u32 | 8 num_samples u16 |
+// 10 sample_format u8 | 11 flags u8 | 12 media_timestamp_samples u64 | 20 wallclock_us u32
+// PacketHeader.frame_id carries the per-stream packet sequence number (RFC 1982 wrap rules).
+struct AudioHeader2 {
+    uint16_t stream_id = 0;       // 0..63 independent transport stream (own seq/FEC/NACK state)
+    uint16_t channel_index = 0;   // 0..63 destination slot in the receiver's 64-channel bus
+    uint32_t sample_rate = 48000; // 48000 / 96000
+    uint16_t num_samples = 0;     // samples of this one channel in this packet
+    AudioFormat2 sample_format = AudioFormat2::kPcm16;
+    uint8_t flags = 0;
+    uint64_t media_timestamp_samples = 0;  // master-clock position of the first sample
+    uint32_t wallclock_us = 0;             // sender steady clock at transmit (jitter / RTT)
+};
+
+void write_audio_header2(uint8_t* out, const AudioHeader2& a);
+// Validates ranges and that `len` covers the header (+ payload for data packets).
+bool parse_audio_header2(const uint8_t* in, size_t len, AudioHeader2& a);
+
+// Parity packets: AudioHeader2 (FEC flag, media ts of first member) + 4-byte info + XOR bytes.
+// Members are seq = first_seq + j * interleave, j = 0..k-1 (PacketHeader.frame_id = first_seq).
+struct AudioFecInfo {
+    uint8_t group_size = 1;  // k data packets protected by this parity
+    uint8_t interleave = 1;  // stride between members (burst protection)
+    uint16_t reserved = 0;
+};
+void write_audio_fec_info(uint8_t* out, const AudioFecInfo& f);
+bool parse_audio_fec_info(const uint8_t* in, size_t len, AudioFecInfo& f);
+
+// kAudioNack payload (16 bytes): stream_id u16 | reserved u16 | base_seq u32 | mask u64
+// (bit i set => packet base_seq + i is missing).
+struct AudioNack {
+    uint16_t stream_id = 0;
+    uint32_t base_seq = 0;
+    uint64_t mask = 0;
+};
+void write_audio_nack(uint8_t* out, const AudioNack& n);
+bool parse_audio_nack(const uint8_t* in, size_t len, AudioNack& n);
+
+// Extended PONG tail (16 bytes, optional after the 12-byte PingPongPayload): sender master clock.
+// t2/t3 are the sender's *master clock* microseconds (64-bit, since the sender's epoch).
+constexpr size_t kPongMasterTailSize = 16;
+void write_pong_master_tail(uint8_t* out, uint64_t t2_master_us, uint64_t t3_master_us);
+bool parse_pong_master_tail(const uint8_t* in, size_t len, uint64_t& t2_master_us,
+                            uint64_t& t3_master_us);
 
 // PING / PONG control payloads (12 bytes: t1, t2, t3 in microseconds).
 struct PingPongPayload {

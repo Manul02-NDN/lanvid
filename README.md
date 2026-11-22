@@ -20,6 +20,7 @@ LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network 
     - **Android:** NDK **AMediaCodec** (`KEY_LOW_LATENCY`, `KEY_MAX_B_FRAMES = 0`).
     - **Linux:** VAAPI (`h264_vaapi` / `hevc_vaapi`) / NVENC / `libx264` / `libx265` zero-latency via `dlopen` FFmpeg (`libavcodec`).
 - **Resilient UDP Transport (`LVSP v1`):** Raw MTU-safe UDP datagrams (`<= 1400 B`), hardware-accelerated CRC32C, **slice-level XOR FEC** (instant single-packet recovery with zero NACK round-trips), **PLI/IDR** fast recovery for inter-frame codecs, and **AIMD Adaptive Quality / Bitrate** driven by 100 ms receiver telemetry feedback.
+- **64-Channel AoIP Bus (Dante / AES67-style):** up to 64 independent per-channel streams (PCM16 / PCM24 / F32, 48 / 96 kHz) on LVSP audio v2, a PTP-style Master Clock (min-RTT gated Kalman filter over PING/PONG), sample-accurate phase-coherent playout across all channels (`T_playout = T_master − latency`), shared ±100 ppm Hermite drift resampler, and a latency-scaled reliability ladder from **2 ms** (0.5 ms chunks, 1+1/2+1 XOR FEC) to **2000 ms** (interleaved FEC + multi-round NACK + duplication) — see [docs/PROTOCOL.md §7](docs/PROTOCOL.md).
 - **Synchronized Low-Latency Audio + LAN Auto-Discovery:** 48 kHz Stereo `PCM16` / `Float32` in 2.5 ms or 5 ms UDP packets over the same socket, lock-free SPSC jitter buffer (~12 ms target) with adaptive 1-sample clock-drift compensation, WASAPI Loopback/Mic (Windows), native AAudio (Android), `AVAudioEngine` (Apple), and UDP broadcast LAN peer discovery (port `5099`).
 - **Hardware-Accelerated Preview & Desktop/Mobile Apps:**
   - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux, with live codec selector (`LanVid DCT` / `H.264` / `H.265`), bitrate slider, and hardware badge telemetry.
@@ -44,7 +45,7 @@ LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network 
 | **1080p (`1920×1080`, Q=75, AVX2)** | **0.22 ms** (0.26) | **0.18 ms** (0.20) | **4,471 FPS** | **1.76 ms p50 / 2.08 ms p99** |
 | **4K UHD (`3840×2160`, Q=75, AVX2)** | **0.87 ms** (0.99) | **0.80 ms** (0.86) | **1,147 FPS** | **3.45 ms p50 / 3.98–4.84 ms p99** (with D3D11 Preview + XOR FEC) |
 
-*Unit test suite: **35 / 35 passing** (including 4K AVX2 vs Scalar PSNR parity `ΔY = 0.03 dB`, XOR FEC single/double loss, AIMD feedback, lock-free audio drift, zero-copy SDK callbacks, UDP loopback A/V + LAN discovery, H.264 zero-latency roundtrip + PLI/IDR recovery, H.265 Annex-B VPS/SPS/PPS+IDR verification, and SDK H.264 auto-detect loopback).*
+*Unit test suite: **41 / 41 passing** (including 64-channel AoIP phase sync to 0 samples across 1–40 ms paths, 100 % recovery at 1000 ms under 15 % loss + 300 ms spike, live 2→500→5 ms latency switching, 4K AVX2 vs Scalar PSNR parity `ΔY = 0.03 dB`, XOR FEC single/double loss, AIMD feedback, lock-free audio drift, zero-copy SDK callbacks, UDP loopback A/V + LAN discovery, H.264 zero-latency roundtrip + PLI/IDR recovery, H.265 Annex-B VPS/SPS/PPS+IDR verification, and SDK H.264 auto-detect loopback).*
 
 ---
 

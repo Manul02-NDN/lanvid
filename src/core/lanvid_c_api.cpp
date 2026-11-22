@@ -113,6 +113,7 @@ struct LvSenderHandle {
     std::atomic<bool> adaptive_enabled{false};
     std::atomic<uint32_t> ext_frame_id{0};
     std::atomic<uint32_t> ext_audio_seq{0};
+    LV_AudioBusConfig bus_cfg{48000, 20, 64, 240};
 
     std::mutex push_mu;
     lv::Image ext_img;
@@ -217,6 +218,58 @@ struct LvReceiverHandle {
     void* audio_ud = nullptr;
     LV_StateChangedCallback state_cb = nullptr;
     void* state_ud = nullptr;
+
+    // 64-channel bus
+    LV_AudioBusConfig bus_cfg{48000, 20, 64, 240};
+    LV_MultichannelAudioCallback mc_cb = nullptr;
+    void* mc_ud = nullptr;
+    std::thread mc_thread;
+    std::atomic<bool> mc_stop{false};
+    std::atomic<bool> mc_active{false};
+
+    void stop_mc_pump() {
+        mc_stop.store(true, std::memory_order_release);
+        if (mc_thread.joinable()) mc_thread.join();
+        mc_active.store(false, std::memory_order_release);
+    }
+    void start_mc_pump() {  // caller holds api_mu; receiver must be running
+        stop_mc_pump();
+        if (!mc_cb || !receiver) return;
+        mc_stop.store(false, std::memory_order_release);
+        mc_active.store(true, std::memory_order_release);
+        mc_thread = std::thread([this]() {
+            const uint32_t frames = bus_cfg.block_frames ? bus_cfg.block_frames : 240;
+            const int ch = std::clamp(bus_cfg.num_channels, 1, 64);
+            const uint32_t rate = uint32_t(bus_cfg.sample_rate);
+            std::vector<float> buf(size_t(frames) * size_t(ch));
+            const uint64_t period_us = uint64_t(frames) * 1000000ull / rate;
+            uint64_t next = lv::now_us() + period_us;
+            uint64_t index = 0;
+            while (!mc_stop.load(std::memory_order_acquire)) {
+                lv::sleep_until_us(next, [] {});
+                next += period_us;
+                if (!receiver) break;
+                receiver->pop_audio_multichannel_interleaved(buf.data(), uint32_t(ch), frames);
+                LV_MultichannelAudioCallback cb;
+                void* ud;
+                {
+                    std::lock_guard<std::mutex> lk(cb_mu);
+                    cb = mc_cb;
+                    ud = mc_ud;
+                }
+                if (!cb) continue;
+                LV_MultichannelAudioBlock blk{};
+                blk.data = buf.data();
+                blk.num_channels = ch;
+                blk.num_frames = int32_t(frames);
+                blk.sample_rate = int32_t(rate);
+                const double cur = receiver->audio_matrix().playout_cursor();
+                blk.playout_position_samples = cur > double(frames) ? uint64_t(cur) - frames : 0;
+                blk.block_index = index++;
+                cb(&blk, ud);
+            }
+        });
+    }
 
     // Latest decoded frame buffer (for optional polling & screenshot)
     std::mutex frame_mu;
@@ -387,6 +440,7 @@ struct LvReceiverHandle {
         stop.store(false, std::memory_order_release);
         running.store(true, std::memory_order_release);
         notify_state(LV_STATE_RUNNING, LV_OK, "Listening");
+        if (mc_cb) start_mc_pump();
 
         rx_thread = std::thread([this, auto_os_audio]() {
             while (!stop.load(std::memory_order_relaxed)) {
@@ -414,6 +468,7 @@ struct LvReceiverHandle {
     void stop_internal() {
         const bool was_running = running.load(std::memory_order_acquire) || receiver != nullptr;
         stop.store(true, std::memory_order_release);
+        stop_mc_pump();
         if (discovery) {
             discovery->stop();
             discovery.reset();
@@ -612,6 +667,9 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
     scfg.adaptive.initial_q = std::clamp(cfg->quality > 0 ? cfg->quality : 80, 1, 100);
     scfg.adaptive.initial_bitrate_kbps = scfg.bitrate_kbps;
 
+    scfg.audio_sample_rate = handle->bus_cfg.sample_rate == 96000 ? 96000u : 48000u;
+    scfg.audio_latency_ms = std::clamp<uint32_t>(handle->bus_cfg.latency_ms, 2, 2000);
+
     handle->codec_params = {};
     handle->codec_params.width = cfg->width;
     handle->codec_params.height = cfg->height;
@@ -779,6 +837,167 @@ int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, int num
                : LV_ERR_SOCKET;
 }
 
+
+/* ---- 64-channel AoIP bus ---- */
+static bool lv_bus_cfg_valid(const LV_AudioBusConfig* c) {
+    return c && (c->sample_rate == 48000 || c->sample_rate == 96000) && c->latency_ms >= 2 &&
+           c->latency_ms <= 2000 && c->num_channels >= 1 && c->num_channels <= 64;
+}
+
+static bool lv_map_format(LV_AudioFormat f, lv::AudioFormat2& out) {
+    switch (f) {
+        case LV_AUDIO_FORMAT_PCM16: out = lv::AudioFormat2::kPcm16; return true;
+        case LV_AUDIO_FORMAT_F32: out = lv::AudioFormat2::kFloat32; return true;
+        case LV_AUDIO_FORMAT_PCM24_PACKED: out = lv::AudioFormat2::kPcm24Packed; return true;
+        default: return false;
+    }
+}
+
+void lv_audio_bus_config_default(LV_AudioBusConfig* cfg) {
+    if (!cfg) return;
+    cfg->sample_rate = 48000;
+    cfg->latency_ms = 20;
+    cfg->num_channels = 64;
+    cfg->block_frames = 240;
+}
+
+int lv_sender_configure_audio_bus(LvSenderHandle* handle, const LV_AudioBusConfig* cfg) {
+    if (!handle || !lv_bus_cfg_valid(cfg)) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    handle->bus_cfg = *cfg;
+    if (handle->sender) handle->sender->set_audio_latency_ms(cfg->latency_ms);
+    return LV_OK;
+}
+
+int lv_sender_push_audio_channel(LvSenderHandle* handle, uint16_t channel_index, const void* samples,
+                                 uint32_t num_samples, LV_AudioFormat format,
+                                 uint64_t media_timestamp_samples) {
+    if (!handle || !samples || num_samples == 0 || channel_index >= LV_AUDIO_MAX_CHANNELS)
+        return LV_ERR_INVALID_ARG;
+    lv::AudioFormat2 f;
+    if (!lv_map_format(format, f)) return LV_ERR_INVALID_ARG;
+    if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
+    return handle->sender->push_audio_channel(channel_index, samples, num_samples, f,
+                                              media_timestamp_samples) == 0
+               ? LV_OK
+               : LV_ERR_INVALID_ARG;
+}
+
+int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void* data, uint16_t num_channels,
+                                      uint32_t num_samples, LV_AudioFormat format, LV_AudioLayout layout,
+                                      uint64_t media_timestamp_samples) {
+    if (!handle || !data || num_samples == 0 || num_channels == 0 || num_channels > LV_AUDIO_MAX_CHANNELS)
+        return LV_ERR_INVALID_ARG;
+    lv::AudioFormat2 f;
+    if (!lv_map_format(format, f)) return LV_ERR_INVALID_ARG;
+    if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
+    // One shared timestamp for all channels keeps them phase-locked at the receiver.
+    if (media_timestamp_samples == LV_MEDIA_TS_AUTO)
+        media_timestamp_samples = handle->sender->next_auto_media_ts(num_samples);
+    const size_t bps = lv::audio2_bytes_per_sample(f);
+    if (layout == LV_AUDIO_LAYOUT_PLANAR) {
+        const void* const* planes = static_cast<const void* const*>(data);
+        for (uint16_t c = 0; c < num_channels; ++c) {
+            if (!planes[c]) return LV_ERR_INVALID_ARG;
+            const int r = handle->sender->push_audio_channel(c, planes[c], num_samples, f, media_timestamp_samples);
+            if (r != 0) return LV_ERR_INVALID_ARG;
+        }
+        return LV_OK;
+    }
+    std::vector<uint8_t> tmp(size_t(num_samples) * bps);
+    const uint8_t* in = static_cast<const uint8_t*>(data);
+    for (uint16_t c = 0; c < num_channels; ++c) {
+        for (uint32_t i = 0; i < num_samples; ++i)
+            std::memcpy(&tmp[size_t(i) * bps], in + (size_t(i) * num_channels + c) * bps, bps);
+        if (handle->sender->push_audio_channel(c, tmp.data(), num_samples, f, media_timestamp_samples) != 0)
+            return LV_ERR_INVALID_ARG;
+    }
+    return LV_OK;
+}
+
+int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms) {
+    if (!handle || latency_ms < 2 || latency_ms > 2000) return LV_ERR_INVALID_ARG;
+    handle->bus_cfg.latency_ms = latency_ms;
+    if (handle->sender) handle->sender->set_audio_latency_ms(latency_ms);
+    return LV_OK;
+}
+
+uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle) {
+    if (!handle || !handle->sender) return 0;
+    return handle->sender->master_samples_now();
+}
+
+int lv_receiver_configure_audio_bus(LvReceiverHandle* handle, const LV_AudioBusConfig* cfg) {
+    if (!handle || !lv_bus_cfg_valid(cfg)) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    handle->bus_cfg = *cfg;
+    if (handle->receiver) handle->receiver->set_audio_latency_ms(cfg->latency_ms);
+    return LV_OK;
+}
+
+int lv_receiver_set_audio_latency_ms(LvReceiverHandle* handle, uint32_t latency_ms) {
+    if (!handle || latency_ms < 2 || latency_ms > 2000) return LV_ERR_INVALID_ARG;
+    handle->bus_cfg.latency_ms = latency_ms;
+    if (handle->receiver) handle->receiver->set_audio_latency_ms(latency_ms);
+    return LV_OK;
+}
+
+int lv_receiver_set_multichannel_audio_callback(LvReceiverHandle* handle, LV_MultichannelAudioCallback cb,
+                                                void* user_data) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    {
+        std::lock_guard<std::mutex> clk(handle->cb_mu);
+        handle->mc_cb = cb;
+        handle->mc_ud = user_data;
+    }
+    if (!cb) {
+        handle->stop_mc_pump();
+    } else if (handle->receiver) {
+        handle->start_mc_pump();
+    }
+    return LV_OK;
+}
+
+int lv_receiver_pop_audio_multichannel(LvReceiverHandle* handle, float* out, uint16_t num_channels,
+                                       uint32_t num_frames, LV_AudioLayout layout) {
+    if (!handle || !out || num_channels == 0 || num_channels > LV_AUDIO_MAX_CHANNELS || num_frames == 0)
+        return LV_ERR_INVALID_ARG;
+    if (!handle->receiver) {
+        std::memset(out, 0, size_t(num_channels) * num_frames * sizeof(float));
+        return LV_ERR_NOT_RUNNING;
+    }
+    if (handle->mc_active.load(std::memory_order_acquire)) return LV_ERR_UNSUPPORTED;
+    if (layout == LV_AUDIO_LAYOUT_PLANAR) {
+        float* planes[LV_AUDIO_MAX_CHANNELS];
+        for (uint16_t c = 0; c < num_channels; ++c) planes[c] = out + size_t(c) * num_frames;
+        handle->receiver->pop_audio_multichannel_planar(planes, num_channels, num_frames);
+    } else {
+        handle->receiver->pop_audio_multichannel_interleaved(out, num_channels, num_frames);
+    }
+    return int(num_frames);
+}
+
+int lv_receiver_get_channel_stats(LvReceiverHandle* handle, uint16_t channel_index, LV_AudioChannelStats* out) {
+    if (!handle || !out || channel_index >= LV_AUDIO_MAX_CHANNELS) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    out->level_dbfs = -120.0f;
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    const auto rx = handle->receiver->audio_channel_rx_stats(channel_index);
+    const auto m = handle->receiver->audio_matrix().meter(channel_index);
+    out->packets_rx = rx.packets_rx;
+    out->packets_lost = rx.packets_lost;
+    out->fec_recovered = rx.fec_recovered;
+    out->nack_recovered = rx.nack_recovered;
+    out->nacks_sent = rx.nacks_sent;
+    out->late_packets = rx.late_packets;
+    out->jitter_us = rx.jitter_us;
+    out->underruns = m.underruns;
+    out->level_dbfs = m.level_dbfs;
+    out->active = m.active ? 1 : 0;
+    return LV_OK;
+}
+
 int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality) {
     if (!handle || quality < 1 || quality > 100) return LV_ERR_INVALID_ARG;
     handle->override_quality.store(quality, std::memory_order_relaxed);
@@ -909,6 +1128,8 @@ int lv_sdk_receiver_start(LvReceiverHandle* handle, const LV_ReceiverConfig* cfg
                                       ? lv::PixelOrder::kRGBA
                                       : lv::PixelOrder::kBGRA;
     rcfg.audio_target_ms = cfg->audio_target_ms > 0.0 ? cfg->audio_target_ms : 12.0;
+    rcfg.audio_sample_rate = handle->bus_cfg.sample_rate == 96000 ? 96000u : 48000u;
+    rcfg.audio_latency_ms = std::clamp<uint32_t>(handle->bus_cfg.latency_ms, 2, 2000);
 
     return handle->start_common(rcfg, cfg->enable_os_audio != 0, cfg->enable_discovery != 0,
                                 cfg->discovery_port, cfg->device_name);

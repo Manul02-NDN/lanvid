@@ -19,6 +19,7 @@ UdpSender::UdpSender(const SenderConfig& cfg)
       aq_(cfg.adaptive),
       fec_group_size_(cfg.fec_group_size),
       sim_loss_pct_(cfg.sim_loss_pct) {
+    epoch_us_ = now_us();
     if (cfg_.bitrate_kbps > 0) {
         cfg_.adaptive.initial_bitrate_kbps = cfg_.bitrate_kbps;
         aq_.reset(cfg_.adaptive);
@@ -28,6 +29,10 @@ UdpSender::UdpSender(const SenderConfig& cfg)
 bool UdpSender::init() {
     if (!Endpoint::parse(cfg_.dest_ip, cfg_.dest_port, dst_)) return false;
     if (!sock_.open()) return false;
+    atx_ = std::make_unique<AudioTxEngine>(cfg_.audio_sample_rate, cfg_.mtu, [this](const uint8_t* d, size_t n) {
+        return sock_.send_to(d, n, dst_) == int(n);
+    });
+    atx_->set_latency_ms(cfg_.audio_latency_ms);
     if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
     sock_.set_buffer_sizes(cfg_.socket_buf_bytes, 256 * 1024);
     sock_.set_nonblocking(true);
@@ -306,6 +311,41 @@ bool UdpSender::encoder_is_hardware() const {
     return enc_is_hw_;
 }
 
+uint64_t UdpSender::master_samples_now() const {
+    const uint64_t us = now_us() - epoch_us_;
+    return (us / 1000000) * cfg_.audio_sample_rate + (us % 1000000) * cfg_.audio_sample_rate / 1000000;
+}
+
+uint64_t UdpSender::next_auto_media_ts(uint32_t num_samples) const {
+    const uint64_t n = next_auto_ts_[0].load(std::memory_order_relaxed);
+    return n ? n : master_samples_now() - num_samples;
+}
+
+int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
+                                  AudioFormat2 fmt, uint64_t media_ts) {
+    if (!atx_ || channel >= kMaxAudioChannels) return -1;
+    {   // answer PING / NACK from whichever pushing thread gets here first
+        std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
+        if (lk.owns_lock()) service_control();
+    }
+    auto& next = next_auto_ts_[channel];
+    if (media_ts == kAutoMediaTs) {
+        media_ts = next.load(std::memory_order_relaxed);
+        if (media_ts == 0) media_ts = master_samples_now() - num_samples;  // anchor on first push
+    }
+    next.store(media_ts + num_samples, std::memory_order_relaxed);
+    return atx_->push_channel(channel, samples, num_samples, fmt, media_ts, now_us32());
+}
+
+void UdpSender::set_audio_latency_ms(uint32_t ms) {
+    cfg_.audio_latency_ms = std::clamp<uint32_t>(ms, 2, 2000);
+    if (atx_) atx_->set_latency_ms(ms);
+}
+
+void UdpSender::flush_audio() {
+    if (atx_) atx_->flush(now_us32());
+}
+
 void UdpSender::service_control() {
     uint8_t buf[256];
     Endpoint peer{};
@@ -332,11 +372,17 @@ void UdpSender::service_control() {
             rh.flags = kFlagHasCrc;
             rh.frame_id = h.frame_id;
             rh.timestamp_us = pp.t3_server_send_us;
-            uint8_t out[64];
-            const size_t out_n = write_packet(out, sizeof(out), rh, pp_bytes, sizeof(pp_bytes));
+            // Extended PONG: sender master-clock t2/t3 (64-bit us since epoch) for MasterClock sync.
+            uint8_t pong_body[kPingPongSize + kPongMasterTailSize];
+            std::memcpy(pong_body, pp_bytes, sizeof(pp_bytes));
+            write_pong_master_tail(pong_body + kPingPongSize, now - epoch_us_, now_us() - epoch_us_);
+            uint8_t out[96];
+            const size_t out_n = write_packet(out, sizeof(out), rh, pong_body, sizeof(pong_body));
             if (out_n && sock_.send_to(out, out_n, peer) == int(out_n)) {
                 pongs_sent_.fetch_add(1, std::memory_order_relaxed);
             }
+        } else if (h.type == PacketType::kAudioNack) {
+            if (atx_) atx_->on_nack(payload, h.payload_size);
         } else if (h.type == PacketType::kFeedback) {
             FeedbackPayload fb;
             if (!parse_feedback(payload, h.payload_size, fb)) continue;

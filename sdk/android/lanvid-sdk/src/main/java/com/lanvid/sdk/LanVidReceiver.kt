@@ -10,6 +10,13 @@ import com.lanvid.sdk.internal.NativeBridge
 import org.json.JSONObject
 import java.io.Closeable
 
+data class LanVidAudioChannelStats(
+    val packetsRx: Long = 0, val packetsLost: Long = 0, val fecRecovered: Long = 0,
+    val nackRecovered: Long = 0, val nacksSent: Long = 0, val underruns: Long = 0,
+    val latePackets: Long = 0, val jitterUs: Int = 0, val active: Boolean = false,
+    val levelDbfs: Float = -120f
+)
+
 class LanVidReceiver : Closeable {
     private var handle: Long = NativeBridge.receiverCreate()
 
@@ -32,6 +39,27 @@ class LanVidReceiver : Closeable {
 
     fun setVolume(volume: Float) {
         if (handle != 0L) NativeBridge.receiverSetVolume(handle, volume)
+    }
+
+    // ---- 64-channel phase-coherent bus ----
+    fun configureAudioBus(latencyMs: Int = 20, channels: Int = 64, blockFrames: Int = 240, sampleRate: Int = 48000): Boolean =
+        handle != 0L && NativeBridge.receiverConfigureAudioBus(handle, sampleRate, latencyMs, channels, blockFrames) == 0
+
+    /** Live latency change 2..2000 ms without reconnecting. */
+    fun setAudioLatencyMs(latencyMs: Int) { if (handle != 0L) NativeBridge.receiverSetAudioLatency(handle, latencyMs) }
+
+    /** Renders [frames] sample-aligned interleaved Float32 frames for channels 0 until [channels]. */
+    fun popAudioMultichannel(out: FloatArray, channels: Int, frames: Int): Int =
+        if (handle != 0L) NativeBridge.receiverPopAudioMultichannel(handle, out, channels, frames) else -3
+
+    fun channelStats(channel: Int): LanVidAudioChannelStats {
+        val v = LongArray(10)
+        if (handle == 0L || NativeBridge.receiverChannelStats(handle, channel, v) != 0) return LanVidAudioChannelStats()
+        return LanVidAudioChannelStats(
+            packetsRx = v[0], packetsLost = v[1], fecRecovered = v[2], nackRecovered = v[3],
+            nacksSent = v[4], underruns = v[5], latePackets = v[6], jitterUs = v[7].toInt(),
+            active = v[8] != 0L, levelDbfs = v[9] / 100.0f
+        )
     }
 
     fun stats(): LanVidStreamStats {

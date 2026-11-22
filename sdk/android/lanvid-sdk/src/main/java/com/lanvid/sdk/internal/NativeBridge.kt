@@ -33,6 +33,15 @@ internal object NativeBridge {
     @JvmStatic external fun senderPushAudioPcm16(
         ptr: Long, pcm: ShortArray, frames: Int, rate: Int, channels: Int
     ): Int
+    @JvmStatic external fun senderConfigureAudioBus(ptr: Long, sampleRate: Int, latencyMs: Int): Int
+    @JvmStatic external fun senderPushAudioChannelF32(
+        ptr: Long, channel: Int, samples: FloatArray, count: Int, mediaTs: Long
+    ): Int
+    @JvmStatic external fun senderPushAudioMultichannelF32(
+        ptr: Long, interleaved: FloatArray, channels: Int, frames: Int, mediaTs: Long
+    ): Int
+    @JvmStatic external fun senderSetAudioLatency(ptr: Long, latencyMs: Int): Int
+    @JvmStatic external fun senderMasterClockSamples(ptr: Long): Long
     @JvmStatic external fun senderSetQuality(ptr: Long, quality: Int): Int
     @JvmStatic external fun senderSetBitrate(ptr: Long, bitrateKbps: Int): Int
     @JvmStatic external fun senderForceKeyframe(ptr: Long): Int
@@ -49,4 +58,13 @@ internal object NativeBridge {
     @JvmStatic external fun receiverSetSurface(ptr: Long, surface: Surface?)
     @JvmStatic external fun receiverSetVolume(ptr: Long, vol: Float)
     @JvmStatic external fun receiverStatsJson(ptr: Long): String
+    @JvmStatic external fun receiverConfigureAudioBus(
+        ptr: Long, sampleRate: Int, latencyMs: Int, channels: Int, blockFrames: Int
+    ): Int
+    @JvmStatic external fun receiverSetAudioLatency(ptr: Long, latencyMs: Int): Int
+    @JvmStatic external fun receiverPopAudioMultichannel(
+        ptr: Long, out: FloatArray, channels: Int, frames: Int
+    ): Int
+    /** [packets_rx, lost, fec, nack, nacks_sent, underruns, late, jitter_us, active, level_dbfs*100] */
+    @JvmStatic external fun receiverChannelStats(ptr: Long, channel: Int, out: LongArray): Int
 }

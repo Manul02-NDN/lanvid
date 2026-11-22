@@ -11,6 +11,7 @@
 #include "gui/app_config.hpp"
 #include "gui/gpu_texture.hpp"
 #include "lanvid_c_api.h"
+#include "lanvid/lanvid_sdk.h"
 #include "net/discovery.hpp"
 #include "platform/audio_capture.hpp"
 #include "platform/camera_capture.hpp"
@@ -44,6 +45,11 @@ private:
     void stop_receiver();
     void apply_preset(int preset_idx);
     void poll_telemetry_and_frames();
+    void start_tone();
+    void stop_tone();
+    void draw_aoip_sender_controls();
+    void draw_aoip_meter_grid();
+    void apply_receiver_bus();
 
     void draw_top_bar();
     void draw_sender_tab();
@@ -75,6 +81,13 @@ private:
     LvReceiverHandle* receiver_ = nullptr;
     bool sender_running_ = false;
     bool receiver_running_ = false;
+
+    // 64-channel AoIP bus
+    std::thread tone_thread_;
+    std::atomic<bool> tone_stop_{true};
+    std::atomic<int> tone_channels_{8};
+    LV_AudioChannelStats ch_stats_[LV_AUDIO_MAX_CHANNELS]{};
+    uint64_t ch_stats_us_ = 0;
 
     // Editable text buffers
     char ip_buf_[64]{};

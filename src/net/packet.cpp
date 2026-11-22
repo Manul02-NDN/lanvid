@@ -120,6 +120,86 @@ bool parse_audio_header(const uint8_t* in, size_t len, AudioHeader& a) {
     return len >= need;
 }
 
+static void store_le64(uint8_t* p, uint64_t v) {
+    store_le32(p, uint32_t(v));
+    store_le32(p + 4, uint32_t(v >> 32));
+}
+static uint64_t load_le64(const uint8_t* p) {
+    return uint64_t(load_le32(p)) | (uint64_t(load_le32(p + 4)) << 32);
+}
+
+void write_audio_header2(uint8_t* out, const AudioHeader2& a) {
+    store_le16(out + 0, a.stream_id);
+    store_le16(out + 2, a.channel_index);
+    store_le32(out + 4, a.sample_rate);
+    store_le16(out + 8, a.num_samples);
+    out[10] = uint8_t(a.sample_format);
+    out[11] = a.flags;
+    store_le64(out + 12, a.media_timestamp_samples);
+    store_le32(out + 20, a.wallclock_us);
+}
+
+bool parse_audio_header2(const uint8_t* in, size_t len, AudioHeader2& a) {
+    if (len < kAudioHeader2Size) return false;
+    a.stream_id = load_le16(in + 0);
+    a.channel_index = load_le16(in + 2);
+    a.sample_rate = load_le32(in + 4);
+    a.num_samples = load_le16(in + 8);
+    a.sample_format = AudioFormat2(in[10]);
+    a.flags = in[11];
+    a.media_timestamp_samples = load_le64(in + 12);
+    a.wallclock_us = load_le32(in + 20);
+    if (a.stream_id >= kMaxAudioChannels || a.channel_index >= kMaxAudioChannels) return false;
+    if (a.sample_rate < 8000 || a.sample_rate > 192000) return false;
+    if (uint8_t(a.sample_format) < 1 || uint8_t(a.sample_format) > 3) return false;
+    if (a.num_samples == 0) return false;
+    const size_t body = size_t(a.num_samples) * audio2_bytes_per_sample(a.sample_format);
+    if (a.flags & kAudioFlagFecParity) return len >= kAudioHeader2Size + kAudioFecInfoSize + body;
+    return len >= kAudioHeader2Size + body;
+}
+
+void write_audio_fec_info(uint8_t* out, const AudioFecInfo& f) {
+    out[0] = f.group_size;
+    out[1] = f.interleave;
+    store_le16(out + 2, f.reserved);
+}
+
+bool parse_audio_fec_info(const uint8_t* in, size_t len, AudioFecInfo& f) {
+    if (len < kAudioFecInfoSize) return false;
+    f.group_size = in[0];
+    f.interleave = in[1];
+    f.reserved = load_le16(in + 2);
+    return f.group_size >= 1 && f.interleave >= 1;
+}
+
+void write_audio_nack(uint8_t* out, const AudioNack& n) {
+    store_le16(out + 0, n.stream_id);
+    store_le16(out + 2, 0);
+    store_le32(out + 4, n.base_seq);
+    store_le64(out + 8, n.mask);
+}
+
+bool parse_audio_nack(const uint8_t* in, size_t len, AudioNack& n) {
+    if (len < kAudioNackSize) return false;
+    n.stream_id = load_le16(in + 0);
+    n.base_seq = load_le32(in + 4);
+    n.mask = load_le64(in + 8);
+    return n.stream_id < kMaxAudioChannels && n.mask != 0;
+}
+
+void write_pong_master_tail(uint8_t* out, uint64_t t2_master_us, uint64_t t3_master_us) {
+    store_le64(out + 0, t2_master_us);
+    store_le64(out + 8, t3_master_us);
+}
+
+bool parse_pong_master_tail(const uint8_t* in, size_t len, uint64_t& t2_master_us,
+                            uint64_t& t3_master_us) {
+    if (len < kPongMasterTailSize) return false;
+    t2_master_us = load_le64(in + 0);
+    t3_master_us = load_le64(in + 8);
+    return true;
+}
+
 void write_ping_pong(uint8_t* out, const PingPongPayload& p) {
     store_le32(out + 0, p.t1_client_send_us);
     store_le32(out + 4, p.t2_server_recv_us);
