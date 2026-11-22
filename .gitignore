@@ -1,0 +1,66 @@
+# Build & distribution directories
+build/
+build-*/
+dist/
+cmake-build-*/
+out/
+
+# Compiled binaries, libraries, and installer packages
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+*.pdb
+*.res
+*.ilk
+*.exp
+*.apk
+*.aar
+*.pkg
+*.dmg
+*.run
+*.deb
+*.AppImage
+
+# Temporary test scripts, captures, and logs
+run_*_test.ps1
+run_*_verify.ps1
+snapshot_*.ppm
+*.ppm
+*.log
+
+# Android / Gradle caches, NDK intermediates, and local signing keys
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/local.properties
+sdk/android/.gradle/
+sdk/android/.kotlin/
+sdk/android/build/
+sdk/android/lanvid-sdk/build/
+sdk/android/lanvid-sdk/.cxx/
+sdk/android/local.properties
+*.keystore
+*.jks
+
+# Apple / Xcode & IDE files
+.DS_Store
+*.xcworkspace
+xcuserdata/
+.vscode/
+.idea/
+.vs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Keep vendored Dear ImGui (MIT) for self-contained Desktop GUI builds
+!third_party/imgui/

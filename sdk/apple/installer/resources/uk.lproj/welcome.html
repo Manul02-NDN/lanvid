@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; font-size: 13px; line-height: 1.5; margin: 12px 16px; color: #1d1d1f; }
+  h1 { font-size: 18px; margin: 0 0 8px 0; color: #0a66c2; }
+  h2 { font-size: 14px; margin: 14px 0 4px 0; }
+  ul { margin: 4px 0 10px 18px; padding: 0; }
+  li { margin-bottom: 4px; }
+  code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; background: rgba(128,128,128,0.14); padding: 1px 4px; border-radius: 4px; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #f5f5f7; }
+    h1 { color: #38bdf8; }
+  }
+</style>
+</head>
+<body>
+  <h1>Вітаємо у LanVidSDK v1.0.0 для macOS та iOS</h1>
+  <p>Універсальний SDK для передачі відео та звуку в локальній мережі з наднизькою затримкою (<b>&lt; 4–6 мс E2E</b>) з апаратним прискоренням <b>Apple Silicon NEON</b> (M1–M4) та <b>Intel AVX2</b>.</p>
+  <h2>Інсталятор автоматично налаштує:</h2>
+  <ul>
+    <li><b>Core C/C++17 &amp; XCFramework:</b> універсальну бібліотеку <code>liblanvid_core.dylib</code> (<code>arm64</code> + <code>x86_64</code>), <code>LanVidCore.xcframework</code> (iOS, Simulator, macOS), заголовки у <code>/usr/local/include/lanvid</code>.</li>
+    <li><b>CMake &amp; pkg-config:</b> миттєве підключення через <code>find_package(LanVidSDK REQUIRED)</code> та інтеграцію з Homebrew.</li>
+    <li><b>Swift Package LanVidKit:</b> ідіоматичний <code>async/await</code> API для <code>CVPixelBuffer</code>, <code>Metal</code> та <code>AVAudioEngine</code>.</li>
+    <li><b>Python SDK &amp; діагностику:</b> глобальний <code>import lanvid_sdk</code>, правила macOS Firewall та утиліту <code>lanvid-sdk-info</code>.</li>
+  </ul>
+</body>
+</html>

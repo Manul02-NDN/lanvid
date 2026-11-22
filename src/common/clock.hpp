@@ -1,0 +1,55 @@
+#pragma once
+// Monotonic steady clock in microseconds + accurate frame-pacing sleep helper.
+
+#include <chrono>
+#include <cstdint>
+#include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+namespace lv {
+
+inline uint64_t now_us() {
+    using namespace std::chrono;
+    return uint64_t(duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+inline uint32_t now_us32() { return uint32_t(now_us()); }
+
+// Signed difference (a - b) for wrapping 32-bit microsecond timestamps (valid up to ~35 min).
+inline int32_t diff_us32(uint32_t a, uint32_t b) { return int32_t(a - b); }
+
+// Sleeps accurately until `target_us`, periodically calling `idle_cb()` if provided.
+template <class Fn>
+inline void sleep_until_us(uint64_t target_us, Fn&& idle_cb) {
+#if defined(_WIN32)
+    static thread_local HANDLE timer =
+        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+#endif
+    for (;;) {
+        const uint64_t now = now_us();
+        if (now >= target_us) return;
+        idle_cb();
+        const uint64_t rem = target_us - now;
+        if (rem > 1200) {
+            const uint64_t chunk_us = rem > 4000 ? 2000 : (rem - 600);
+#if defined(_WIN32)
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -LONGLONG(chunk_us * 10);  // 100-ns units, relative
+                if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(timer, INFINITE);
+                    continue;
+                }
+            }
+#endif
+            std::this_thread::sleep_for(std::chrono::microseconds(chunk_us));
+        } else if (rem > 150) {
+            std::this_thread::yield();
+        }
+    }
+}
+
+}  // namespace lv

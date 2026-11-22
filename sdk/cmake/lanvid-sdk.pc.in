@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: LanVidSDK
+Description: Ultra-Low Latency LAN Video & Audio Streaming SDK (AVX2/NEON, UDP + XOR FEC + AIMD)
+Version: @LANVID_SDK_VERSION@
+Cflags: -I${includedir} -DLANVID_USE_SHARED=1
+Libs: -L${libdir} -llanvid_core
+Libs.private: @LANVID_PKGCONFIG_PRIVATE_LIBS@

@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# LanVidSDK macOS Installer — postinstall script
+# Runs as root after /usr/local/LanVidSDK extraction.
+# Sets up /usr/local & /opt/homebrew symlinks, Homebrew dev tools, Python site-packages,
+# macOS Application Firewall exemptions, /usr/local/bin/lanvid-sdk-info, and opens Finder.
+
+set -euo pipefail
+
+LOG_FILE="/tmp/lanvid_sdk_install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== [LanVidSDK postinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+
+SDK_ROOT="/usr/local/LanVidSDK"
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "${USER:-root}")"
+if [ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ]; then
+  CONSOLE_USER="root"
+fi
+
+# 1. Create standard /usr/local symlinks (headers, dylib, static lib, CMake, pkg-config)
+mkdir -p /usr/local/include /usr/local/lib/cmake /usr/local/lib/pkgconfig /usr/local/bin
+
+if [ -d "$SDK_ROOT/include/lanvid" ]; then
+  rm -rf /usr/local/include/lanvid
+  ln -sfn "$SDK_ROOT/include/lanvid" /usr/local/include/lanvid
+fi
+
+if [ -f "$SDK_ROOT/lib/liblanvid_core.dylib" ]; then
+  ln -sfn "$SDK_ROOT/lib/liblanvid_core.dylib" /usr/local/lib/liblanvid_core.dylib
+fi
+
+if [ -f "$SDK_ROOT/lib/liblanvid_core.a" ]; then
+  ln -sfn "$SDK_ROOT/lib/liblanvid_core.a" /usr/local/lib/liblanvid_core.a
+fi
+
+if [ -d "$SDK_ROOT/lib/cmake/LanVidSDK" ]; then
+  rm -rf /usr/local/lib/cmake/LanVidSDK
+  ln -sfn "$SDK_ROOT/lib/cmake/LanVidSDK" /usr/local/lib/cmake/LanVidSDK
+fi
+
+if [ -f "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" ]; then
+  ln -sfn "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" /usr/local/lib/pkgconfig/lanvid-sdk.pc
+fi
+
+# Also mirror pkg-config & CMake into Apple Silicon Homebrew prefix if present
+if [ -d "/opt/homebrew/lib/pkgconfig" ] && [ -f "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" ]; then
+  ln -sfn "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" /opt/homebrew/lib/pkgconfig/lanvid-sdk.pc
+  echo "[OK] Linked lanvid-sdk.pc into /opt/homebrew/lib/pkgconfig/"
+fi
+if [ -d "/opt/homebrew/lib/cmake" ] && [ -d "$SDK_ROOT/lib/cmake/LanVidSDK" ]; then
+  rm -rf /opt/homebrew/lib/cmake/LanVidSDK
+  ln -sfn "$SDK_ROOT/lib/cmake/LanVidSDK" /opt/homebrew/lib/cmake/LanVidSDK
+  echo "[OK] Linked LanVidSDK CMake package into /opt/homebrew/lib/cmake/"
+fi
+
+# 2. If Homebrew is installed, ensure cmake and pkg-config are present (run as console user, NEVER root!)
+BREW_BIN=""
+if [ -x "/opt/homebrew/bin/brew" ]; then
+  BREW_BIN="/opt/homebrew/bin/brew"
+elif [ -x "/usr/local/bin/brew" ]; then
+  BREW_BIN="/usr/local/bin/brew"
+fi
+
+if [ -n "$BREW_BIN" ] && [ "$CONSOLE_USER" != "root" ]; then
+  MISSING_BREW=()
+  for tool in cmake pkg-config; do
+    if ! sudo -u "$CONSOLE_USER" "$BREW_BIN" list --formula "$tool" >/dev/null 2>&1 && \
+       ! command -v "$tool" >/dev/null 2>&1; then
+      MISSING_BREW+=("$tool")
+    fi
+  done
+  if [ "${#MISSING_BREW[@]}" -gt 0 ]; then
+    echo "[INFO] Installing missing Homebrew tools as $CONSOLE_USER: ${MISSING_BREW[*]}"
+    sudo -u "$CONSOLE_USER" HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_BIN" install "${MISSING_BREW[@]}" || \
+      echo "[WARN] Non-fatal: Homebrew install of ${MISSING_BREW[*]} skipped/offline."
+  else
+    echo "[OK] Homebrew cmake & pkg-config already available."
+  fi
+fi
+
+# 3. Install Python bindings into system / Homebrew Python3 site-packages via .pth (PEP 668 safe!)
+if [ -f "$SDK_ROOT/python/lanvid_sdk.py" ]; then
+  PY_CANDIDATES=(
+    "/opt/homebrew/bin/python3"
+    "/usr/local/bin/python3"
+    "/usr/bin/python3"
+  )
+  for py in "${PY_CANDIDATES[@]}"; do
+    if [ -x "$py" ]; then
+      SITE_DIR="$("$py" -c 'import site; ps = site.getsitepackages(); print(ps[0] if ps else "")' 2>/dev/null || true)"
+      if [ -n "$SITE_DIR" ] && [ -d "$SITE_DIR" ] && [ -w "$SITE_DIR" ]; then
+        printf '%s\n' "$SDK_ROOT/python" > "$SITE_DIR/lanvid_sdk.pth"
+        echo "[OK] Registered lanvid_sdk.pth in $SITE_DIR ($py)"
+      fi
+    fi
+  done
+  # Also register in user site-packages so `import lanvid_sdk` works even if system Python is SIP-locked
+  if [ "$CONSOLE_USER" != "root" ]; then
+    USER_SITE="$(sudo -u "$CONSOLE_USER" python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+    if [ -n "$USER_SITE" ]; then
+      sudo -u "$CONSOLE_USER" mkdir -p "$USER_SITE" 2>/dev/null || true
+      printf '%s\n' "$SDK_ROOT/python" > "$USER_SITE/lanvid_sdk.pth" 2>/dev/null || true
+      chown "$CONSOLE_USER":staff "$USER_SITE/lanvid_sdk.pth" 2>/dev/null || true
+      echo "[OK] Registered user lanvid_sdk.pth in $USER_SITE"
+    fi
+  fi
+fi
+
+# 4. Create /usr/local/bin/lanvid-sdk-info diagnostic & self-test CLI utility
+cat > /usr/local/bin/lanvid-sdk-info <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+SDK_ROOT="/usr/local/LanVidSDK"
+DYLIB="/usr/local/lib/liblanvid_core.dylib"
+ARCH="$(uname -m)"
+
+echo "========================================================"
+echo "  LanVidSDK for macOS / iOS — Installation Info & Test"
+echo "========================================================"
+echo "Host Arch     : $ARCH ($(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || echo ''))"
+echo "SDK Root      : $SDK_ROOT"
+echo "C/C++ Headers : /usr/local/include/lanvid"
+echo "Universal Lib : $DYLIB"
+echo "XCFramework   : $SDK_ROOT/apple/LanVidCore.xcframework"
+echo "Swift Package : $SDK_ROOT/apple/Package.swift"
+echo "CMake Package : /usr/local/lib/cmake/LanVidSDK"
+echo "pkg-config    : /usr/local/lib/pkgconfig/lanvid-sdk.pc"
+echo "Python SDK    : $SDK_ROOT/python/lanvid_sdk.py"
+echo "--------------------------------------------------------"
+
+if [ ! -f "$DYLIB" ]; then
+  echo "[ERROR] Missing $DYLIB"
+  exit 1
+fi
+
+if command -v lipo >/dev/null 2>&1; then
+  echo "Mach-O Slices : $(lipo -archs "$DYLIB" 2>/dev/null || echo unknown)"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  LANVID_LIB_PATH="$DYLIB" PYTHONPATH="$SDK_ROOT/python:${PYTHONPATH:-}" python3 - <<'PYEOF'
+import time
+from lanvid_sdk import LanVidSDK, LanVidSender, LanVidReceiver
+
+sdk = LanVidSDK()
+print(f"Runtime ABI   : v{sdk.version} (compatible=OK)")
+print(f"Active SIMD   : {sdk.simd}")
+
+got = []
+with LanVidReceiver(bind_port=0, device_name="MacSelfTest", discovery_port=15121) as rx:
+    rx.on_video(lambda frame, w, h, fid: got.append((w, h, fid)))
+    peers = sdk.discover_peers(250, 15121)
+    with LanVidSender(dest_ip="127.0.0.1", dest_port=rx.local_port) as tx:
+        raw = bytes([160] * (160 * 96 * 4))
+        for _ in range(2):
+            tx.push_frame(raw, 160, 96)
+            time.sleep(0.01)
+        for _ in range(40):
+            if len(got) >= 2:
+                break
+            time.sleep(0.01)
+
+status = "PASS" if (len(got) == 2 and any(p["name"] == "MacSelfTest" for p in peers)) else "WARN"
+print(f"Self-Test     : {status} (discovered={len(peers)}, loopback_frames={len(got)}/2)")
+PYEOF
+else
+  echo "[INFO] python3 not found; skipping runtime ctypes self-test."
+fi
+EOF
+chmod 0755 /usr/local/bin/lanvid-sdk-info
+echo "[OK] Installed /usr/local/bin/lanvid-sdk-info"
+
+# 5. Add macOS Application Firewall exemptions so LAN Discovery & UDP streams are never blocked
+FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
+if [ -x "$FW" ]; then
+  for target in "$SDK_ROOT/lib/liblanvid_core.dylib" "/usr/local/bin/lanvid-sdk-info"; do
+    if [ -e "$target" ]; then
+      "$FW" --add "$target" >/dev/null 2>&1 || true
+      "$FW" --unblockapp "$target" >/dev/null 2>&1 || true
+    fi
+  done
+  echo "[OK] Configured macOS Application Firewall rules."
+fi
+
+# 6. Open /usr/local/LanVidSDK in Finder for the logged-in user (interactive installs only)
+if [ "$CONSOLE_USER" != "root" ] && [ -z "${CI:-}" ] && [ -z "${LANVID_NO_OPEN_FINDER:-}" ]; then
+  sudo -u "$CONSOLE_USER" open "$SDK_ROOT" >/dev/null 2>&1 || true
+fi
+
+echo "=== [LanVidSDK postinstall] Complete ==="
+exit 0
