@@ -79,7 +79,9 @@ object LanVidNative {
         yStride: Int,
         uStride: Int,
         vStride: Int,
-        uvPixelStride: Int
+        uvPixelStride: Int,
+        rotationDeg: Int,
+        mirrorH: Boolean
     ): Boolean
 
     @JvmStatic external fun nativePushRgba(

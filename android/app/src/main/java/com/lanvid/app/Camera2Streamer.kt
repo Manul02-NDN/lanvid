@@ -12,7 +12,9 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
+import android.util.Size
 import java.nio.ByteBuffer
+import kotlin.math.abs
 
 /**
  * Direct Camera2 YUV_420_888 streamer: pushes plane ByteBuffers directly into liblanvid_core.so
@@ -43,12 +45,24 @@ class Camera2Streamer(private val context: Context) {
             return
         }
 
+        val chars = mgr.getCameraCharacteristics(camId)
+        val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: if (frontFacing) 270 else 90
+        val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val supportedSizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888)
+        val chosenSize: Size = if (!supportedSizes.isNullOrEmpty()) {
+            supportedSizes.minByOrNull { s ->
+                abs(s.width - width) + abs(s.height - height)
+            } ?: Size(width, height)
+        } else {
+            Size(width, height)
+        }
+
         val thread = HandlerThread("LanVidCamera2").apply { start() }
         val handler = Handler(thread.looper)
         bgThread = thread
         bgHandler = handler
 
-        val imgReader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3)
+        val imgReader = ImageReader.newInstance(chosenSize.width, chosenSize.height, ImageFormat.YUV_420_888, 3)
         imgReader.setOnImageAvailableListener({ r ->
             val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
             try {
@@ -68,7 +82,9 @@ class Camera2Streamer(private val context: Context) {
                         yPlane.rowStride,
                         uPlane.rowStride,
                         vPlane.rowStride,
-                        uPlane.pixelStride
+                        uPlane.pixelStride,
+                        sensorOrientation,
+                        frontFacing
                     )
                 }
             } finally {

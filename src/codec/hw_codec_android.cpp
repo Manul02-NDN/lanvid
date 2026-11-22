@@ -60,6 +60,22 @@ public:
             shutdown();
             return false;
         }
+        // Query hardware encoder's aligned input stride & slice-height (critical for non-16-aligned
+        // widths such as 1080x1920 where HW stride is 1088/1152 instead of 1080!).
+        in_stride_ = width_;
+        in_slice_h_ = height_;
+#if __ANDROID_API__ >= 28
+        if (AMediaFormat* in_fmt = AMediaCodec_getInputFormat(codec_obj_)) {
+            int32_t s = 0, sh = 0;
+            if (AMediaFormat_getInt32(in_fmt, AMEDIAFORMAT_KEY_STRIDE, &s) && s >= width_) {
+                in_stride_ = s;
+            }
+            if (AMediaFormat_getInt32(in_fmt, AMEDIAFORMAT_KEY_SLICE_HEIGHT, &sh) && sh >= height_) {
+                in_slice_h_ = sh;
+            }
+            AMediaFormat_delete(in_fmt);
+        }
+#endif
         backend_name_ = std::string("Android MediaCodec ") +
                         (codec_ == VideoCodecId::kH265 ? "HEVC" : "H264") + " (HW)";
         frame_index_ = 0;
@@ -69,20 +85,23 @@ public:
 
     bool encode_image(const Image& img, EncodedVideoPacket& out) override {
         if (!codec_obj_ || img.width != width_ || img.height != height_) return false;
-        const size_t nv12_sz = size_t(width_) * size_t(height_) * 3 / 2;
-        if (nv12_.size() != nv12_sz) nv12_.resize(nv12_sz);
-        packed_rgb_to_nv12(img, nv12_.data(), width_, nv12_.data() + size_t(width_) * size_t(height_),
-                           width_);
+        const size_t y_plane_sz = size_t(in_stride_) * size_t(in_slice_h_);
+        const size_t uv_plane_sz = size_t(in_stride_) * size_t((height_ + 1) / 2);
+        const size_t nv12_sz = y_plane_sz + uv_plane_sz;
+        if (nv12_.size() != nv12_sz) nv12_.assign(nv12_sz, 0);
+        packed_rgb_to_nv12(img, nv12_.data(), in_stride_, nv12_.data() + y_plane_sz, in_stride_);
         return encode_nv12(nv12_.data(), nv12_sz, out);
     }
 
     bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                        EncodedVideoPacket& out) override {
         if (!codec_obj_ || width != width_ || height != height_) return false;
-        const size_t nv12_sz = size_t(width_) * size_t(height_) * 3 / 2;
-        if (nv12_.size() != nv12_sz) nv12_.resize(nv12_sz);
-        yuv420_to_nv12(yuv, width_, height_, nv12_.data(), width_,
-                       nv12_.data() + size_t(width_) * size_t(height_), width_);
+        const size_t y_plane_sz = size_t(in_stride_) * size_t(in_slice_h_);
+        const size_t uv_plane_sz = size_t(in_stride_) * size_t((height_ + 1) / 2);
+        const size_t nv12_sz = y_plane_sz + uv_plane_sz;
+        if (nv12_.size() != nv12_sz) nv12_.assign(nv12_sz, 0);
+        yuv420_to_nv12(yuv, width_, height_, nv12_.data(), in_stride_, nv12_.data() + y_plane_sz,
+                       in_stride_);
         return encode_nv12(nv12_.data(), nv12_sz, out);
     }
 
@@ -173,6 +192,8 @@ private:
     AMediaCodec* codec_obj_ = nullptr;
     int width_ = 0;
     int height_ = 0;
+    int in_stride_ = 0;
+    int in_slice_h_ = 0;
     int fps_ = 60;
     uint32_t bitrate_kbps_ = 8000;
     uint64_t frame_index_ = 0;

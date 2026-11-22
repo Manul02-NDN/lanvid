@@ -70,6 +70,13 @@ LV_API int lv_sender_push_packed_frame(LvSenderHandle* handle, const uint8_t* da
 LV_API int lv_sender_push_yuv_planes(LvSenderHandle* handle, const LV_YuvPlanes* planes, int width,
                                      int height, uint32_t timestamp_us);
 
+/* Extended YUV 4:2:0 push supporting clockwise rotation (0/90/180/270 deg) and horizontal mirror
+ * (e.g. Android front camera SENSOR_ORIENTATION=270 + LENS_FACING_FRONT) with strict rowStride and
+ * pixelStride bounds safety. Output dimensions are swapped automatically for 90/270 deg. */
+LV_API int lv_sender_push_yuv_planes_ex(LvSenderHandle* handle, const LV_YuvPlanes* planes,
+                                        int width, int height, int rotation_deg, int mirror_h,
+                                        uint32_t timestamp_us);
+
 /* Zero-copy convenience entry point for Apple CVPixelBuffer (32BGRA or 420YpCbCr8BiPlanar NV12)
  * after CVPixelBufferLockBaseAddress. For BGRA pass plane1=NULL. */
 LV_API int lv_sender_push_cvpixelbuffer_planes(LvSenderHandle* handle, const uint8_t* plane0,

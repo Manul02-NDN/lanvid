@@ -10,6 +10,7 @@
 
 #include "codec/frame_codec.hpp"
 #include "codec/slice_codec.hpp"
+#include "codec/video_codec_common.hpp"
 #include "common/clock.hpp"
 #include "common/image.hpp"
 #include "lanvid.hpp"
@@ -282,4 +283,178 @@ TEST(sdk_callbacks_and_version_check) {
     rx.stop();
     CHECK(last_state.load() == LV_STATE_STOPPED);
     tx.stop();
+}
+
+TEST(android_yuv420_padded_stride_and_front_camera_rotation) {
+    // Simulate Android front camera: 1920x1080 YUV_420_888 (SENSOR_ORIENTATION=270, LENS_FACING_FRONT)
+    // with 128-byte garbage (0xFF) row padding, uvPixelStride=2 (NV12), and Android's exact
+    // last-chroma-row quirk where uPlane ends at (width - 1) bytes on the last row.
+    // After 270 deg CW rotation, width becomes 1080 (non-multiple-of-16: 67*16 + 8) x 1920!
+    constexpr int W = 1920;
+    constexpr int H = 1080;
+    constexpr int kPad = 128;
+    constexpr int y_stride = W + kPad;
+    constexpr int uv_stride = W + kPad;
+    constexpr int cw = W / 2;
+    constexpr int ch = H / 2;
+
+    std::vector<uint8_t> y_plane(size_t(y_stride) * size_t(H), 0xFF);
+    // Exact Android NV12 shared UV buffer size: last row has no padding after the final V byte.
+    const size_t uv_buf_sz = size_t(uv_stride) * size_t(ch - 1) + size_t(W);
+    std::vector<uint8_t> uv_plane(uv_buf_sz, 0xFF);
+
+    // Smooth gradient pattern (no 0xFF values anywhere in active area so any padding leak stands out)
+    auto expected_y = [](int sx, int sy) -> uint8_t {
+        return uint8_t(32 + ((sx * 160) / W) + ((sy * 48) / H));
+    };
+    auto expected_u = [](int cx, int cy) -> uint8_t {
+        return uint8_t(64 + ((cx * 120) / cw));
+    };
+    auto expected_v = [](int cx, int cy) -> uint8_t {
+        return uint8_t(64 + ((cy * 120) / ch));
+    };
+
+    for (int sy = 0; sy < H; ++sy) {
+        uint8_t* row = y_plane.data() + size_t(sy) * size_t(y_stride);
+        for (int sx = 0; sx < W; ++sx) row[sx] = expected_y(sx, sy);
+    }
+    for (int cy = 0; cy < ch; ++cy) {
+        uint8_t* row = uv_plane.data() + size_t(cy) * size_t(uv_stride);
+        for (int cx = 0; cx < cw; ++cx) {
+            row[cx * 2 + 0] = expected_u(cx, cy);
+            row[cx * 2 + 1] = expected_v(cx, cy);
+        }
+    }
+
+    lv::Yuv420View src_yuv{};
+    src_yuv.y = y_plane.data();
+    src_yuv.u = uv_plane.data();
+    src_yuv.v = uv_plane.data() + 1;
+    src_yuv.y_stride = y_stride;
+    src_yuv.u_stride = uv_stride;
+    src_yuv.v_stride = uv_stride;
+    src_yuv.uv_pixel_stride = 2;
+
+    std::vector<uint8_t> i420_buf;
+    int dst_w = 0, dst_h = 0;
+    lv::Yuv420View rot_yuv{};
+    REQUIRE(lv::yuv420_transform_to_i420(src_yuv, W, H, 270, true, i420_buf, dst_w, dst_h, rot_yuv));
+    REQUIRE(dst_w == H);  // 1080 (non-multiple-of-16!)
+    REQUIRE(dst_h == W);  // 1920
+    REQUIRE(rot_yuv.y_stride == dst_w);
+    REQUIRE(rot_yuv.uv_pixel_stride == 1);
+
+    // 1. Exact bit-for-bit verification of every Y, U, V sample (zero padding contamination)
+    for (int sy = 0; sy < H; ++sy) {
+        const int dx = dst_w - 1 - sy;  // 270 CW puts sy -> dx_rot=sy, then mirror -> dst_w-1-sy
+        for (int sx = 0; sx < W; ++sx) {
+            const int dy = W - 1 - sx;
+            const uint8_t got = rot_yuv.y[size_t(dy) * size_t(rot_yuv.y_stride) + size_t(dx)];
+            REQUIRE(got == expected_y(sx, sy));
+        }
+    }
+    const int dst_cw = dst_w / 2;
+    for (int cy = 0; cy < ch; ++cy) {
+        const int dcx = dst_cw - 1 - cy;
+        for (int cx = 0; cx < cw; ++cx) {
+            const int dcy = cw - 1 - cx;
+            const uint8_t gu = rot_yuv.u[size_t(dcy) * size_t(rot_yuv.u_stride) + size_t(dcx)];
+            const uint8_t gv = rot_yuv.v[size_t(dcy) * size_t(rot_yuv.v_stride) + size_t(dcx)];
+            REQUIRE(gu == expected_u(cx, cy));
+            REQUIRE(gv == expected_v(cx, cy));
+        }
+    }
+
+    // 2. Also verify yuv420_to_nv12 last-row bounds safety on padded NV12 input
+    std::vector<uint8_t> nv12_out(size_t(W) * size_t(H) * 3 / 2, 0);
+    lv::yuv420_to_nv12(src_yuv, W, H, nv12_out.data(), W, nv12_out.data() + size_t(W) * size_t(H), W);
+    CHECK(nv12_out[size_t(W) * size_t(H) + size_t(ch - 1) * size_t(W) + size_t(W - 2)] ==
+          expected_u(cw - 1, ch - 1));
+    CHECK(nv12_out[size_t(W) * size_t(H) + size_t(ch - 1) * size_t(W) + size_t(W - 1)] ==
+          expected_v(cw - 1, ch - 1));
+
+    // 3. Full LanVid DCT encode -> decode roundtrip at rotated 1080x1920 (non-16-aligned width!)
+    lv::CodecParams cp;
+    cp.width = dst_w;
+    cp.height = dst_h;
+    cp.quality = 85;
+    cp.chroma = lv::ChromaFormat::k420;
+    cp.slice_height = 16;
+
+    lv::FrameCodec fc;
+    lv::EncodedFrame ef;
+    ef.params = cp;
+    REQUIRE(lv::compute_geometry(cp, ef.geom));
+    ef.slices.resize(size_t(ef.geom.total_slices));
+    REQUIRE(fc.encode_streaming_yuv420(
+        rot_yuv, cp,
+        [&](int sid, int, const uint8_t* data, size_t size) {
+            ef.slices[size_t(sid)].assign(data, data + size);
+        },
+        nullptr));
+
+    lv::Image dec;
+    const auto dr = fc.decode(ef, dec, nullptr);
+    REQUIRE(dr.slices_ok == ef.geom.total_slices);
+    REQUIRE(dec.width == 1080 && dec.height == 1920);
+
+    // Compare decoded RGB against reference YCbCr->RGB of rotated I420 (PSNR > 35 dB)
+    lv::Image ref;
+    ref.allocate(dst_w, dst_h, dec.order);
+    const lv::Planes ref_pl{const_cast<uint8_t*>(rot_yuv.y), const_cast<uint8_t*>(rot_yuv.u),
+                            const_cast<uint8_t*>(rot_yuv.v), rot_yuv.y_stride, rot_yuv.u_stride};
+    lv::ycbcr_to_rgba(ref_pl, dst_h, dst_w, lv::ChromaFormat::k420, lv::ColorMatrix::kBT601Full,
+                      ref.data.data(), ref.stride, dec.order);
+
+    double mse = 0.0;
+    const size_t n = size_t(dst_w) * size_t(dst_h);
+    for (size_t i = 0; i < n; ++i) {
+        for (int c = 0; c < 3; ++c) {
+            const double d = double(dec.data[i * 4 + c]) - double(ref.data[i * 4 + c]);
+            mse += d * d;
+        }
+    }
+    mse /= double(n * 3);
+    const double psnr = mse > 0.0 ? 10.0 * std::log10((255.0 * 255.0) / mse) : 99.0;
+    std::printf("    [Android 1920x1080->1080x1920 rot=270 mirror=1 pad=128] PSNR=%.2f dB\n", psnr);
+    CHECK(psnr > 35.0);
+
+    // 4. End-to-end C ABI lv_sender_push_yuv_planes_ex UDP loopback check
+    std::atomic<int> rx_w{0}, rx_h{0}, rx_cnt{0};
+    lanvid::Receiver rx;
+    rx.on_video([&](const LV_VideoFrameView& f) {
+        rx_w.store(f.width, std::memory_order_relaxed);
+        rx_h.store(f.height, std::memory_order_relaxed);
+        rx_cnt.fetch_add(1, std::memory_order_relaxed);
+    });
+    auto rcfg = lanvid::Receiver::default_config(0, LV_PIXEL_FORMAT_RGBA8888);
+    std::snprintf(rcfg.bind_ip, sizeof(rcfg.bind_ip), "127.0.0.1");
+    rcfg.enable_discovery = 0;
+    REQUIRE(rx.start(rcfg).is_ok());
+
+    LvSenderHandle* tx = lv_sender_create();
+    REQUIRE(tx != nullptr);
+    LV_SenderConfig scfg{};
+    lv_sdk_sender_config_default(&scfg);
+    std::snprintf(scfg.dest_ip, sizeof(scfg.dest_ip), "127.0.0.1");
+    scfg.dest_port = rx.local_port();
+    scfg.width = W;
+    scfg.height = H;
+    scfg.quality = 80;
+    REQUIRE(lv_sdk_sender_start(tx, &scfg) == LV_OK);
+
+    LV_YuvPlanes yp{y_plane.data(), uv_plane.data(), uv_plane.data() + 1, y_stride, uv_stride,
+                    uv_stride, 2, LV_PIXEL_FORMAT_NV12};
+    REQUIRE(lv_sender_push_yuv_planes_ex(tx, &yp, W, H, 270, 1, 0) == LV_OK);
+
+    for (int i = 0; i < 80 && rx_cnt.load() < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(rx_cnt.load() >= 1);
+    CHECK(rx_w.load() == 1080);
+    CHECK(rx_h.load() == 1920);
+
+    lv_sender_stop(tx);
+    lv_sender_destroy(tx);
+    rx.stop();
 }

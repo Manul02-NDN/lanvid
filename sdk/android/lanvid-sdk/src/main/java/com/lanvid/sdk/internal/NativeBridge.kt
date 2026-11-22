@@ -27,6 +27,11 @@ internal object NativeBridge {
         ptr: Long, yBuf: ByteBuffer, uBuf: ByteBuffer, vBuf: ByteBuffer,
         width: Int, height: Int, yStride: Int, uStride: Int, vStride: Int, uvPixelStride: Int
     ): Int
+    @JvmStatic external fun senderPushYuv420Ex(
+        ptr: Long, yBuf: ByteBuffer, uBuf: ByteBuffer, vBuf: ByteBuffer,
+        width: Int, height: Int, yStride: Int, uStride: Int, vStride: Int, uvPixelStride: Int,
+        rotationDeg: Int, mirrorH: Boolean
+    ): Int
     @JvmStatic external fun senderPushPacked(
         ptr: Long, buf: ByteBuffer, width: Int, height: Int, stride: Int, fmt: Int
     ): Int

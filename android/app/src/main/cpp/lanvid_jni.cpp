@@ -215,14 +215,21 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeStopSender(JNIEnv*
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushYuv420(
     JNIEnv* env, jclass, jobject y_buf, jobject u_buf, jobject v_buf, jint width, jint height,
-    jint y_stride, jint u_stride, jint v_stride, jint uv_pixel_stride) {
+    jint y_stride, jint u_stride, jint v_stride, jint uv_pixel_stride, jint rotation_deg,
+    jboolean mirror_h) {
     if (!g_sender || !y_buf || !u_buf || !v_buf) return JNI_FALSE;
-    const auto* y = static_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
-    const auto* u = static_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
-    const auto* v = static_cast<const uint8_t*>(env->GetDirectBufferAddress(v_buf));
-    if (!y || !u || !v) return JNI_FALSE;
-    return lv_sender_push_yuv420_frame(g_sender, y, u, v, width, height, y_stride, u_stride,
-                                       v_stride, uv_pixel_stride, 0)
+    LV_YuvPlanes yp{};
+    yp.plane_y = static_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
+    yp.plane_u = static_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
+    yp.plane_v = static_cast<const uint8_t*>(env->GetDirectBufferAddress(v_buf));
+    if (!yp.plane_y || !yp.plane_u || !yp.plane_v) return JNI_FALSE;
+    yp.y_stride = y_stride;
+    yp.u_stride = u_stride;
+    yp.v_stride = v_stride;
+    yp.uv_pixel_stride = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    yp.pixel_format = (yp.uv_pixel_stride == 2) ? LV_PIXEL_FORMAT_NV12 : LV_PIXEL_FORMAT_I420;
+    return lv_sender_push_yuv_planes_ex(g_sender, &yp, width, height, rotation_deg,
+                                        mirror_h ? 1 : 0, 0) == LV_OK
                ? JNI_TRUE
                : JNI_FALSE;
 }

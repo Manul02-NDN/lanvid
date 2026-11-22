@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "codec/dct.hpp"
+#include "codec/video_codec_common.hpp"
 #include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
 #include "common/cpu_features.hpp"
@@ -117,6 +118,7 @@ struct LvSenderHandle {
 
     std::mutex push_mu;
     lv::Image ext_img;
+    std::vector<uint8_t> yuv_scratch;
 
     std::mutex preview_mu;
     lv::Image preview_img;
@@ -744,8 +746,9 @@ int lv_sender_push_packed_frame(LvSenderHandle* handle, const uint8_t* data, int
     return LV_OK;
 }
 
-int lv_sender_push_yuv_planes(LvSenderHandle* handle, const LV_YuvPlanes* planes, int width, int height,
-                              uint32_t timestamp_us) {
+int lv_sender_push_yuv_planes_ex(LvSenderHandle* handle, const LV_YuvPlanes* planes, int width,
+                                 int height, int rotation_deg, int mirror_h,
+                                 uint32_t timestamp_us) {
     if (!handle || !planes || !planes->plane_y || !planes->plane_u || width <= 0 || height <= 0) {
         return LV_ERR_INVALID_ARG;
     }
@@ -782,21 +785,37 @@ int lv_sender_push_yuv_planes(LvSenderHandle* handle, const LV_YuvPlanes* planes
     std::lock_guard<std::mutex> plk(handle->push_mu);
     handle->sender->service_control();
 
+    int out_w = width;
+    int out_h = height;
+    lv::Yuv420View send_yuv = yuv;
+    const int norm_rot = ((rotation_deg % 360) + 360) % 360;
+    if (norm_rot != 0 || mirror_h != 0) {
+        if (!lv::yuv420_transform_to_i420(yuv, width, height, norm_rot, mirror_h != 0,
+                                          handle->yuv_scratch, out_w, out_h, send_yuv)) {
+            return LV_ERR_INVALID_ARG;
+        }
+    }
+
     lv::CodecParams cp = handle->codec_params;
-    cp.width = width;
-    cp.height = height;
+    cp.width = out_w;
+    cp.height = out_h;
     cp.chroma = lv::ChromaFormat::k420;
     cp.quality = handle->resolve_quality();
 
     const uint32_t fid = handle->ext_frame_id.fetch_add(1, std::memory_order_relaxed);
     const uint32_t ts = timestamp_us ? timestamp_us : lv::now_us32();
     const uint64_t t0 = lv::now_us();
-    const bool ok = handle->sender->send_frame_yuv420(yuv, cp, fid, ts);
+    const bool ok = handle->sender->send_frame_yuv420(send_yuv, cp, fid, ts);
     const uint64_t t1 = lv::now_us();
     if (!ok) return LV_ERR_CODEC;
     handle->state.store(LV_STATE_CONNECTED, std::memory_order_relaxed);
-    handle->record_encode_sample(double(t1 - t0) / 1000.0, width, height);
+    handle->record_encode_sample(double(t1 - t0) / 1000.0, out_w, out_h);
     return LV_OK;
+}
+
+int lv_sender_push_yuv_planes(LvSenderHandle* handle, const LV_YuvPlanes* planes, int width,
+                              int height, uint32_t timestamp_us) {
+    return lv_sender_push_yuv_planes_ex(handle, planes, width, height, 0, 0, timestamp_us);
 }
 
 int lv_sender_push_cvpixelbuffer_planes(LvSenderHandle* handle, const uint8_t* plane0, int stride0,

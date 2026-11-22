@@ -23,6 +23,14 @@ void packed_rgb_to_nv12(const Image& src, uint8_t* dst_y, int y_stride, uint8_t*
 void yuv420_to_nv12(const Yuv420View& src, int width, int height, uint8_t* dst_y, int y_stride,
                     uint8_t* dst_uv, int uv_stride);
 
+// Unpacks YUV_420_888 (I420 / NV12 / NV21 with arbitrary rowStride & pixelStride=1|2, strictly
+// avoiding padding bytes and Android's last-row UV length = rowStride - 1 quirk), applies clockwise
+// rotation (0 / 90 / 180 / 270 deg) and optional horizontal mirror (e.g. front camera), and writes
+// tightly packed planar I420 into `out_buf` (reused across calls). Sets `dst_w`, `dst_h`, `out_view`.
+bool yuv420_transform_to_i420(const Yuv420View& src, int src_w, int src_h, int rotation_deg,
+                              bool mirror_h, std::vector<uint8_t>& out_buf, int& dst_w, int& dst_h,
+                              Yuv420View& out_view);
+
 void nv12_to_packed_rgb(const uint8_t* src_y, int y_stride, const uint8_t* src_uv, int uv_stride,
                         int width, int height, PixelOrder order, Image& dst);
 

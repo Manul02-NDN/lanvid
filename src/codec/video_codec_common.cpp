@@ -236,19 +236,140 @@ void yuv420_to_nv12(const Yuv420View& src, int width, int height, uint8_t* dst_y
     }
     const int cw = width >> 1;
     const int ch = height >> 1;
+    const int pstep = std::max(1, src.uv_pixel_stride);
     for (int y = 0; y < ch; ++y) {
         const uint8_t* su = src.u + size_t(y) * size_t(src.u_stride);
         const uint8_t* sv = src.v + size_t(y) * size_t(src.v_stride);
         uint8_t* duv = dst_uv + size_t(y) * size_t(uv_stride);
-        if (src.uv_pixel_stride == 2 && sv == su + 1) {
+        // Only bulk-copy interleaved NV12 on non-final rows: on Android YUV_420_888, the last
+        // chroma row of uPlane may have length (cw * 2 - 1) without the trailing V byte.
+        if (pstep == 2 && sv == su + 1 && y + 1 < ch) {
             std::memcpy(duv, su, size_t(cw) * 2);
         } else {
             for (int x = 0; x < cw; ++x) {
-                duv[x * 2 + 0] = su[x * src.uv_pixel_stride];
-                duv[x * 2 + 1] = sv[x * src.uv_pixel_stride];
+                duv[x * 2 + 0] = su[x * pstep];
+                duv[x * 2 + 1] = sv[x * pstep];
             }
         }
     }
+}
+
+namespace {
+
+inline void transform_plane_u8(const uint8_t* src, int src_w, int src_h, int src_row_stride,
+                               int src_px_stride, int rot, bool mirror_h, uint8_t* dst, int dst_w,
+                               int dst_h) {
+    if (rot == 0 && !mirror_h) {
+        if (src_px_stride == 1) {
+            for (int y = 0; y < src_h; ++y) {
+                std::memcpy(dst + size_t(y) * size_t(dst_w),
+                            src + size_t(y) * size_t(src_row_stride), size_t(src_w));
+            }
+        } else {
+            for (int y = 0; y < src_h; ++y) {
+                const uint8_t* sr = src + size_t(y) * size_t(src_row_stride);
+                uint8_t* dr = dst + size_t(y) * size_t(dst_w);
+                for (int x = 0; x < src_w; ++x) dr[x] = sr[x * src_px_stride];
+            }
+        }
+        return;
+    }
+
+    if (rot == 0 && mirror_h) {
+        for (int y = 0; y < src_h; ++y) {
+            const uint8_t* sr = src + size_t(y) * size_t(src_row_stride);
+            uint8_t* dr = dst + size_t(y) * size_t(dst_w);
+            for (int x = 0; x < src_w; ++x) {
+                dr[dst_w - 1 - x] = sr[x * src_px_stride];
+            }
+        }
+        return;
+    }
+
+    if (rot == 180) {
+        for (int dy = 0; dy < dst_h; ++dy) {
+            const uint8_t* sr = src + size_t(src_h - 1 - dy) * size_t(src_row_stride);
+            uint8_t* dr = dst + size_t(dy) * size_t(dst_w);
+            if (mirror_h) {
+                // 180° + horizontal mirror == vertical flip
+                for (int dx = 0; dx < dst_w; ++dx) dr[dx] = sr[dx * src_px_stride];
+            } else {
+                for (int dx = 0; dx < dst_w; ++dx) dr[dx] = sr[(src_w - 1 - dx) * src_px_stride];
+            }
+        }
+        return;
+    }
+
+    // 90° or 270° clockwise rotation (dst_w == src_h, dst_h == src_w).
+    // Iterate by source row for cache-friendly reads and strictly stay within [0..src_w-1].
+    if (rot == 90) {
+        for (int sy = 0; sy < src_h; ++sy) {
+            const uint8_t* sr = src + size_t(sy) * size_t(src_row_stride);
+            const int dx_rot = src_h - 1 - sy;
+            const int dx = mirror_h ? (dst_w - 1 - dx_rot) : dx_rot;
+            for (int sx = 0; sx < src_w; ++sx) {
+                dst[size_t(sx) * size_t(dst_w) + size_t(dx)] = sr[sx * src_px_stride];
+            }
+        }
+    } else {  // 270° CW
+        for (int sy = 0; sy < src_h; ++sy) {
+            const uint8_t* sr = src + size_t(sy) * size_t(src_row_stride);
+            const int dx_rot = sy;
+            const int dx = mirror_h ? (dst_w - 1 - dx_rot) : dx_rot;
+            for (int sx = 0; sx < src_w; ++sx) {
+                const int dy = src_w - 1 - sx;
+                dst[size_t(dy) * size_t(dst_w) + size_t(dx)] = sr[sx * src_px_stride];
+            }
+        }
+    }
+}
+
+}  // namespace
+
+bool yuv420_transform_to_i420(const Yuv420View& src, int src_w, int src_h, int rotation_deg,
+                              bool mirror_h, std::vector<uint8_t>& out_buf, int& dst_w, int& dst_h,
+                              Yuv420View& out_view) {
+    if (!src.y || !src.u || !src.v || src_w < 2 || src_h < 2) return false;
+    int rot = ((rotation_deg % 360) + 360) % 360;
+    if (rot != 0 && rot != 90 && rot != 180 && rot != 270) rot = 0;
+
+    const int sw = src_w & ~1;
+    const int sh = src_h & ~1;
+    const bool swap_wh = (rot == 90 || rot == 270);
+    dst_w = swap_wh ? sh : sw;
+    dst_h = swap_wh ? sw : sh;
+
+    const int src_cw = sw >> 1;
+    const int src_ch = sh >> 1;
+    const int dst_cw = dst_w >> 1;
+    const int dst_ch = dst_h >> 1;
+
+    const size_t y_bytes = size_t(dst_w) * size_t(dst_h);
+    const size_t c_bytes = size_t(dst_cw) * size_t(dst_ch);
+    const size_t total = y_bytes + c_bytes * 2;
+    if (out_buf.size() != total) out_buf.resize(total);
+
+    uint8_t* dy = out_buf.data();
+    uint8_t* du = dy + y_bytes;
+    uint8_t* dv = du + c_bytes;
+
+    const int y_stride = src.y_stride > 0 ? src.y_stride : sw;
+    const int pstep = std::max(1, src.uv_pixel_stride);
+    const int u_stride = src.u_stride > 0 ? src.u_stride : (src_cw * pstep);
+    const int v_stride = src.v_stride > 0 ? src.v_stride : u_stride;
+
+    transform_plane_u8(src.y, sw, sh, y_stride, 1, rot, mirror_h, dy, dst_w, dst_h);
+    transform_plane_u8(src.u, src_cw, src_ch, u_stride, pstep, rot, mirror_h, du, dst_cw, dst_ch);
+    transform_plane_u8(src.v, src_cw, src_ch, v_stride, pstep, rot, mirror_h, dv, dst_cw, dst_ch);
+
+    out_view.y = dy;
+    out_view.u = du;
+    out_view.v = dv;
+    out_view.y_stride = dst_w;
+    out_view.u_stride = dst_cw;
+    out_view.v_stride = dst_cw;
+    out_view.uv_pixel_stride = 1;
+    return true;
 }
 
 void nv12_to_packed_rgb(const uint8_t* src_y, int y_stride, const uint8_t* src_uv, int uv_stride,

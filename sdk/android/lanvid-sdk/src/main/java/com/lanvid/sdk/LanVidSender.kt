@@ -31,16 +31,37 @@ class LanVidSender : Closeable {
         if (handle != 0L) NativeBridge.senderStop(handle)
     }
 
-    /** Zero-RGB-conversion push straight from Android Camera2 / CameraX YUV_420_888 Image. */
-    fun pushYuvImage(image: Image): Boolean {
+    /**
+     * Zero-RGB-conversion push straight from Android Camera2 / CameraX YUV_420_888 Image.
+     * Supports clockwise rotation (0/90/180/270 deg) and horizontal mirror (for front camera).
+     */
+    fun pushYuvImage(
+        image: Image,
+        rotationDegrees: Int = 0,
+        mirrorHorizontal: Boolean = false
+    ): Boolean {
         if (handle == 0L || image.planes.size < 3) return false
         val p0 = image.planes[0]
         val p1 = image.planes[1]
         val p2 = image.planes[2]
-        return NativeBridge.senderPushYuv420(
-            handle, p0.buffer, p1.buffer, p2.buffer,
-            image.width, image.height, p0.rowStride, p1.rowStride, p2.rowStride, p1.pixelStride
+        val yBuf = ensureDirect(p0.buffer)
+        val uBuf = ensureDirect(p1.buffer)
+        val vBuf = ensureDirect(p2.buffer)
+        return NativeBridge.senderPushYuv420Ex(
+            handle, yBuf, uBuf, vBuf,
+            image.width, image.height, p0.rowStride, p1.rowStride, p2.rowStride, p1.pixelStride,
+            rotationDegrees, mirrorHorizontal
         ) == 0
+    }
+
+    private fun ensureDirect(src: ByteBuffer): ByteBuffer {
+        if (src.isDirect && src.position() == 0) return src
+        val dup = src.duplicate()
+        dup.rewind()
+        val direct = ByteBuffer.allocateDirect(dup.remaining())
+        direct.put(dup)
+        direct.rewind()
+        return direct
     }
 
     /** Zero-copy push of packed RGBA_8888 direct ByteBuffer (e.g. MediaProjection ImageReader). */
