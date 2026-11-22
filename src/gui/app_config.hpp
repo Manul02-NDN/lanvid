@@ -29,6 +29,8 @@ struct AppConfig {
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
     int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
     bool aoip_tone = false;    // sender: N-channel test tone bus
+    int aoip_source = 0;       // sender: 0=Built-in Test Tone Generator, 1=Virtual Audio Device
+    int aoip_output = 0;       // receiver: 0=meters only, 1=Virtual Audio Device
 
     int preset = 0;            // 0=1080p60 Low Latency, 1=Ultra 4K60, 2=Wi-Fi Adaptive, 3=Custom
     int codec = 0;             // 0=LanVid DCT, 1=H.264, 2=H.265 (HEVC)

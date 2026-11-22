@@ -45,7 +45,7 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
 fi
 
 # 2. Check & close conflicting running LanVid processes
-for proc in lanvid_app sender receiver; do
+for proc in lanvid_app sender receiver lanvid-audio-bridge; do
   if pgrep -x "$proc" >/dev/null 2>&1; then
     warn "Знайдено запущений процес '$proc' — зупиняємо перед оновленням..."
     pkill -TERM -x "$proc" || true
@@ -118,7 +118,7 @@ if [ "$NEED_BUILD" -eq 1 ]; then
         -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_GUI=ON -DLANVID_BUILD_SHARED=ON
   cmake --build "$BUILD_TMP" --parallel "$(nproc)"
   mkdir -p "$BIN_SRC" "$LIB_SRC"
-  for b in lanvid_app sender receiver; do
+  for b in lanvid_app sender receiver lanvid-audio-bridge; do
     [ -f "$BUILD_TMP/$b" ] && cp "$BUILD_TMP/$b" "$BIN_SRC/$b"
   done
   [ -f "$BUILD_TMP/liblanvid_core.so" ] && cp "$BUILD_TMP/liblanvid_core.so" "$LIB_SRC/liblanvid_core.so"
@@ -168,7 +168,7 @@ fi
 # 6. Install binaries, shared library, icon, and .desktop launcher
 log "Встановлення файлів у $PREFIX..."
 $SUDO install -d "$PREFIX/bin" "$PREFIX/lib" /usr/share/applications /usr/share/icons/hicolor/scalable/apps
-for b in lanvid_app sender receiver; do
+for b in lanvid_app sender receiver lanvid-audio-bridge; do
   if [ -f "$BIN_SRC/$b" ]; then
     $SUDO install -m 0755 "$BIN_SRC/$b" "$PREFIX/bin/$b"
   fi

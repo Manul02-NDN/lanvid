@@ -102,6 +102,8 @@ void LanVidStudioApp::shutdown() {
 
     if (sender_) {
         stop_tone();
+        stop_vdev_tx();
+        vdev_rx_.stop();
         lv_sender_destroy(sender_);
         sender_ = nullptr;
     }
@@ -219,7 +221,8 @@ void LanVidStudioApp::start_sender() {
     last_tx_preview_fid_ = 0;
     if (lv_sender_start(sender_, &sc)) {
         sender_running_ = true;
-        if (cfg_.aoip_tone) start_tone();
+        if (cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
+        if (cfg_.aoip_source == 1) start_vdev_tx();
         toast_msg_ = "Передача запущена -> " + cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
         toast_until_us_ = now_us() + 3000000ull;
     } else {
@@ -256,6 +259,63 @@ void LanVidStudioApp::start_tone() {
     });
 }
 
+void LanVidStudioApp::start_vdev_tx() {
+    stop_vdev_tx();
+    ShmAudioHost::Config hc;
+    hc.channels = uint32_t(std::clamp(cfg_.aoip_channels, 1, 64));
+    vdev_tx_.start(hc, [this](const float* const* p, uint32_t ch, uint32_t n, bool disc) {
+        // Re-anchor to the sender Master Clock after DAW start/stall; otherwise stay contiguous.
+        const uint64_t ts = disc ? lv_sender_get_master_clock_samples(sender_) - n : LV_MEDIA_TS_AUTO;
+        lv_sender_push_audio_multichannel(sender_, p, uint16_t(ch), n, LV_AUDIO_FORMAT_F32,
+                                          LV_AUDIO_LAYOUT_PLANAR, ts);
+    }, nullptr);
+}
+
+void LanVidStudioApp::stop_vdev_tx() { vdev_tx_.stop(); }
+
+void LanVidStudioApp::apply_receiver_output() {
+    if (!receiver_) return;
+    vdev_rx_.stop();
+    if (!receiver_running_) return;
+    if (cfg_.aoip_output == 1) {
+        // The bridge becomes the single consumer of the playout matrix (it also drives the meters).
+        lv_receiver_set_multichannel_audio_callback(receiver_, nullptr, nullptr);
+        ShmAudioHost::Config hc;
+        hc.channels = uint32_t(std::clamp(cfg_.aoip_channels, 1, 64));
+        vdev_rx_.start(hc, nullptr, [this](float* const* p, uint32_t ch, uint32_t n) {
+            static thread_local std::vector<float> tmp;
+            tmp.resize(size_t(ch) * n);
+            lv_receiver_pop_audio_multichannel(receiver_, tmp.data(), uint16_t(ch), n, LV_AUDIO_LAYOUT_PLANAR);
+            for (uint32_t c = 0; c < ch; ++c) std::copy(tmp.begin() + c * n, tmp.begin() + (c + 1) * n, p[c]);
+        });
+    } else {
+        apply_receiver_output();
+    }
+}
+
+void LanVidStudioApp::draw_vdev_status(const ShmHostStatus& st, bool tx_side) {
+    if (!st.bus_open) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "Шина %s недоступна", kShmBusName);
+        return;
+    }
+    if (st.driver_connected) {
+        const uint32_t fill = tx_side ? st.tx_fill : st.rx_fill;
+        ImGui::TextColored(ImVec4(0.24f, 0.90f, 0.52f, 1.0f), "DAW підключена через %s",
+                           st.driver_name.empty() ? "драйвер" : st.driver_name.c_str());
+        ImGui::Text("%u Гц | буфер %u | %s %u / %u кадрів", st.sample_rate, st.buffer_size,
+                    tx_side ? "TX" : "RX", fill, unsigned(kShmBusFrames));
+        ImGui::ProgressBar(float(fill) / float(kShmBusFrames), ImVec2(-1, 6), "");
+        ImGui::TextDisabled("%s: %llu кадрів | переповнень %llu | недоборів %llu | переякорень %llu",
+                            tx_side ? "Відправлено" : "Доставлено",
+                            (unsigned long long)(tx_side ? st.tx_frames : st.rx_frames),
+                            (unsigned long long)st.tx_overruns, (unsigned long long)st.rx_underruns,
+                            (unsigned long long)st.reanchors);
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Очікування DAW: виберіть пристрій «LanVid»");
+        ImGui::TextDisabled("Windows: ASIO «LanVid Virtual ASIO» | macOS: «LanVid Virtual 64ch» | Linux: lanvid-audio-bridge");
+    }
+}
+
 void LanVidStudioApp::stop_tone() {
     tone_stop_.store(true);
     if (tone_thread_.joinable()) tone_thread_.join();
@@ -263,6 +323,7 @@ void LanVidStudioApp::stop_tone() {
 
 void LanVidStudioApp::stop_sender() {
     stop_tone();
+    stop_vdev_tx();
     if (sender_) lv_sender_stop(sender_);
     sender_running_ = false;
 }
@@ -322,12 +383,28 @@ void LanVidStudioApp::draw_aoip_sender_controls() {
     }
     ImGui::TextDisabled("2 мс — Ultra Low Latency  <->  2000 мс — Bulletproof");
     ImGui::TextWrapped("%s", latency_mode_label(cfg_.aoip_latency_ms));
-    if (ImGui::Checkbox("Тестовий тон (N каналів, 110 Гц x номер каналу)", &cfg_.aoip_tone)) {
+    const char* src_items[] = {"Built-in Test Tone Generator", "Virtual Audio Device (ASIO / CoreAudio / PipeWire)"};
+    if (ImGui::Combo("Джерело шини", &cfg_.aoip_source, src_items, 2)) {
         if (sender_running_) {
-            if (cfg_.aoip_tone) start_tone();
-            else stop_tone();
+            stop_tone();
+            stop_vdev_tx();
+            if (cfg_.aoip_source == 1) start_vdev_tx();
+            else if (cfg_.aoip_tone) start_tone();
         }
         config_dirty_ = true;
+    }
+    if (cfg_.aoip_source == 0) {
+        if (ImGui::Checkbox("Генерувати тон (110 Гц x номер каналу)", &cfg_.aoip_tone)) {
+            if (sender_running_) {
+                if (cfg_.aoip_tone) start_tone();
+                else stop_tone();
+            }
+            config_dirty_ = true;
+        }
+    } else if (sender_running_) {
+        draw_vdev_status(vdev_tx_.status(), true);
+    } else {
+        ImGui::TextDisabled("DAW -> виходи «LanVid Out 1..%d» -> мережа (після «Старт передачі»)", cfg_.aoip_channels);
     }
 }
 
@@ -373,6 +450,7 @@ void LanVidStudioApp::draw_aoip_meter_grid() {
 }
 
 void LanVidStudioApp::stop_receiver() {
+    vdev_rx_.stop();
     if (receiver_) lv_receiver_stop(receiver_);
     receiver_running_ = false;
 }
@@ -827,10 +905,24 @@ void LanVidStudioApp::draw_receiver_tab() {
     // 64-channel LED meter grid (phase-aligned playout bus)
     const int bus_n = std::clamp(cfg_.aoip_channels, 1, 64);
     const int bus_rows = (bus_n + 15) / 16;
-    const float meter_h = 30.0f + float(bus_rows) * 26.0f;
+    const float meter_h = 30.0f + float(bus_rows) * 26.0f + (cfg_.aoip_output == 1 ? 22.0f : 0.0f);
     ImGui::BeginChild("##AoipMeters", ImVec2(0, meter_h), true, ImGuiWindowFlags_NoScrollbar);
     ImGui::TextDisabled("AoIP шина: %d кан. | затримка %d мс — %s", bus_n, cfg_.aoip_latency_ms,
                         cfg_.aoip_latency_ms <= 10 ? "Ultra Low" : (cfg_.aoip_latency_ms <= 100 ? "Balanced" : "Bulletproof"));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(260.0f);
+    const char* out_items[] = {"Лише індикатори", "Virtual Audio Device (DAW inputs)"};
+    if (ImGui::Combo("Вихід шини", &cfg_.aoip_output, out_items, 2)) {
+        apply_receiver_output();
+        config_dirty_ = true;
+    }
+    if (cfg_.aoip_output == 1 && receiver_running_) {
+        const auto vs = vdev_rx_.status();
+        vs.driver_connected ? ImGui::TextColored(ImVec4(0.24f, 0.90f, 0.52f, 1.0f), "DAW: %s | %u Гц | буфер %u | RX %u кадрів",
+                                                 vs.driver_name.c_str(), vs.sample_rate, vs.buffer_size, vs.rx_fill)
+                            : ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Очікування DAW на пристрої «LanVid»");
+        vdev_rx_.publish_network_state(uint32_t(cfg_.aoip_latency_ms), rx_stats_.running != 0, 0.0);
+    }
     draw_aoip_meter_grid();
     ImGui::EndChild();
 

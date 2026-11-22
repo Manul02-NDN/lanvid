@@ -137,6 +137,8 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "aoip_channels", cfg.aoip_channels);
     read_int(j, "aoip_latency_ms", cfg.aoip_latency_ms);
     read_bool(j, "aoip_tone", cfg.aoip_tone);
+    read_int(j, "aoip_source", cfg.aoip_source);
+    read_int(j, "aoip_output", cfg.aoip_output);
     read_bool(j, "show_hud", cfg.show_hud);
     read_str(j, "preview_backend", cfg.preview_backend);
     read_int(j, "active_tab", cfg.active_tab);
@@ -192,6 +194,8 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"
         << "  \"aoip_latency_ms\": " << cfg.aoip_latency_ms << ",\n"
         << "  \"aoip_tone\": " << (cfg.aoip_tone ? "true" : "false") << ",\n"
+        << "  \"aoip_source\": " << cfg.aoip_source << ",\n"
+        << "  \"aoip_output\": " << cfg.aoip_output << ",\n"
         << "  \"show_hud\": " << (cfg.show_hud ? "true" : "false") << ",\n"
         << "  \"preview_backend\": \"" << json_esc(cfg.preview_backend) << "\",\n"
         << "  \"active_tab\": " << cfg.active_tab << "\n"

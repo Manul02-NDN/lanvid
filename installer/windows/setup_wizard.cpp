@@ -303,7 +303,9 @@ void register_uninstaller(const fs::path& dest_dir) {
     set_sz(L"InstallLocation", dest_dir.wstring());
     set_sz(L"DisplayIcon", (dest_dir / L"lanvid_app.exe").wstring());
     const std::wstring uninst =
-        L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Stop-Process -Name lanvid_app,sender,receiver -Force -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force '" +
+        L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Stop-Process -Name lanvid_app,sender,receiver -Force -ErrorAction SilentlyContinue; Start-Process regsvr32.exe -ArgumentList '/u','/s','" +
+        (dest_dir / L"LanVidASIO.dll").wstring() +
+        L"' -Wait -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force '" +
         dest_dir.wstring() +
         L"' -ErrorAction SilentlyContinue; Remove-Item -Force \\\"$env:USERPROFILE\\Desktop\\LanVid Studio.lnk\\\" -ErrorAction SilentlyContinue; Remove-Item -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LanVidStudio' -Force -ErrorAction SilentlyContinue\"";
     set_sz(L"UninstallString", uninst);
@@ -366,6 +368,16 @@ bool execute_install(bool want_desktop, bool want_firewall, bool silent) {
     if (!extract_embedded_payload(g_rep.install_dir)) {
         log_msg(L"ПОМИЛКА: не вдалося розпакувати інсталяційний архів.");
         return false;
+    }
+
+    {   // 64-channel virtual ASIO device (silent COM registration; requires the elevated installer)
+        const std::wstring asio = (g_rep.install_dir / L"LanVidASIO.dll").wstring();
+        DWORD ec_reg = 1;
+        if (fs::exists(asio) && run_hidden_cmd(L"regsvr32.exe /s \"" + asio + L"\"", &ec_reg) && ec_reg == 0) {
+            log_msg(L"      ASIO-драйвер «LanVid Virtual ASIO» (64 In / 64 Out) зареєстровано.");
+        } else {
+            log_msg(L"      ASIO-драйвер: реєстрація пропущена (потрібні права Адміністратора: regsvr32 LanVidASIO.dll).");
+        }
     }
 
     set_prog(70);

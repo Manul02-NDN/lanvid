@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LINUX_DIR = ROOT / "installer" / "linux"
 OUT_RUN = LINUX_DIR / "LanVid-Linux-x86_64.run"
 
-INCLUDE_DIRS = ["cmake", "include", "src", "third_party/imgui"]
+INCLUDE_DIRS = ["cmake", "include", "src", "drivers", "third_party/imgui"]
 INCLUDE_FILES = ["CMakeLists.txt"]
 
 HEADER = (

@@ -16,6 +16,7 @@
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/receiver.hpp"
+#include "audio/shm_audio_host.hpp"
 #include "platform/audio_playback.hpp"
 #include "platform/preview_window.hpp"
 
@@ -39,6 +40,9 @@ void print_usage(const char* prog) {
         "  --audio-channels <1..64> Enable the 64-ch AoIP bus: per-channel telemetry + ch1/ch2 monitor (default: off)\n"
         "  --audio-latency <2..2000> AoIP playout latency in ms, phase-aligned across channels (default: 20)\n"
         "  --audio-rate <48000|96000> AoIP bus sample rate (default: 48000)\n"
+        "  --audio-device <dev>     default | virtual (default: default)\n"
+        "                           virtual = deliver the phase-aligned bus to the OS virtual device \"LanVid\"\n"
+        "                                     (DAW in-channels 1..N) via LanVidAudioBus_v1; implies --audio-channels 64\n"
         "  --preview, --window      Open live video preview window (D3D11/GDI on Win, SDL2 on UNIX)\n"
         "                           Hotkeys: Esc/Q=quit, F/dblclick=fullscreen, C=conceal, S=snapshot\n"
         "  --preview-backend <name> auto | d3d11 | gdi (Windows only; default: auto)\n"
@@ -61,6 +65,7 @@ int main(int argc, char** argv) {
     bool force_gdi = false;
     bool enable_audio = true;
     int aoip_channels = 0;
+    bool audio_virtual = false;
     int win_w = 1280, win_h = 720;
     std::string dump_prefix;
     uint64_t dump_every = 60;
@@ -93,7 +98,14 @@ int main(int argc, char** argv) {
         else if (arg == "--no-simd") lv::set_simd_disabled(true);
         else if (arg == "--no-sync") rcfg.enable_clock_sync = false;
         else if (arg == "--no-audio") enable_audio = false;
-        else if (arg == "--audio-channels") aoip_channels = std::atoi(need_val("--audio-channels"));
+        else if (arg == "--audio-device") {
+            const std::string d = need_val("--audio-device");
+            if (d == "virtual") audio_virtual = true;
+            else if (d != "default") {
+                std::fprintf(stderr, "Invalid --audio-device: %s (expected default|virtual)\n", d.c_str());
+                return 2;
+            }
+        } else if (arg == "--audio-channels") aoip_channels = std::atoi(need_val("--audio-channels"));
         else if (arg == "--audio-latency") rcfg.audio_latency_ms = uint32_t(std::clamp(std::atoi(need_val("--audio-latency")), 2, 2000));
         else if (arg == "--audio-rate") rcfg.audio_sample_rate = uint32_t(std::atoi(need_val("--audio-rate")) == 96000 ? 96000 : 48000);
         else if (arg == "--audio-target-ms") rcfg.audio_target_ms = std::atof(need_val("--audio-target-ms"));
@@ -227,6 +239,22 @@ int main(int argc, char** argv) {
         enable_audio ? "auto" : "off", lv::dct_kernels_best().name);
     std::fflush(stdout);
 
+    // Network -> AudioSyncMatrix -> LanVidAudioBus_v1 -> DAW inputs (the host pump is the only
+    // consumer of the matrix in this mode, so the stereo monitor below is disabled).
+    lv::ShmAudioHost vhost;
+    if (audio_virtual) {
+        if (aoip_channels <= 0) aoip_channels = 64;
+        lv::ShmAudioHost::Config hc;
+        hc.channels = uint32_t(std::min(aoip_channels, 64));
+        if (!vhost.start(hc, nullptr, [&receiver](float* const* planes, uint32_t ch, uint32_t n) {
+                receiver.pop_audio_multichannel_planar(planes, ch, n);
+            })) {
+            std::fprintf(stderr, "Failed to open shared audio bus %s\n", lv::kShmBusName);
+            return 1;
+        }
+        std::printf("Virtual audio device bridge active: %d channels -> %s\n", aoip_channels, lv::kShmBusName);
+    }
+
     uint64_t next_mon_us = lv::now_us();
     uint64_t next_aoip_report_us = next_mon_us + 1000000;
     std::vector<float> mon_f(480 * 2);
@@ -238,7 +266,7 @@ int main(int argc, char** argv) {
             const uint64_t tnow = lv::now_us();
             const uint32_t blk = rcfg.audio_sample_rate / 200;  // 5 ms
             if (tnow > next_mon_us + 200000) next_mon_us = tnow;  // stalled > 200 ms: re-anchor
-            while (tnow >= next_mon_us) {  // render every due block so the cursor keeps real time
+            while (!audio_virtual && tnow >= next_mon_us) {  // render every due block so the cursor keeps real time
                 next_mon_us += uint64_t(blk) * 1000000ull / rcfg.audio_sample_rate;
                 // Stereo monitor of channels 1/2 (the matrix is rendered once; meters track all channels).
                 receiver.pop_audio_multichannel_interleaved(mon_f.data(), 2, std::min<uint32_t>(blk, 480));
@@ -270,6 +298,15 @@ int main(int argc, char** argv) {
                             (unsigned long long)nack, (unsigned long long)under,
                             receiver.audio_matrix().resample_ppm(),
                             double(receiver.audio_matrix().meter(0).level_dbfs));
+                if (audio_virtual) {
+                    vhost.publish_network_state(receiver.audio_latency_ms(), mc.synced(), mc.skew_ppm());
+                    const auto vs = vhost.status();
+                    std::printf("[VDEV  ] DAW %s%s%s | %u Hz buf=%u | rx_fill=%u | delivered=%llu frames | underruns=%llu\n",
+                                vs.driver_connected ? "connected" : "not connected",
+                                vs.driver_name.empty() ? "" : " via ", vs.driver_name.c_str(), vs.sample_rate,
+                                vs.buffer_size, vs.rx_fill, (unsigned long long)vs.rx_frames,
+                                (unsigned long long)vs.rx_underruns);
+                }
                 std::fflush(stdout);
             }
         }
@@ -316,6 +353,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    vhost.stop();
     audio_out.stop();
     if (preview) preview->close();
     receiver.flush();

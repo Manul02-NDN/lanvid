@@ -38,6 +38,7 @@ option(LANVID_BUILD_SHARED  "Build lanvid_core shared C ABI library (DLL/.so/.dy
 option(LANVID_BUILD_GUI     "Build LanVid Studio Desktop GUI (Dear ImGui)" ON)
 option(LANVID_BUILD_CLI     "Build CLI sender/receiver executables" ON)
 option(LANVID_BUILD_TESTS   "Build unit tests and benchmark" ON)
+option(LANVID_BUILD_DRIVERS "Build OS virtual audio devices (ASIO DLL / CoreAudio HAL / JACK bridge)" ON)
 
 set(LV_IS_X86 FALSE)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
@@ -85,6 +86,15 @@ set(LV_CORE_SOURCES
   src/net/discovery.cpp
   src/core/lanvid_c_api.cpp
 )
+
+# Desktop-only: LanVidAudioBus_v1 shared-memory bridge to the OS virtual audio devices
+# (Android bionic has no shm_open; mobile apps never host the virtual device).
+if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
+  list(APPEND LV_CORE_SOURCES
+    src/audio/shm_audio_bridge.cpp
+    src/audio/shm_audio_host.cpp
+  )
+endif()
 
 if(NOT LANVID_SDK_CORE_ONLY)
   list(APPEND LV_CORE_SOURCES
@@ -135,6 +145,12 @@ endif()
 
 # Platform-specific network, preview, capture, and audio backends
 set(LV_PLATFORM_LIBS Threads::Threads)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+  find_library(LV_RT_LIB rt)  # shm_open on glibc < 2.34
+  if(LV_RT_LIB)
+    list(APPEND LV_PLATFORM_LIBS ${LV_RT_LIB})
+  endif()
+endif()
 set(LV_PLATFORM_INCLUDES "")
 set(LV_HAVE_SDL2 FALSE)
 set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread")
@@ -313,6 +329,49 @@ if(LANVID_BUILD_CLI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
 endif()
 
 # ---------------------------------------------------------------- tests & benchmark
+
+# ---------------------------------------------------------------- virtual 64ch OS audio devices
+# Each driver compiles the self-contained shared-memory bus directly (no lanvid_core dependency),
+# because it is loaded into foreign processes (DAWs / coreaudiod).
+if(LANVID_BUILD_DRIVERS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
+  if(APPLE)
+    add_library(LanVidAudio MODULE
+      drivers/macos/hal/LanVidAudioDriver.cpp
+      src/audio/shm_audio_bridge.cpp)
+    set_target_properties(LanVidAudio PROPERTIES
+      BUNDLE TRUE
+      BUNDLE_EXTENSION driver
+      OUTPUT_NAME LanVidAudio
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/drivers/macos/hal/Info.plist.in"
+      OSX_ARCHITECTURES "arm64;x86_64"
+      CXX_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON)
+    target_include_directories(LanVidAudio PRIVATE src)
+    target_compile_options(LanVidAudio PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(LanVidAudio PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
+  elseif(WIN32)
+    add_library(LanVidASIO SHARED
+      drivers/windows/asio/lanvid_asio.cpp
+      drivers/windows/asio/lanvid_asio.def
+      src/audio/shm_audio_bridge.cpp)
+    target_include_directories(LanVidASIO PRIVATE src drivers/windows/asio)
+    target_link_libraries(LanVidASIO PRIVATE winmm advapi32 ole32 user32)
+    # Static CRT: the DLL is loaded into arbitrary DAW processes.
+    set_target_properties(LanVidASIO PROPERTIES OUTPUT_NAME LanVidASIO
+      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  else()
+    add_executable(lanvid-audio-bridge
+      drivers/linux/jack_pw/lanvid_audio_bridge.cpp
+      src/audio/shm_audio_bridge.cpp)
+    target_include_directories(lanvid-audio-bridge PRIVATE src)
+    target_link_libraries(lanvid-audio-bridge PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+    find_library(LV_RT_LIB rt)
+    if(LV_RT_LIB)
+      target_link_libraries(lanvid-audio-bridge PRIVATE ${LV_RT_LIB})
+    endif()
+  endif()
+endif()
+
 if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
   enable_testing()
   add_executable(lanvid_tests
@@ -326,10 +385,17 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_fec.cpp
     tests/test_audio.cpp
     tests/test_audio_64ch.cpp
+    tests/test_shm_audio_bus.cpp
+    tests/test_hal_driver.cpp
     tests/test_c_api.cpp
     tests/test_video_codecs.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
+  if(TARGET LanVidAudio)
+    add_dependencies(lanvid_tests LanVidAudio)
+    target_compile_definitions(lanvid_tests PRIVATE
+      LV_HAL_DRIVER_BINARY="$<TARGET_FILE:LanVidAudio>")
+  endif()
   lanvid_set_flags(lanvid_tests)
   add_test(NAME lanvid_tests COMMAND lanvid_tests WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 

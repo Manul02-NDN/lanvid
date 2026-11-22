@@ -22,6 +22,7 @@
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/sender.hpp"
+#include "audio/shm_audio_host.hpp"
 #include "platform/audio_capture.hpp"
 #include "platform/camera_capture.hpp"
 #include "platform/screen_capture.hpp"
@@ -47,7 +48,11 @@ void print_usage(const char* prog) {
         "  --audio-channels <1..64> Channels of the 64-ch AoIP bus for --audio tone (default: 2)\n"
         "  --audio-latency <2..2000> Latency budget in ms: picks chunk size / FEC / NACK profile (default: 20)\n"
         "  --audio-rate <48000|96000> Sample rate of the AoIP bus (default: 48000)\n"
-        "  --audio-device <idx>     Audio endpoint index, -1=system default (default: -1)\n"
+        "  --audio-device <dev>     default | test | virtual | <idx>  (default: default)\n"
+        "                           test    = N-channel tone bus (same as --audio tone)\n"
+        "                           virtual = stream the OS virtual device \"LanVid\" (ASIO / CoreAudio /\n"
+        "                                     JACK) out-channels 1..N from any DAW via LanVidAudioBus_v1\n"
+        "                           <idx>   = WASAPI endpoint index for --audio loopback|mic\n"
         "  --audio-ms <2.5|5>       Audio packet duration in ms (default: 5)\n"
         "  --list-devices           List monitors, cameras, and audio devices and exit\n"
         "  --input <file>           Input file: .y4m, .ppm (P6), or raw RGB24/RGBA32 (implies --source file)\n"
@@ -138,6 +143,7 @@ int main(int argc, char** argv) {
     int audio_device_idx = -1;
     double audio_chunk_ms = 5.0;
     bool audio_tone = false;
+    bool audio_virtual = false;
     int audio_channels = 2;
     int audio_latency_ms = 20;
     int audio_rate = 48000;
@@ -201,7 +207,13 @@ int main(int argc, char** argv) {
         else if (arg == "--duration") max_duration_s = std::atof(need_val("--duration"));
         else if (arg == "--monitor") monitor_idx = std::atoi(need_val("--monitor"));
         else if (arg == "--device") camera_idx = std::atoi(need_val("--device"));
-        else if (arg == "--audio-device") audio_device_idx = std::atoi(need_val("--audio-device"));
+        else if (arg == "--audio-device") {
+            const std::string d = need_val("--audio-device");
+            if (d == "virtual") audio_virtual = true;
+            else if (d == "test") audio_tone = true;
+            else if (d == "default") audio_device_idx = -1;
+            else audio_device_idx = std::atoi(d.c_str());
+        }
         else if (arg == "--audio-ms") audio_chunk_ms = std::atof(need_val("--audio-ms"));
         else if (arg == "--input") { input_path = need_val("--input"); src_kind = SourceKind::kFile; }
         else if (arg == "--input-fmt") input_rgba = (std::string(need_val("--input-fmt")) == "rgba");
@@ -385,6 +397,28 @@ int main(int argc, char** argv) {
         });
     }
 
+    // DAW -> LanVidAudioBus_v1 (virtual OS device) -> network.
+    lv::ShmAudioHost vhost;
+    if (audio_virtual) {
+        lv::ShmAudioHost::Config hc;
+        hc.channels = uint32_t(audio_channels);
+        const bool ok = vhost.start(
+            hc,
+            [&sender](const float* const* planes, uint32_t ch, uint32_t n, bool disc) {
+                const uint64_t ts = disc ? sender.master_samples_now() - n : sender.next_auto_media_ts(n);
+                for (uint32_t c = 0; c < ch; ++c)
+                    sender.push_audio_channel(uint16_t(c), planes[c], n, lv::AudioFormat2::kFloat32, ts);
+                sender.set_next_auto_media_ts(ts + n);
+            },
+            nullptr);
+        if (!ok) {
+            std::fprintf(stderr, "Failed to open shared audio bus %s\n", lv::kShmBusName);
+            return 1;
+        }
+        audio_desc = "virtual device x" + std::to_string(audio_channels) + " [" + lv::kShmBusName + ", " +
+                     std::to_string(audio_latency_ms) + " ms]";
+    }
+
     std::signal(SIGINT, on_signal);
 #if defined(SIGTERM)
     std::signal(SIGTERM, on_signal);
@@ -513,6 +547,14 @@ int main(int argc, char** argv) {
             prev_bytes = st.bytes_sent;
             prev_pkts = st.packets_sent;
             prev_sim_drop = st.packets_dropped_sim;
+            if (audio_virtual) {
+                const auto vs = vhost.status();
+                std::printf("[VDEV  ] DAW %s%s%s | %u Hz buf=%u | tx_fill=%u | sent=%llu frames | overruns=%llu reanchors=%llu\n",
+                            vs.driver_connected ? "connected" : "not connected",
+                            vs.driver_name.empty() ? "" : " via ", vs.driver_name.c_str(), vs.sample_rate,
+                            vs.buffer_size, vs.tx_fill, (unsigned long long)vs.tx_frames,
+                            (unsigned long long)vs.tx_overruns, (unsigned long long)vs.reanchors);
+            }
             prev_aud_bytes = st.audio_bytes_sent;
             win_proc_ms_sum = 0.0;
             win_proc_cnt = 0;
@@ -520,11 +562,12 @@ int main(int argc, char** argv) {
     }
 
     audio_cap.stop();
+    vhost.stop();
     if (tone_thread.joinable()) {
         g_stop.store(true, std::memory_order_relaxed);
         tone_thread.join();
     }
-    if (audio_tone) {
+    if (audio_tone || audio_virtual) {
         const auto a2 = sender.audio2_stats();
         std::printf("[AUDIO64] mode=%s pkts=%llu parity=%llu retransmits=%llu nacks=%llu dup=%llu streams=%u\n",
                     lv::audio_mode_name(a2.mode), (unsigned long long)a2.packets_sent,

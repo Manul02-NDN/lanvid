@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio/shm_audio_host.hpp"
 #include "gui/app_config.hpp"
 #include "gui/gpu_texture.hpp"
 #include "lanvid_c_api.h"
@@ -50,6 +51,10 @@ private:
     void draw_aoip_sender_controls();
     void draw_aoip_meter_grid();
     void apply_receiver_bus();
+    void start_vdev_tx();
+    void stop_vdev_tx();
+    void apply_receiver_output();
+    void draw_vdev_status(const ShmHostStatus& st, bool tx_side);
 
     void draw_top_bar();
     void draw_sender_tab();
@@ -88,6 +93,8 @@ private:
     std::atomic<int> tone_channels_{8};
     LV_AudioChannelStats ch_stats_[LV_AUDIO_MAX_CHANNELS]{};
     uint64_t ch_stats_us_ = 0;
+    ShmAudioHost vdev_tx_;  // DAW -> network (sender side)
+    ShmAudioHost vdev_rx_;  // network -> DAW (receiver side)
 
     // Editable text buffers
     char ip_buf_[64]{};

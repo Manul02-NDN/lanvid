@@ -126,6 +126,35 @@ cp "$ROOT/sdk/python/lanvid_sdk.py" "$ROOT_EXTRAS/python/"
 cp -R "$APPLE_DIR/Examples" "$ROOT_EXTRAS/apple-examples"
 cp -R "$ROOT/sdk/examples/cpp_client" "$ROOT_EXTRAS/examples/"
 
+echo "=== [3b/6] Building LanVidAudio.driver (CoreAudio HAL plug-in, Universal arm64 + x86_64) ==="
+HAL_BUILD="$BUILD_DIR/hal"
+cmake -S "$ROOT" -B "$HAL_BUILD" -G "$GENERATOR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+  -DLANVID_BUILD_GUI=OFF -DLANVID_BUILD_CLI=OFF -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=ON
+cmake --build "$HAL_BUILD" --target LanVidAudio --parallel "$NCPU"
+HAL_BUNDLE="$HAL_BUILD/LanVidAudio.driver"
+[ -f "$HAL_BUNDLE/Contents/MacOS/LanVidAudio" ] || { echo "[ERROR] LanVidAudio.driver missing" >&2; exit 1; }
+if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
+  codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$HAL_BUNDLE"
+else
+  codesign --force --sign - "$HAL_BUNDLE"
+fi
+echo "[OK] LanVidAudio.driver slices: $(lipo -archs "$HAL_BUNDLE/Contents/MacOS/LanVidAudio")"
+ROOT_HAL="$BUILD_DIR/pkgroot-hal/Library/Audio/Plug-Ins/HAL"
+mkdir -p "$ROOT_HAL"
+cp -R "$HAL_BUNDLE" "$ROOT_HAL/"
+HAL_SCRIPTS="$BUILD_DIR/scripts-hal"
+mkdir -p "$HAL_SCRIPTS"
+cat > "$HAL_SCRIPTS/postinstall" <<'HALEOF'
+#!/bin/bash
+# Reload the HAL so "LanVid Virtual 64ch" appears in Audio MIDI Setup / DAWs (launchd restarts coreaudiod).
+chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/LanVidAudio.driver" 2>/dev/null || true
+killall -9 coreaudiod 2>/dev/null || true
+exit 0
+HALEOF
+chmod 0755 "$HAL_SCRIPTS/postinstall"
+
 # Ensure installer scripts have +x and Unix LF endings
 SCRIPTS_STAGE="$BUILD_DIR/scripts"
 mkdir -p "$SCRIPTS_STAGE"
@@ -157,6 +186,14 @@ pkgbuild \
   --version "$SDK_VERSION" \
   --install-location "/" \
   "$COMP_DIR/lanvid-extras.pkg"
+
+pkgbuild \
+  --root "$BUILD_DIR/pkgroot-hal" \
+  --identifier "com.lanvid.audio.hal" \
+  --version "$SDK_VERSION" \
+  --scripts "$HAL_SCRIPTS" \
+  --install-location "/" \
+  "$COMP_DIR/lanvid-hal.pkg"
 
 # Detect optional Developer ID Installer certificate in Keychain (falls back to unsigned local pkg)
 SIGN_ID="${LANVID_INSTALLER_SIGN_ID:-}"

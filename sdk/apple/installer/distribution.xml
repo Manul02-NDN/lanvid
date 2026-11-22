@@ -18,6 +18,7 @@
         <line choice="choice_core" />
         <line choice="choice_swift" />
         <line choice="choice_extras" />
+        <line choice="choice_hal" />
     </choices-outline>
 
     <choice id="choice_core"
@@ -44,7 +45,16 @@
         <pkg-ref id="com.lanvid.sdk.extras" />
     </choice>
 
+    <choice id="choice_hal"
+            title="Virtual Audio Device «LanVid Virtual 64ch»"
+            description="CoreAudio HAL plug-in (64 In / 64 Out, Float32, 48/96 kHz) installed to /Library/Audio/Plug-Ins/HAL. Appears in Audio MIDI Setup, Logic Pro, REAPER and OBS; streams through LanVid Studio. Restarts coreaudiod."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.audio.hal" />
+    </choice>
+
     <pkg-ref id="com.lanvid.sdk.core" version="2.3.1" onConclusion="none">lanvid-core.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.swift" version="2.3.1" onConclusion="none">lanvid-swift.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.extras" version="2.3.1" onConclusion="none">lanvid-extras.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.audio.hal" version="2.3.1" onConclusion="none">lanvid-hal.pkg</pkg-ref>
 </installer-gui-script>

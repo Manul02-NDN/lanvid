@@ -39,6 +39,7 @@ Source: "..\..\build\lanvid_app.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\build\lanvid_core.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\build\sender.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\build\receiver.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\build\LanVidASIO.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit
 Source: "preflight.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
