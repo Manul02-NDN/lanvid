@@ -252,6 +252,24 @@ bool run_hidden_cmd(const std::wstring& cmd_line, DWORD* exit_code = nullptr) {
     return true;
 }
 
+bool run_elevated_cmd(const std::wstring& exe, const std::wstring& params, DWORD* exit_code = nullptr) {
+    SHELLEXECUTEINFOW sei{sizeof(sei)};
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"runas";
+    sei.lpFile = exe.c_str();
+    sei.lpParameters = params.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        return false;
+    }
+    WaitForSingleObject(sei.hProcess, 60000);
+    DWORD ec = 0;
+    GetExitCodeProcess(sei.hProcess, &ec);
+    if (exit_code) *exit_code = ec;
+    CloseHandle(sei.hProcess);
+    return true;
+}
+
 bool extract_embedded_payload(const fs::path& dest_dir) {
     HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(IDR_LANVID_PAYLOAD), RT_RCDATA);
     if (!res) return false;
@@ -303,9 +321,9 @@ void register_uninstaller(const fs::path& dest_dir) {
     set_sz(L"InstallLocation", dest_dir.wstring());
     set_sz(L"DisplayIcon", (dest_dir / L"lanvid_app.exe").wstring());
     const std::wstring uninst =
-        L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Stop-Process -Name lanvid_app,sender,receiver -Force -ErrorAction SilentlyContinue; Start-Process regsvr32.exe -ArgumentList '/u','/s','" +
+        L"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"Stop-Process -Name lanvid_app,sender,receiver -Force -ErrorAction SilentlyContinue; Start-Process 'C:\\Windows\\System32\\regsvr32.exe' -ArgumentList '/u','/s','" +
         (dest_dir / L"LanVidASIO.dll").wstring() +
-        L"' -Wait -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force '" +
+        L"' -Verb RunAs -Wait -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force '" +
         dest_dir.wstring() +
         L"' -ErrorAction SilentlyContinue; Remove-Item -Force \\\"$env:USERPROFILE\\Desktop\\LanVid Studio.lnk\\\" -ErrorAction SilentlyContinue; Remove-Item -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\LanVidStudio' -Force -ErrorAction SilentlyContinue\"";
     set_sz(L"UninstallString", uninst);
@@ -370,13 +388,23 @@ bool execute_install(bool want_desktop, bool want_firewall, bool silent) {
         return false;
     }
 
-    {   // 64-channel virtual ASIO device (silent COM registration; requires the elevated installer)
+    {   // 64-channel virtual ASIO device (64-bit COM registration in HKLM\SOFTWARE\ASIO)
         const std::wstring asio = (g_rep.install_dir / L"LanVidASIO.dll").wstring();
+        const std::wstring regsvr = L"C:\\Windows\\System32\\regsvr32.exe";
+        const std::wstring reg_args = L"/s \"" + asio + L"\"";
         DWORD ec_reg = 1;
-        if (fs::exists(asio) && run_hidden_cmd(L"regsvr32.exe /s \"" + asio + L"\"", &ec_reg) && ec_reg == 0) {
-            log_msg(L"      ASIO-драйвер «LanVid Virtual ASIO» (64 In / 64 Out) зареєстровано.");
+        bool registered = false;
+        if (fs::exists(asio)) {
+            if (g_rep.is_admin) {
+                registered = run_hidden_cmd(L"\"" + regsvr + L"\" " + reg_args, &ec_reg) && ec_reg == 0;
+            } else if (!silent) {
+                registered = run_elevated_cmd(regsvr, reg_args, &ec_reg) && ec_reg == 0;
+            }
+        }
+        if (registered) {
+            log_msg(L"      ASIO-драйвер «LanVid Virtual ASIO» (64 In / 64 Out) зареєстровано у 64-бітному реєстрі.");
         } else {
-            log_msg(L"      ASIO-драйвер: реєстрація пропущена (потрібні права Адміністратора: regsvr32 LanVidASIO.dll).");
+            log_msg(L"      ASIO-драйвер: реєстрація пропущена (потрібні права Адміністратора: regsvr32 \"" + asio + L"\").");
         }
     }
 
@@ -437,7 +465,7 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HFONT bold = CreateFontW(-20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                      0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
-            HWND title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio v2.1",
+            HWND title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio v2.4.0",
                                        WS_VISIBLE | WS_CHILD, 20, 14, 540, 28, hwnd, nullptr, nullptr, nullptr);
             SendMessageW(title, WM_SETFONT, WPARAM(bold), TRUE);
 

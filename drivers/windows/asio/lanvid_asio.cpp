@@ -96,7 +96,7 @@ public:
         return ASIOTrue;
     }
     void getDriverName(char* name) override { std::snprintf(name, 32, "LanVid Virtual ASIO"); }
-    long getDriverVersion() override { return 0x00020301; }
+    long getDriverVersion() override { return 0x00020400; }
     void getErrorMessage(char* s) override { std::snprintf(s, 124, "%s", err_[0] ? err_ : "No error"); }
 
     ASIOError start() override {

@@ -22,7 +22,6 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=dialog
 MinVersion=10.0.10240
 CloseApplications=yes
 

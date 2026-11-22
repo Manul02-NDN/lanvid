@@ -28,7 +28,7 @@ Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -CompressionLevel
 
 $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
 if ($cl) {
-    $cmd = "cd /d `"$winDir`" && rc.exe /nologo /fo setup_payload.res setup_payload.rc && cl.exe /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX setup_wizard.cpp setup_payload.res /Fe:`"$outExe`" /link /SUBSYSTEM:WINDOWS"
+    $cmd = "cd /d `"$winDir`" && rc.exe /nologo /fo setup_payload.res setup_payload.rc && cl.exe /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX setup_wizard.cpp setup_payload.res /Fe:`"$outExe`" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:`"level='requireAdministrator' uiAccess='false'`""
 } else {
     $candidates = @(
         "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
@@ -38,7 +38,7 @@ if ($cl) {
     )
     $vcvars = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $vcvars) { throw "Could not locate MSVC cl.exe or vcvars64.bat" }
-    $cmd = "call `"$vcvars`" >nul && cd /d `"$winDir`" && rc.exe /nologo /fo setup_payload.res setup_payload.rc && cl.exe /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX setup_wizard.cpp setup_payload.res /Fe:`"$outExe`" /link /SUBSYSTEM:WINDOWS"
+    $cmd = "call `"$vcvars`" >nul && cd /d `"$winDir`" && rc.exe /nologo /fo setup_payload.res setup_payload.rc && cl.exe /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /DWIN32_LEAN_AND_MEAN /DNOMINMAX setup_wizard.cpp setup_payload.res /Fe:`"$outExe`" /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:`"level='requireAdministrator' uiAccess='false'`""
 }
 cmd /c $cmd
 if ($LASTEXITCODE -ne 0) { throw "Failed to compile LanVid_Setup.exe (exit=$LASTEXITCODE)" }
