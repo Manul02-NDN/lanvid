@@ -35,7 +35,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run Unit Tests (31 tests) & 4K Codec Benchmark
+      - name: Run Unit Tests (35 tests) & 4K Codec Benchmark
         shell: pwsh
         run: |
           .\build\lanvid_tests.exe
@@ -76,7 +76,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake ninja-build pkg-config \
-            libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libpipewire-0.3-dev
+            libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libpipewire-0.3-dev \
+            libavcodec-dev libavutil-dev
 
       - name: Configure & Build (CMake + Ninja Release)
         run: |
@@ -110,7 +111,7 @@ jobs:
 
   build-and-test-macos-ios:
     name: macOS & iOS (Apple Silicon NEON + .pkg + XCFramework + SwiftPM)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -158,13 +159,13 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK & NDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android NDK & CMake
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "ndk;28.2.13676358" "cmake;3.31.6" "build-tools;35.0.1" "platforms;android-35"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
+          echo "Using sdkmanager: $SDKMANAGER (ANDROID_HOME=$SDK_ROOT)"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.2.13676358" "cmake;3.31.6" "build-tools;35.0.1" "platforms;android-35"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
