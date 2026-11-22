@@ -35,7 +35,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run Unit Tests (35 tests) & 4K Codec Benchmark
+      - name: Run Unit Tests (41 tests) & 4K Codec Benchmark
         shell: pwsh
         run: |
           .\build\lanvid_tests.exe
