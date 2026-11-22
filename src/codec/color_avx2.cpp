@@ -250,4 +250,195 @@ void ycbcr420_to_rgba_avx2(const Planes& in, int rows, int img_w, ColorMatrix cm
         ycbcr420_to_rgb32_avx2_impl<false>(in, rows, img_w, cm, dst, stride);
 }
 
+namespace {
+
+template <bool kBGRA>
+void nv12_to_packed_rgb_avx2_impl(const uint8_t* src_y, int y_stride, const uint8_t* src_uv,
+                                  int uv_stride, int width, int height, uint8_t* dst,
+                                  size_t dst_stride) {
+    constexpr int cR = kBGRA ? 2 : 0;
+    constexpr int cB = kBGRA ? 0 : 2;
+    const __m256i v16 = _mm256_set1_epi16(16);
+    const __m256i v128 = _mm256_set1_epi16(128);
+    // Q15 half-scale coefficients for mulhrs(val << 1, coeff_h) == round(val * coeff).
+    const __m256i ky = _mm256_set1_epi16(q15_half(298.0 / 256.0));
+    const __m256i kr_e = _mm256_set1_epi16(q15_half(409.0 / 256.0));
+    const __m256i kg_d = _mm256_set1_epi16(q15_half(-100.0 / 256.0));
+    const __m256i kg_e = _mm256_set1_epi16(q15_half(-208.0 / 256.0));
+    const __m256i kb_rem = _mm256_set1_epi16(q15_half(4.0 / 256.0));  // 516/256 = 2 + 4/256
+    const __m128i alpha = _mm_set1_epi8(char(0xFF));
+    const __m128i shuf_u = _mm_setr_epi8(0, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10, 12, 12, 14, 14);
+    const __m128i shuf_v = _mm_setr_epi8(1, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11, 13, 13, 15, 15);
+
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* LV_RESTRICT yp = src_y + size_t(y) * size_t(y_stride);
+        const uint8_t* LV_RESTRICT uvp = src_uv + size_t(y >> 1) * size_t(uv_stride);
+        uint8_t* LV_RESTRICT dp = dst + size_t(y) * dst_stride;
+
+        int x = 0;
+        for (; x + 16 <= width; x += 16) {
+            const __m128i y8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(yp + x));
+            const __m128i uv8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(uvp + x));
+            const __m256i y2 = _mm256_slli_epi16(_mm256_sub_epi16(_mm256_cvtepu8_epi16(y8), v16), 1);
+            const __m128i u8 = _mm_shuffle_epi8(uv8, shuf_u);
+            const __m128i v8 = _mm_shuffle_epi8(uv8, shuf_v);
+            const __m256i d2 = _mm256_slli_epi16(_mm256_sub_epi16(_mm256_cvtepu8_epi16(u8), v128), 1);
+            const __m256i e2 = _mm256_slli_epi16(_mm256_sub_epi16(_mm256_cvtepu8_epi16(v8), v128), 1);
+
+            const __m256i cy = _mm256_mulhrs_epi16(y2, ky);
+            const __m256i R16 = _mm256_add_epi16(cy, _mm256_mulhrs_epi16(e2, kr_e));
+            const __m256i G16 = _mm256_add_epi16(
+                cy, _mm256_add_epi16(_mm256_mulhrs_epi16(d2, kg_d), _mm256_mulhrs_epi16(e2, kg_e)));
+            const __m256i B16 = _mm256_add_epi16(
+                cy, _mm256_add_epi16(d2, _mm256_mulhrs_epi16(d2, kb_rem)));
+
+            const __m128i R8 = _mm_packus_epi16(_mm256_castsi256_si128(R16), _mm256_extracti128_si256(R16, 1));
+            const __m128i G8 = _mm_packus_epi16(_mm256_castsi256_si128(G16), _mm256_extracti128_si256(G16, 1));
+            const __m128i B8 = _mm_packus_epi16(_mm256_castsi256_si128(B16), _mm256_extracti128_si256(B16, 1));
+
+            const __m128i C0 = kBGRA ? B8 : R8;
+            const __m128i C2 = kBGRA ? R8 : B8;
+            const __m128i lo01 = _mm_unpacklo_epi8(C0, G8);
+            const __m128i lo23 = _mm_unpacklo_epi8(C2, alpha);
+            const __m128i hi01 = _mm_unpackhi_epi8(C0, G8);
+            const __m128i hi23 = _mm_unpackhi_epi8(C2, alpha);
+
+            uint8_t* outp = dp + size_t(x) * 4;
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(outp + 0), _mm_unpacklo_epi16(lo01, lo23));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(outp + 16), _mm_unpackhi_epi16(lo01, lo23));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(outp + 32), _mm_unpacklo_epi16(hi01, hi23));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(outp + 48), _mm_unpackhi_epi16(hi01, hi23));
+        }
+
+        for (; x < width; ++x) {
+            const int d = int(uvp[x & ~1]) - 128;
+            const int e = int(uvp[(x & ~1) + 1]) - 128;
+            const int c = 298 * (int(yp[x]) - 16);
+            dp[x * 4 + cR] = clamp_u8((c + 409 * e + 128) >> 8);
+            dp[x * 4 + 1] = clamp_u8((c - 100 * d - 208 * e + 128) >> 8);
+            dp[x * 4 + cB] = clamp_u8((c + 516 * d + 128) >> 8);
+            dp[x * 4 + 3] = 255;
+        }
+    }
+}
+
+template <bool kBGRA>
+void packed_rgb_to_nv12_avx2_impl(const uint8_t* src, size_t src_stride, int width, int height,
+                                  uint8_t* dst_y, int y_stride, uint8_t* dst_uv, int uv_stride) {
+    constexpr int cR = kBGRA ? 2 : 0;
+    constexpr int cB = kBGRA ? 0 : 2;
+    const __m256i v66 = _mm256_set1_epi16(66);
+    const __m256i v129 = _mm256_set1_epi16(129);
+    const __m256i v25 = _mm256_set1_epi16(25);
+    const __m256i v128 = _mm256_set1_epi16(128);
+    const __m256i v16 = _mm256_set1_epi16(16);
+    const __m256i v_ones = _mm256_set1_epi16(1);
+    const __m128i c_ur = _mm_set1_epi16(-38);
+    const __m128i c_ug = _mm_set1_epi16(-74);
+    const __m128i c_ub = _mm_set1_epi16(112);
+    const __m128i c_vr = _mm_set1_epi16(112);
+    const __m128i c_vg = _mm_set1_epi16(-94);
+    const __m128i c_vb = _mm_set1_epi16(-18);
+    const __m128i c128_16 = _mm_set1_epi16(128);
+
+    const int h2 = height & ~1;
+    const int w2 = width & ~1;
+    for (int y = 0; y < h2; y += 2) {
+        const uint8_t* LV_RESTRICT r0 = src + size_t(y) * src_stride;
+        const uint8_t* LV_RESTRICT r1 = src + size_t(y + 1) * src_stride;
+        uint8_t* LV_RESTRICT y0 = dst_y + size_t(y) * size_t(y_stride);
+        uint8_t* LV_RESTRICT y1 = dst_y + size_t(y + 1) * size_t(y_stride);
+        uint8_t* LV_RESTRICT uv = dst_uv + size_t(y >> 1) * size_t(uv_stride);
+
+        int x = 0;
+        for (; x + 16 <= w2; x += 16) {
+            __m256i R0, G0, B0, R1, G1, B1;
+            load_16px_rgb16<kBGRA>(r0 + size_t(x) * 4, R0, G0, B0);
+            load_16px_rgb16<kBGRA>(r1 + size_t(x) * 4, R1, G1, B1);
+
+            auto calc_y = [&](__m256i R, __m256i G, __m256i B) {
+                __m256i sum = _mm256_add_epi16(
+                    _mm256_add_epi16(_mm256_mullo_epi16(R, v66), _mm256_mullo_epi16(G, v129)),
+                    _mm256_add_epi16(_mm256_mullo_epi16(B, v25), v128));
+                __m256i yy = _mm256_add_epi16(_mm256_srli_epi16(sum, 8), v16);
+                return _mm_packus_epi16(_mm256_castsi256_si128(yy), _mm256_extracti128_si256(yy, 1));
+            };
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(y0 + x), calc_y(R0, G0, B0));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(y1 + x), calc_y(R1, G1, B1));
+
+            // 2x2 box average into 8 int16 lanes in __m128i
+            auto avg2x2 = [&](__m256i A, __m256i B) {
+                __m256i s = _mm256_add_epi16(A, B);          // 16 values, each <= 510
+                __m256i p = _mm256_madd_epi16(s, v_ones);    // 8 int32 pair sums <= 1020
+                __m256i a = _mm256_srli_epi32(_mm256_add_epi32(p, _mm256_set1_epi32(2)), 2);
+                return _mm_packs_epi32(_mm256_castsi256_si128(a), _mm256_extracti128_si256(a, 1));
+            };
+            const __m128i Ra = avg2x2(R0, R1);
+            const __m128i Ga = avg2x2(G0, G1);
+            const __m128i Ba = avg2x2(B0, B1);
+
+            const __m128i U16 = _mm_add_epi16(
+                _mm_srai_epi16(
+                    _mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(Ra, c_ur), _mm_mullo_epi16(Ga, c_ug)),
+                                  _mm_add_epi16(_mm_mullo_epi16(Ba, c_ub), c128_16)),
+                    8),
+                c128_16);
+            const __m128i V16 = _mm_add_epi16(
+                _mm_srai_epi16(
+                    _mm_add_epi16(_mm_add_epi16(_mm_mullo_epi16(Ra, c_vr), _mm_mullo_epi16(Ga, c_vg)),
+                                  _mm_add_epi16(_mm_mullo_epi16(Ba, c_vb), c128_16)),
+                    8),
+                c128_16);
+
+            const __m128i U8 = _mm_packus_epi16(U16, U16);
+            const __m128i V8 = _mm_packus_epi16(V16, V16);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(uv + x), _mm_unpacklo_epi8(U8, V8));
+        }
+
+        for (; x < w2; x += 2) {
+            const uint8_t* p00 = r0 + size_t(x) * 4;
+            const uint8_t* p01 = p00 + 4;
+            const uint8_t* p10 = r1 + size_t(x) * 4;
+            const uint8_t* p11 = p10 + 4;
+            const int r00 = p00[cR], g00 = p00[1], b00 = p00[cB];
+            const int r01 = p01[cR], g01 = p01[1], b01 = p01[cB];
+            const int r10 = p10[cR], g10 = p10[1], b10 = p10[cB];
+            const int r11 = p11[cR], g11 = p11[1], b11 = p11[cB];
+            y0[x] = uint8_t(((66 * r00 + 129 * g00 + 25 * b00 + 128) >> 8) + 16);
+            y0[x + 1] = uint8_t(((66 * r01 + 129 * g01 + 25 * b01 + 128) >> 8) + 16);
+            y1[x] = uint8_t(((66 * r10 + 129 * g10 + 25 * b10 + 128) >> 8) + 16);
+            y1[x + 1] = uint8_t(((66 * r11 + 129 * g11 + 25 * b11 + 128) >> 8) + 16);
+            const int ra = (r00 + r01 + r10 + r11 + 2) >> 2;
+            const int ga = (g00 + g01 + g10 + g11 + 2) >> 2;
+            const int ba = (b00 + b01 + b10 + b11 + 2) >> 2;
+            uv[x] = uint8_t(((-38 * ra - 74 * ga + 112 * ba + 128) >> 8) + 128);
+            uv[x + 1] = uint8_t(((112 * ra - 94 * ga - 18 * ba + 128) >> 8) + 128);
+        }
+    }
+}
+
+}  // namespace
+
+void nv12_to_packed_rgb_avx2(const uint8_t* src_y, int y_stride, const uint8_t* src_uv,
+                             int uv_stride, int width, int height, PixelOrder order, uint8_t* dst,
+                             size_t dst_stride) {
+    if (order == PixelOrder::kBGRA)
+        nv12_to_packed_rgb_avx2_impl<true>(src_y, y_stride, src_uv, uv_stride, width, height, dst,
+                                           dst_stride);
+    else
+        nv12_to_packed_rgb_avx2_impl<false>(src_y, y_stride, src_uv, uv_stride, width, height, dst,
+                                            dst_stride);
+}
+
+void packed_rgb_to_nv12_avx2(const uint8_t* src, size_t src_stride, int width, int height,
+                             PixelOrder order, uint8_t* dst_y, int y_stride, uint8_t* dst_uv,
+                             int uv_stride) {
+    if (order == PixelOrder::kBGRA)
+        packed_rgb_to_nv12_avx2_impl<true>(src, src_stride, width, height, dst_y, y_stride, dst_uv,
+                                           uv_stride);
+    else
+        packed_rgb_to_nv12_avx2_impl<false>(src, src_stride, width, height, dst_y, y_stride, dst_uv,
+                                            uv_stride);
+}
+
 }  // namespace lv

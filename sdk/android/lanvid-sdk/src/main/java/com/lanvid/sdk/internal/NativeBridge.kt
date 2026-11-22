@@ -13,13 +13,14 @@ internal object NativeBridge {
     @JvmStatic external fun init(): Int
     @JvmStatic external fun version(): String
     @JvmStatic external fun simdInfo(): String
+    @JvmStatic external fun supportedCodecsJson(): String
     @JvmStatic external fun scanLanJson(timeoutMs: Int): String
 
     @JvmStatic external fun senderCreate(): Long
     @JvmStatic external fun senderDestroy(ptr: Long)
     @JvmStatic external fun senderStart(
         ptr: Long, destIp: String, destPort: Int, width: Int, height: Int,
-        fps: Int, quality: Int, fecGroup: Int, adaptive: Boolean
+        fps: Int, quality: Int, fecGroup: Int, adaptive: Boolean, codec: Int, bitrateKbps: Int
     ): Int
     @JvmStatic external fun senderStop(ptr: Long)
     @JvmStatic external fun senderPushYuv420(
@@ -33,6 +34,8 @@ internal object NativeBridge {
         ptr: Long, pcm: ShortArray, frames: Int, rate: Int, channels: Int
     ): Int
     @JvmStatic external fun senderSetQuality(ptr: Long, quality: Int): Int
+    @JvmStatic external fun senderSetBitrate(ptr: Long, bitrateKbps: Int): Int
+    @JvmStatic external fun senderForceKeyframe(ptr: Long): Int
     @JvmStatic external fun senderSetFec(ptr: Long, groupSize: Int): Int
     @JvmStatic external fun senderSetAdaptive(ptr: Long, enabled: Boolean, qMin: Int, qMax: Int): Int
     @JvmStatic external fun senderStatsJson(ptr: Long): String

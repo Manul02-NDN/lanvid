@@ -135,7 +135,8 @@ int main(int argc, char** argv) {
             tracker = std::make_unique<lv::ReceiverStatsTracker>(t_first_frame);
             stream_w = cf.image->width;
             stream_h = cf.image->height;
-            std::printf("Stream detected: %dx%d (%u slices/frame)\n", stream_w, stream_h,
+            std::printf("Stream detected: %dx%d | codec=%s [%s] (%u slices/frame)\n", stream_w, stream_h,
+                        lv::video_codec_name(cf.codec), rx_ptr->decoder_backend_name().c_str(),
                         unsigned(cf.total_slices));
             std::fflush(stdout);
         }
@@ -241,11 +242,10 @@ int main(int argc, char** argv) {
                 char hud[320];
                 int n = std::snprintf(
                     hud, sizeof(hud),
-                    "LVSP [%s] %dx%d | Q:%u | %.1f FPS | %.1f Mbps | Lat p50:%.2fms | Loss:%.2f%% | FEC:%llu | Conceal:%s",
-                    preview->renderer_name(), stream_w, stream_h, unsigned(rep.active_quality), rep.fps,
-                    rep.bitrate_mbps, rep.lat_p50_ms, rep.pkt_loss_pct,
-                    (unsigned long long)rep.fec_recovered,
-                    receiver.conceal_mode() == lv::ConcealMode::kPrev ? "prev" : "gray");
+                    "LVSP [%s | %s] %dx%d | %.1f FPS | %.2f Mbps | Lat p50:%.2fms | Loss:%.2f%% | FEC:%llu | PLI:%llu",
+                    preview->renderer_name(), receiver.decoder_backend_name().c_str(), stream_w, stream_h,
+                    rep.fps, rep.bitrate_mbps, rep.lat_p50_ms, rep.pkt_loss_pct,
+                    (unsigned long long)rep.fec_recovered, (unsigned long long)rep.pli_requests);
                 if (rep.has_audio && n > 0 && size_t(n) < sizeof(hud)) {
                     std::snprintf(hud + n, sizeof(hud) - size_t(n), " | Aud:%.0fkbps(%.1fms)",
                                   rep.audio_kbps, rep.audio_buf_ms);

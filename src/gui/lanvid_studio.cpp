@@ -187,6 +187,9 @@ void LanVidStudioApp::start_sender() {
     sc.height = (cfg_.source_type == LV_SOURCE_PATTERN) ? cfg_.pattern_height : 0;
     sc.fps = double(cfg_.fps);
     sc.quality = cfg_.quality;
+    sc.codec = std::clamp(cfg_.codec, 0, 2);
+    sc.bitrate_kbps = uint32_t(std::clamp(cfg_.bitrate_mbps, 1, 50) * 1000);
+    sc.keyframe_interval = uint32_t(std::clamp(cfg_.keyframe_interval, 15, 300));
     sc.fec_group_size = cfg_.fec_group;
     sc.adaptive_quality = cfg_.adaptive_quality ? 1 : 0;
     sc.q_min = cfg_.q_min;
@@ -506,8 +509,15 @@ void LanVidStudioApp::draw_sender_tab() {
     }
 
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "3. Пресети якості");
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "3. Кодек та якість");
     ImGui::Separator();
+
+    const char* codec_items[] = {
+        "LanVid DCT (~2 ms, без затримки)",
+        "H.264 / AVC (Low Bandwidth, HW)",
+        "H.265 / HEVC (Ultra-Low Bandwidth, HW)"
+    };
+    if (ImGui::Combo("Відеокодек", &cfg_.codec, codec_items, 3)) config_dirty_ = true;
 
     if (ImGui::Button("Low Latency 1080p60")) apply_preset(0);
     ImGui::SameLine();
@@ -515,10 +525,27 @@ void LanVidStudioApp::draw_sender_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Wi-Fi Adaptive")) apply_preset(2);
 
-    if (ImGui::SliderInt("Якість (Q)", &cfg_.quality, 20, 98)) config_dirty_ = true;
+    if (cfg_.codec == LV_CODEC_LANVID_DCT) {
+        if (ImGui::SliderInt("Якість (Q)", &cfg_.quality, 20, 98)) config_dirty_ = true;
+    } else {
+        if (ImGui::SliderInt("Цільовий бітрейт", &cfg_.bitrate_mbps, 1, 50, "%d Mbps")) {
+            config_dirty_ = true;
+            if (sender_ && sender_running_) {
+                lv_sender_set_bitrate(sender_, uint32_t(cfg_.bitrate_mbps * 1000));
+            }
+        }
+        if (ImGui::SliderInt("Інтервал IDR", &cfg_.keyframe_interval, 15, 300, "%d кадр.")) {
+            config_dirty_ = true;
+        }
+        if (sender_running_ && tx_stats_.codec_backend[0]) {
+            ImGui::TextColored(tx_stats_.codec_is_hardware ? ImVec4(0.24f, 0.90f, 0.52f, 1.0f)
+                                                           : ImVec4(1.0f, 0.78f, 0.25f, 1.0f),
+                               "Енкодер: %s", tx_stats_.codec_backend);
+        }
+    }
     if (ImGui::SliderInt("FPS", &cfg_.fps, 15, 120)) config_dirty_ = true;
     if (ImGui::SliderInt("XOR FEC група (0=вимк)", &cfg_.fec_group, 0, 12)) config_dirty_ = true;
-    if (ImGui::Checkbox("Адаптивна якість (AIMD для Wi-Fi)", &cfg_.adaptive_quality)) config_dirty_ = true;
+    if (ImGui::Checkbox("Адаптивний контроль (AIMD для Wi-Fi)", &cfg_.adaptive_quality)) config_dirty_ = true;
 
     ImGui::Spacing();
     if (!sender_running_) {
@@ -652,20 +679,33 @@ void LanVidStudioApp::draw_receiver_tab() {
     ImGui::TextDisabled("Потік / FPS");
     ImGui::Text("%dx%d  %.1f FPS", rx_stats_.width, rx_stats_.height, rx_stats_.fps);
     ImGui::NextColumn();
+    ImGui::TextDisabled("Кодек / Бекенд");
+    {
+        const char* cname = (rx_stats_.active_codec == LV_CODEC_H265)
+                                ? "H.265"
+                                : (rx_stats_.active_codec == LV_CODEC_H264 ? "H.264" : "DCT");
+        const char* accel = rx_stats_.codec_is_hardware ? "HW" : "SW";
+        ImGui::TextColored(rx_stats_.codec_is_hardware ? ImVec4(0.24f, 0.90f, 0.52f, 1.0f)
+                                                       : ImVec4(0.50f, 0.84f, 1.0f, 1.0f),
+                           "%s [%s]", cname, accel);
+    }
+    ImGui::NextColumn();
     ImGui::TextDisabled("E2E Latency (p50 / p99)");
     ImGui::TextColored(rx_stats_.latency_p50_ms < 6.0 ? ImVec4(0.24f, 0.90f, 0.52f, 1.0f)
                                                       : ImVec4(1.0f, 0.78f, 0.25f, 1.0f),
                        "%.2f / %.2f ms", rx_stats_.latency_p50_ms, rx_stats_.latency_p99_ms);
     ImGui::NextColumn();
-    ImGui::TextDisabled("Бітрейт / Q");
-    ImGui::Text("%.1f Mbps (Q=%d)", rx_stats_.rx_mbps, rx_stats_.active_quality);
+    ImGui::TextDisabled("Бітрейт / PLI");
+    if (rx_stats_.active_codec == LV_CODEC_LANVID_DCT) {
+        ImGui::Text("%.1f Mbps (Q=%d)", rx_stats_.rx_mbps, rx_stats_.active_quality);
+    } else {
+        ImGui::Text("%.2f Mbps (PLI:%llu)", rx_stats_.rx_mbps,
+                    static_cast<unsigned long long>(rx_stats_.pli_requests));
+    }
     ImGui::NextColumn();
-    ImGui::TextDisabled("FEC відновлено");
-    ImGui::Text("%llu pkt", static_cast<unsigned long long>(rx_stats_.fec_recovered));
-    ImGui::NextColumn();
-    ImGui::TextDisabled("Втрати / CRC");
-    ImGui::Text("%.2f%%  (CRC:%llu)", rx_stats_.loss_pct,
-                static_cast<unsigned long long>(rx_stats_.bad_crc));
+    ImGui::TextDisabled("Втрати / FEC");
+    ImGui::Text("%.2f%% (FEC:%llu)", rx_stats_.loss_pct,
+                static_cast<unsigned long long>(rx_stats_.fec_recovered));
     ImGui::NextColumn();
     ImGui::TextDisabled("Аудіо / Буфер");
     ImGui::Text("%.0f kbps (%.1f ms)", rx_stats_.audio_kbps, rx_stats_.audio_buffer_ms);
@@ -691,9 +731,14 @@ void LanVidStudioApp::draw_fullscreen_receiver() {
         ImGui::Begin("##FsHud", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                          ImGuiWindowFlags_NoSavedSettings);
-        ImGui::Text("%dx%d  %.1f FPS | E2E %.2f ms | %.1f Mbps | FEC:%llu | Loss:%.2f%% | Aud:%.0f kbps",
+        const char* cname = (rx_stats_.active_codec == LV_CODEC_H265)
+                                ? "H.265"
+                                : (rx_stats_.active_codec == LV_CODEC_H264 ? "H.264" : "DCT");
+        ImGui::Text("[%s %s] %dx%d  %.1f FPS | E2E %.2f ms | %.2f Mbps | FEC:%llu | PLI:%llu | Loss:%.2f%% | Aud:%.0f kbps",
+                    cname, rx_stats_.codec_is_hardware ? "HW" : "SW",
                     rx_stats_.width, rx_stats_.height, rx_stats_.fps, rx_stats_.latency_p50_ms,
                     rx_stats_.rx_mbps, static_cast<unsigned long long>(rx_stats_.fec_recovered),
+                    static_cast<unsigned long long>(rx_stats_.pli_requests),
                     rx_stats_.loss_pct, rx_stats_.audio_kbps);
         ImGui::SameLine();
         if (ImGui::SmallButton("Вийти (ESC/F11)")) {

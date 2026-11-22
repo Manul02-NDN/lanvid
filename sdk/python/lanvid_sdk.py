@@ -33,6 +33,10 @@ LV_PIXEL_FORMAT_NV21 = 4
 LV_AUDIO_FORMAT_PCM16 = 0
 LV_AUDIO_FORMAT_F32 = 1
 
+LV_CODEC_LANVID_DCT = 0
+LV_CODEC_H264 = 1
+LV_CODEC_H265 = 2
+
 LV_OK = 0
 
 
@@ -49,7 +53,9 @@ class LV_VideoFrameView(ctypes.Structure):
         ("slices_ok", ctypes.c_uint16),
         ("slices_total", ctypes.c_uint16),
         ("quality", ctypes.c_uint8),
-        ("reserved", ctypes.c_uint8 * 3),
+        ("codec", ctypes.c_uint8),
+        ("is_keyframe", ctypes.c_uint8),
+        ("reserved", ctypes.c_uint8),
     ]
 
 
@@ -97,6 +103,9 @@ class LV_SenderConfig(ctypes.Structure):
         ("q_max", ctypes.c_int32),
         ("threads", ctypes.c_int32),
         ("pace_mbps", ctypes.c_double),
+        ("codec", ctypes.c_int32),
+        ("bitrate_kbps", ctypes.c_uint32),
+        ("keyframe_interval", ctypes.c_uint32),
     ]
 
 
@@ -137,6 +146,11 @@ class LV_StreamStats(ctypes.Structure):
         ("audio_packets", ctypes.c_uint64),
         ("audio_kbps", ctypes.c_double),
         ("audio_buffer_ms", ctypes.c_double),
+        ("active_codec", ctypes.c_int32),
+        ("codec_is_hardware", ctypes.c_int32),
+        ("target_bitrate_kbps", ctypes.c_uint32),
+        ("reserved_u32", ctypes.c_uint32),
+        ("codec_backend", ctypes.c_char * 64),
     ]
 
 
@@ -192,6 +206,8 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_shutdown.restype = None
     lib.lv_get_version_string.restype = ctypes.c_char_p
     lib.lv_get_cpu_simd_info.restype = ctypes.c_char_p
+    lib.lv_free_string.argtypes = [ctypes.c_void_p]
+    lib.lv_get_supported_codecs.restype = ctypes.c_void_p
     lib.lv_check_abi_compatibility.argtypes = [ctypes.c_int, ctypes.c_int]
     lib.lv_check_abi_compatibility.restype = ctypes.c_int
     lib.lv_error_string.argtypes = [ctypes.c_int]
@@ -217,6 +233,10 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_sender_push_audio_chunk.restype = ctypes.c_int
     lib.lv_sender_request_keyframe_quality.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.lv_sender_request_keyframe_quality.restype = ctypes.c_int
+    lib.lv_sender_set_bitrate.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.lv_sender_set_bitrate.restype = ctypes.c_int
+    lib.lv_sender_force_keyframe.argtypes = [ctypes.c_void_p]
+    lib.lv_sender_force_keyframe.restype = ctypes.c_int
     lib.lv_sender_set_fec_group.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.lv_sender_set_fec_group.restype = ctypes.c_int
     lib.lv_sender_get_stream_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_StreamStats)]
@@ -267,6 +287,15 @@ class LanVidSDK:
     def simd(self) -> str:
         return self.lib.lv_get_cpu_simd_info().decode("utf-8")
 
+    def supported_codecs_json(self) -> str:
+        ptr = self.lib.lv_get_supported_codecs()
+        if not ptr:
+            return "[]"
+        try:
+            return ctypes.string_at(ptr).decode("utf-8")
+        finally:
+            self.lib.lv_free_string(ptr)
+
     def discover_peers(self, timeout_ms: int = 350, discovery_port: int = 0) -> List[dict]:
         buf = (LV_DiscoveredPeer * 32)()
         n = self.lib.lv_discovery_scan_peers(timeout_ms, discovery_port, buf, 32)
@@ -291,6 +320,9 @@ class LanVidSender:
         quality: int = 80,
         fec_group: int = 6,
         adaptive: bool = False,
+        codec: int = LV_CODEC_LANVID_DCT,
+        bitrate_kbps: int = 8000,
+        keyframe_interval: int = 120,
         lib_path: Optional[str] = None,
     ) -> None:
         self._sdk = LanVidSDK(lib_path)
@@ -303,6 +335,9 @@ class LanVidSender:
         self._cfg.quality = quality
         self._cfg.fec_group_size = fec_group
         self._cfg.adaptive_quality = 1 if adaptive else 0
+        self._cfg.codec = int(codec)
+        self._cfg.bitrate_kbps = int(bitrate_kbps)
+        self._cfg.keyframe_interval = int(keyframe_interval)
 
     def start(self) -> None:
         rc = self._lib.lv_sdk_sender_start(self._handle, ctypes.byref(self._cfg))
@@ -334,6 +369,12 @@ class LanVidSender:
 
     def set_quality(self, quality: int) -> None:
         self._lib.lv_sender_request_keyframe_quality(self._handle, int(quality))
+
+    def set_bitrate_kbps(self, bitrate_kbps: int) -> None:
+        self._lib.lv_sender_set_bitrate(self._handle, int(bitrate_kbps))
+
+    def force_keyframe(self) -> None:
+        self._lib.lv_sender_force_keyframe(self._handle)
 
     def set_fec_group(self, group_size: int) -> None:
         self._lib.lv_sender_set_fec_group(self._handle, int(group_size))

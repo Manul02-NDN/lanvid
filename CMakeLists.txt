@@ -5,7 +5,10 @@ if(POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING "" FORCE)
 endif()
 
-project(lanvid VERSION 2.1.0 LANGUAGES CXX)
+project(lanvid VERSION 2.2.0 LANGUAGES CXX)
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 set(LANVID_SDK_VERSION "1.0.0")
 
 set(CMAKE_CXX_STANDARD 20)
@@ -60,6 +63,7 @@ set(LV_CORE_SOURCES
   src/codec/slice_format.cpp
   src/codec/slice_codec.cpp
   src/codec/frame_codec.cpp
+  src/codec/video_codec_common.cpp
   src/parallel/thread_pool.cpp
   src/audio/audio_jitter_buffer.cpp
   src/net/packet.cpp
@@ -126,9 +130,13 @@ set(LV_HAVE_SDL2 FALSE)
 set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread")
 
 if(WIN32)
-  list(APPEND LV_CORE_SOURCES src/net/udp_socket_win32.cpp)
-  list(APPEND LV_PLATFORM_LIBS ws2_32 iphlpapi)
-  set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lws2_32 -liphlpapi")
+  list(APPEND LV_CORE_SOURCES
+    src/net/udp_socket_win32.cpp
+    src/codec/hw_codec_win32.cpp
+  )
+  # Core SDK always links Winsock2 + Windows Media Foundation + D3D11/DXGI for HW H.264/H.265 codecs
+  list(APPEND LV_PLATFORM_LIBS ws2_32 iphlpapi ole32 oleaut32 uuid d3d11 dxgi mf mfplat mfuuid)
+  set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lws2_32 -liphlpapi -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -lmf -lmfplat -lmfuuid")
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES
       src/platform/preview_window_win32.cpp
@@ -138,14 +146,38 @@ if(WIN32)
       src/platform/audio_playback_win32.cpp
     )
     list(APPEND LV_PLATFORM_LIBS
-      d3d11 dxgi d3dcompiler gdi32 user32 ole32 uuid avrt mmdevapi
-      mf mfplat mfreadwrite mfuuid
+      d3dcompiler gdi32 user32 avrt mmdevapi mfreadwrite
     )
   endif()
 else()
   list(APPEND LV_CORE_SOURCES src/net/udp_socket_posix.cpp)
-  if(ANDROID)
-    list(APPEND LV_PLATFORM_LIBS log)
+  if(APPLE)
+    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_apple.mm)
+    list(APPEND LV_PLATFORM_LIBS
+      "-framework VideoToolbox"
+      "-framework CoreMedia"
+      "-framework CoreVideo"
+      "-framework CoreFoundation"
+    )
+    set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation")
+  elseif(ANDROID)
+    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_android.cpp)
+    list(APPEND LV_PLATFORM_LIBS log mediandk)
+  else()
+    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_linux.cpp)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+      pkg_check_modules(LIBAV QUIET libavcodec libavutil)
+      if(LIBAV_FOUND)
+        message(STATUS "lanvid: FFmpeg libavcodec found -> enabling Linux H.264/H.265 codec backend")
+        list(APPEND LV_SIMD_DEFS LV_HAVE_FFMPEG=1)
+        list(APPEND LV_PLATFORM_INCLUDES ${LIBAV_INCLUDE_DIRS})
+        list(APPEND LV_PLATFORM_LIBS ${LIBAV_LIBRARIES})
+        set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -lavcodec -lavutil")
+      else()
+        message(STATUS "lanvid: FFmpeg libavcodec not found -> Linux H.264/H.265 disabled (LanVid DCT active)")
+      endif()
+    endif()
   endif()
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES src/platform/platform_stubs_unix.cpp)
@@ -284,6 +316,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_fec.cpp
     tests/test_audio.cpp
     tests/test_c_api.cpp
+    tests/test_video_codecs.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
   lanvid_set_flags(lanvid_tests)

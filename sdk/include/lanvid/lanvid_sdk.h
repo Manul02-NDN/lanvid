@@ -42,6 +42,10 @@ LV_API void lv_set_simd_enabled(int enabled);
  * Free the returned string with lv_free_string(). */
 LV_API char* lv_enumerate_devices(void);
 
+/* Returns heap-allocated JSON array listing supported video codecs (DCT, H.264, H.265) and HW/SW status.
+ * Free the returned string with lv_free_string(). */
+LV_API char* lv_get_supported_codecs(void);
+
 /* ---- SDK Default Configuration Initializers ---- */
 LV_API void lv_sdk_sender_config_default(LV_SenderConfig* cfg);
 LV_API void lv_sdk_receiver_config_default(LV_ReceiverConfig* cfg);
@@ -79,6 +83,8 @@ LV_API int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, 
 
 /* Live runtime encoding & transport controls (lock-free / thread-safe): */
 LV_API int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality);
+LV_API int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps);
+LV_API int lv_sender_force_keyframe(LvSenderHandle* handle);
 LV_API int lv_sender_set_fec_group(LvSenderHandle* handle, int fec_group_size);
 LV_API int lv_sender_set_adaptive_quality(LvSenderHandle* handle, int enabled, int q_min, int q_max);
 

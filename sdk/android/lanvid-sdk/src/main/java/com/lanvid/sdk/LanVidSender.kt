@@ -17,10 +17,13 @@ class LanVidSender : Closeable {
         fps: Int = 60,
         quality: Int = 80,
         fecGroup: Int = 6,
-        adaptiveQuality: Boolean = true
+        adaptiveQuality: Boolean = true,
+        codec: LanVidCodec = LanVidCodec.DCT,
+        bitrateKbps: Int = 8000
     ): Boolean {
         return NativeBridge.senderStart(
-            handle, destIp, destPort, width, height, fps, quality, fecGroup, adaptiveQuality
+            handle, destIp, destPort, width, height, fps, quality, fecGroup, adaptiveQuality,
+            codec.id, bitrateKbps
         ) == 0
     }
 
@@ -52,6 +55,8 @@ class LanVidSender : Closeable {
     }
 
     fun setQuality(quality: Int) { if (handle != 0L) NativeBridge.senderSetQuality(handle, quality) }
+    fun setBitrateKbps(bitrateKbps: Int) { if (handle != 0L) NativeBridge.senderSetBitrate(handle, bitrateKbps) }
+    fun forceKeyframe() { if (handle != 0L) NativeBridge.senderForceKeyframe(handle) }
     fun setFecGroup(groupSize: Int) { if (handle != 0L) NativeBridge.senderSetFec(handle, groupSize) }
     fun setAdaptiveQuality(enabled: Boolean, qMin: Int = 35, qMax: Int = 85) {
         if (handle != 0L) NativeBridge.senderSetAdaptive(handle, enabled, qMin, qMax)

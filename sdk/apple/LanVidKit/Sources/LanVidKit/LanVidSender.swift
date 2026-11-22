@@ -16,6 +16,9 @@ public final class LanVidSender {
         public var adaptiveQuality: Bool
         public var qMin: Int32
         public var qMax: Int32
+        public var codec: LanVidCodec
+        public var bitrateKbps: UInt32
+        public var keyframeInterval: UInt32
 
         public init(
             destHost: String,
@@ -25,7 +28,10 @@ public final class LanVidSender {
             fecGroupSize: Int32 = 6,
             adaptiveQuality: Bool = true,
             qMin: Int32 = 35,
-            qMax: Int32 = 85
+            qMax: Int32 = 85,
+            codec: LanVidCodec = .dct,
+            bitrateKbps: UInt32 = 8000,
+            keyframeInterval: UInt32 = 120
         ) {
             self.destHost = destHost
             self.destPort = destPort
@@ -35,6 +41,9 @@ public final class LanVidSender {
             self.adaptiveQuality = adaptiveQuality
             self.qMin = qMin
             self.qMax = qMax
+            self.codec = codec
+            self.bitrateKbps = bitrateKbps
+            self.keyframeInterval = keyframeInterval
         }
     }
 
@@ -67,6 +76,9 @@ public final class LanVidSender {
         c.adaptive_quality = config.adaptiveQuality ? 1 : 0
         c.q_min = config.qMin
         c.q_max = config.qMax
+        c.codec = config.codec.rawValue
+        c.bitrate_kbps = config.bitrateKbps
+        c.keyframe_interval = config.keyframeInterval
 
         let rc = lv_sdk_sender_start(h, &c)
         if rc != LV_OK.rawValue {
@@ -149,6 +161,16 @@ public final class LanVidSender {
     public func requestQuality(_ quality: Int32) {
         guard let h = handle else { return }
         _ = lv_sender_request_keyframe_quality(h, quality)
+    }
+
+    public func setBitrateKbps(_ bitrateKbps: UInt32) {
+        guard let h = handle else { return }
+        _ = lv_sender_set_bitrate(h, bitrateKbps)
+    }
+
+    public func forceKeyframe() {
+        guard let h = handle else { return }
+        _ = lv_sender_force_keyframe(h)
     }
 
     public func setFecGroupSize(_ groupSize: Int32) {

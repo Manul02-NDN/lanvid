@@ -13,7 +13,9 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       user_on_frame_(std::move(on_frame)),
       pool_(cfg.decode_threads),
       assembler_(cfg.assembler, [this](const CompletedFrame& cf) { on_frame_internal(cf); }, &pool_),
-      audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms) {}
+      audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms) {
+    assembler_.set_pli_callback([this](uint32_t) { send_pli_now(now_us()); });
+}
 
 bool UdpReceiver::init() {
     if (!sock_.open()) return false;
@@ -113,6 +115,32 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
     const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
     if (n && sock_.send_to(dgram, n, sender_ep_) == int(n)) {
         ++feedbacks_sent_;
+    }
+}
+
+void UdpReceiver::send_pli_now(uint64_t now) {
+    if (!has_sender_) return;
+    FeedbackPayload fb;
+    fb.last_completed_frame_id = last_completed_fid_;
+    fb.packet_loss_permille = 0;
+    fb.fec_recovered_permille = 0;
+    fb.jitter_us = uint32_t(std::min<double>(jitter_us_, 1e7));
+    fb.decode_time_us = 0;
+    fb.request_idr = true;
+
+    uint8_t fb_bytes[kFeedbackSize];
+    write_feedback(fb_bytes, fb);
+
+    PacketHeader h;
+    h.type = PacketType::kFeedback;
+    h.flags = kFlagHasCrc;
+    h.frame_id = fb.last_completed_frame_id;
+    h.timestamp_us = uint32_t(now);
+    uint8_t dgram[64];
+    const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
+    if (n && sock_.send_to(dgram, n, sender_ep_) == int(n)) {
+        ++feedbacks_sent_;
+        ++plis_sent_;
     }
 }
 

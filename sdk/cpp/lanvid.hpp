@@ -88,6 +88,12 @@ public:
         lv_free_string(s);
         return out;
     }
+    static std::string supported_codecs_json() {
+        char* s = lv_get_supported_codecs();
+        std::string out(s ? s : "[]");
+        lv_free_string(s);
+        return out;
+    }
 };
 
 class Discovery {
@@ -159,6 +165,16 @@ public:
 
     Result<void> set_quality(int quality) {
         const int rc = lv_sender_request_keyframe_quality(handle_, quality);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+
+    Result<void> set_bitrate_kbps(uint32_t bitrate_kbps) {
+        const int rc = lv_sender_set_bitrate(handle_, bitrate_kbps);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+
+    Result<void> force_keyframe() {
+        const int rc = lv_sender_force_keyframe(handle_);
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
     }
 

@@ -14,6 +14,7 @@ struct PacketizerConfig {
     size_t mtu = kDefaultMtu;    // max UDP payload size including the 28-byte LVSP header
     bool enable_crc = true;
     uint16_t fec_group_size = 0; // 0 = FEC disabled; >0 (e.g. 6 or 8) = 1 XOR parity per group
+    uint8_t extra_flags = 0;     // optional codec_id bits + kFlagKeyFrame / kFlagCodecConfig
 };
 
 // Emits data packets (and XOR FEC parity packets when fec_group_size > 0) for `slice_data`.

@@ -136,7 +136,9 @@ bool parse_ping_pong(const uint8_t* in, size_t len, PingPongPayload& p) {
 
 void write_feedback(uint8_t* out, const FeedbackPayload& fb) {
     store_le32(out + 0, fb.last_completed_frame_id);
-    store_le16(out + 4, fb.packet_loss_permille);
+    const uint16_t packed_loss =
+        uint16_t((fb.packet_loss_permille & 0x7FFFu) | (fb.request_idr ? 0x8000u : 0u));
+    store_le16(out + 4, packed_loss);
     store_le16(out + 6, fb.fec_recovered_permille);
     store_le32(out + 8, fb.jitter_us);
     store_le32(out + 12, fb.decode_time_us);
@@ -145,7 +147,9 @@ void write_feedback(uint8_t* out, const FeedbackPayload& fb) {
 bool parse_feedback(const uint8_t* in, size_t len, FeedbackPayload& fb) {
     if (len < kFeedbackSize) return false;
     fb.last_completed_frame_id = load_le32(in + 0);
-    fb.packet_loss_permille = load_le16(in + 4);
+    const uint16_t packed_loss = load_le16(in + 4);
+    fb.packet_loss_permille = uint16_t(packed_loss & 0x7FFFu);
+    fb.request_idr = (packed_loss & 0x8000u) != 0;
     fb.fec_recovered_permille = load_le16(in + 6);
     fb.jitter_us = load_le32(in + 8);
     fb.decode_time_us = load_le32(in + 12);

@@ -28,6 +28,8 @@ struct IntervalReport {
     uint64_t crc_errors = 0;
     uint64_t late_packets = 0;
     uint8_t active_quality = 0;
+    VideoCodecId active_codec = VideoCodecId::kLanVidDct;
+    uint64_t pli_requests = 0;
     bool clock_synced = false;
     uint32_t rtt_us = 0;
     bool has_audio = false;
@@ -58,6 +60,7 @@ private:
     uint64_t last_us_ = 0;
     uint64_t last_frame_us_ = 0;
     uint8_t last_quality_ = 0;
+    VideoCodecId last_codec_ = VideoCodecId::kLanVidDct;
 
     uint64_t win_frames_ok_ = 0;
     uint64_t win_frames_conc_ = 0;

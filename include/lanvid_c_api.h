@@ -64,6 +64,15 @@ enum LvConcealMode {
     LV_CONCEAL_PREV_FRAME = 1
 };
 
+#ifndef LV_CODEC_TYPE_DEFINED
+#define LV_CODEC_TYPE_DEFINED
+typedef enum LV_CodecType {
+    LV_CODEC_LANVID_DCT = 0,
+    LV_CODEC_H264       = 1,
+    LV_CODEC_H265       = 2
+} LV_CodecType;
+#endif
+
 typedef struct LvSenderHandle LvSenderHandle;
 typedef struct LvReceiverHandle LvReceiverHandle;
 
@@ -96,6 +105,10 @@ typedef struct LvSenderConfig {
     int audio_mode;        /* LvAudioMode */
     int audio_device_index;/* -1=system default */
     double audio_chunk_ms; /* 2.5 or 5.0 */
+
+    int codec;             /* LV_CodecType: 0=DCT, 1=H264, 2=H265 */
+    uint32_t bitrate_kbps; /* target bitrate for H.264/H.265 (default 8000) */
+    uint32_t keyframe_interval; /* IDR interval in frames (default 120) */
 } LvSenderConfig;
 
 typedef struct LvSenderStats {
@@ -113,6 +126,10 @@ typedef struct LvSenderStats {
     uint64_t send_errors;
     uint64_t audio_packets_sent;
     double audio_kbps;
+    int active_codec;
+    int codec_is_hardware;
+    uint32_t target_bitrate_kbps;
+    char codec_backend[64];
 } LvSenderStats;
 
 typedef struct LvReceiverConfig {
@@ -149,6 +166,10 @@ typedef struct LvReceiverStats {
     uint64_t audio_packets_lost;
     double audio_kbps;
     double audio_buffer_ms;
+    int active_codec;
+    int codec_is_hardware;
+    uint64_t pli_requests;
+    char codec_backend[64];
 } LvReceiverStats;
 
 /* ---- Core lifecycle & introspection ---- */
@@ -161,6 +182,7 @@ LV_API void lv_set_simd_enabled(int enabled);
 /* Returns heap-allocated JSON describing monitors, cameras, audio devices, and network interfaces.
  * Free the returned string with lv_free_string(). */
 LV_API char* lv_enumerate_devices(void);
+LV_API char* lv_get_supported_codecs(void);
 
 /* ---- Default config helpers ---- */
 LV_API void lv_sender_config_default(LvSenderConfig* cfg);
@@ -193,6 +215,8 @@ LV_API int lv_sender_get_preview_frame(LvSenderHandle* handle, uint8_t* out_buf,
                                        int want_rgba);
 
 LV_API int lv_sender_get_stats(LvSenderHandle* handle, LvSenderStats* out);
+LV_API int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps);
+LV_API int lv_sender_force_keyframe(LvSenderHandle* handle);
 
 /* ---- Receiver API ---- */
 LV_API LvReceiverHandle* lv_receiver_create(void);

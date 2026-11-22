@@ -110,6 +110,13 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_simdInfo(JNI
     return env->NewStringUTF(lv_get_cpu_simd_info());
 }
 
+JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_supportedCodecsJson(JNIEnv* env, jclass) {
+    char* j = lv_get_supported_codecs();
+    jstring out = env->NewStringUTF(j ? j : "[]");
+    lv_free_string(j);
+    return out;
+}
+
 JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_scanLanJson(JNIEnv* env, jclass,
                                                                                 jint timeout_ms) {
     char* j = lv_discovery_scan(timeout_ms);
@@ -130,7 +137,7 @@ JNIEXPORT void JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderDestroy(J
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderStart(
     JNIEnv* env, jclass, jlong ptr, jstring dest_ip, jint dest_port, jint width, jint height,
-    jint fps, jint quality, jint fec_group, jboolean adaptive) {
+    jint fps, jint quality, jint fec_group, jboolean adaptive, jint codec, jint bitrate_kbps) {
     if (!ptr) return LV_ERR_INVALID_ARG;
     LV_SenderConfig cfg{};
     lv_sdk_sender_config_default(&cfg);
@@ -143,6 +150,8 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderStart(
     cfg.quality = std::clamp(int(quality), 1, 100);
     cfg.fec_group_size = std::max(0, int(fec_group));
     cfg.adaptive_quality = adaptive ? 1 : 0;
+    cfg.codec = std::clamp(int(codec), 0, 2);
+    cfg.bitrate_kbps = uint32_t(std::max(250, int(bitrate_kbps)));
     return lv_sdk_sender_start(reinterpret_cast<LvSenderHandle*>(ptr), &cfg);
 }
 
@@ -188,6 +197,18 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudio
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetQuality(
     JNIEnv*, jclass, jlong ptr, jint q) {
     return ptr ? lv_sender_request_keyframe_quality(reinterpret_cast<LvSenderHandle*>(ptr), q)
+               : LV_ERR_INVALID_ARG;
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetBitrate(
+    JNIEnv*, jclass, jlong ptr, jint bitrate_kbps) {
+    return ptr ? lv_sender_set_bitrate(reinterpret_cast<LvSenderHandle*>(ptr), uint32_t(bitrate_kbps))
+               : LV_ERR_INVALID_ARG;
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderForceKeyframe(
+    JNIEnv*, jclass, jlong ptr) {
+    return ptr ? lv_sender_force_keyframe(reinterpret_cast<LvSenderHandle*>(ptr))
                : LV_ERR_INVALID_ARG;
 }
 
@@ -299,14 +320,15 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverStat
         auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
         if (ctx->rx) lv_receiver_get_stream_stats(ctx->rx, &s);
     }
-    char buf[512];
+    char buf[640];
     std::snprintf(buf, sizeof(buf),
                   "{\"state\":%d,\"width\":%d,\"height\":%d,\"q\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
                   "\"lat_p50\":%.2f,\"lat_p99\":%.2f,\"loss\":%.2f,\"fec\":%llu,"
-                  "\"audio_kbps\":%.0f,\"audio_buf\":%.1f}",
+                  "\"audio_kbps\":%.0f,\"audio_buf\":%.1f,\"codec\":%d,\"hw\":%d,\"backend\":\"%s\"}",
                   s.state, s.width, s.height, s.active_quality, s.fps, s.bitrate_mbps,
                   s.latency_p50_ms, s.latency_p99_ms, s.packet_loss_pct,
-                  static_cast<unsigned long long>(s.fec_recovered), s.audio_kbps, s.audio_buffer_ms);
+                  static_cast<unsigned long long>(s.fec_recovered), s.audio_kbps, s.audio_buffer_ms,
+                  s.active_codec, s.codec_is_hardware, s.codec_backend);
     return env->NewStringUTF(buf);
 }
 

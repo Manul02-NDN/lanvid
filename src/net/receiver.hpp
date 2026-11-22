@@ -56,8 +56,12 @@ public:
 
     const AssemblerStats& assembler_stats() const { return assembler_.stats(); }
     const SeqLossTracker& seq_tracker() const { return assembler_.seq_tracker(); }
+    VideoCodecId active_codec() const { return assembler_.active_codec(); }
+    std::string decoder_backend_name() const { return assembler_.decoder_backend_name(); }
+    bool decoder_is_hardware() const { return assembler_.decoder_is_hardware(); }
     ClockSyncInfo clock_sync() const { return sync_; }
     uint64_t feedbacks_sent() const { return feedbacks_sent_; }
+    uint64_t plis_sent() const { return plis_sent_; }
     uint32_t jitter_us() const { return uint32_t(jitter_us_); }
 
     AudioJitterBuffer& audio_buffer() { return audio_buf_; }
@@ -73,6 +77,7 @@ private:
     void on_frame_internal(const CompletedFrame& cf);
     void maybe_send_ping(uint64_t now);
     void maybe_send_feedback(uint64_t now);
+    void send_pli_now(uint64_t now);
     void handle_pong(const uint8_t* payload, size_t len, uint32_t t4_us);
 
     ReceiverConfig cfg_;
@@ -101,6 +106,7 @@ private:
     uint64_t fb_dec_us_sum_ = 0;
     uint64_t fb_dec_cnt_ = 0;
     uint64_t feedbacks_sent_ = 0;
+    uint64_t plis_sent_ = 0;
 
     uint8_t recv_batch_buf_[kRecvBatchSize][kRecvSlotCap];
 };

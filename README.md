@@ -4,31 +4,47 @@
 [![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Ultra-Low Latency Slice-Based Intra-Frame LAN Video & Audio Streaming Protocol, Cross-Platform Apps (`LanVid Studio`) & Multi-Platform SDK (`C++20 / C ABI / Swift / Kotlin / Python`).**
+**Ultra-Low Latency Multi-Codec LAN Video & Audio Streaming Protocol (`LanVid DCT` / `H.264` / `H.265`), Cross-Platform Apps (`LanVid Studio`) & Multi-Platform SDK (`C++20 / C ABI / Swift / Kotlin / Python`).**
 
-LanVid is engineered from scratch in dependency-free C++20 for sub-frame **4K60** local network streaming (**< 1 ms** codec latency, **< 4–6 ms** glass-to-glass LAN latency) with zero GOP buffering, instant packet-loss recovery, and synchronized low-latency audio.
+LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network streaming (**< 1 ms** DCT codec latency, **< 4–6 ms** glass-to-glass LAN latency) and bandwidth-efficient **Zero-Latency Hardware H.264 / H.265 (HEVC)** streaming over Wi-Fi and constrained networks with instant **XOR FEC + PLI/IDR** packet-loss recovery and synchronized low-latency audio.
 
 ---
 
 ## Key Features & Measured Benchmarks
 
-- **Intra-Frame Only (`I-Frame Only`):** Zero inter-frame dependencies (`no P/B frames`), zero GOP buffering latency, and zero cascading artifacts after packet loss.
-- **Slice-Parallel SIMD Codec (`LVC`):** Every frame is partitioned into independent 16-row horizontal slices encoded/decoded in parallel across all CPU cores with runtime-dispatched **x86_64 AVX2** and **ARM64 NEON** (`16-bit` Loeffler LLM 2D DCT/IDCT + fixed-point `BGRA/RGBA <-> YCbCr 4:2:0/4:2:2/4:4:4` + direct zero-RGB `YUV_420_888 / NV12 / NV21` input).
-- **Resilient UDP Transport (`LVSP v1`):** Raw MTU-safe UDP datagrams (`<= 1400 B`), hardware-accelerated CRC32C, **slice-level XOR FEC** (instant single-packet recovery with zero NACK round-trips), and **AIMD Adaptive Quality** driven by 100 ms receiver telemetry feedback.
+- **Multi-Codec Architecture (`LanVid DCT` | `H.264` | `H.265 / HEVC`):**
+  - **LanVid DCT (`I-Frame Only`):** Zero inter-frame dependencies (`no P/B frames`), zero GOP buffering latency, independent 16-row horizontal slices parallelized across all CPU cores with runtime-dispatched **x86_64 AVX2** and **ARM64 NEON** (`16-bit` Loeffler LLM 2D DCT/IDCT + fixed-point `BGRA/RGBA <-> YCbCr 4:2:0/4:2:2/4:4:4` + direct zero-RGB `YUV_420_888 / NV12 / NV21` input).
+  - **Hardware Zero-Latency H.264 & H.265 (HEVC):** Native OS hardware encoders/decoders with zero B-frames (`B=0`), Annex-B `SPS/PPS/VPS + IDR` normalization, automatic receiver codec auto-detection from LVSP wire flags, dynamic AIMD bitrate scaling (`250 kbps – 100 Mbps`), and instant **PLI (Picture Loss Indication)** IDR keyframe recovery on unrecoverable packet loss:
+    - **Windows:** Media Foundation MFT + shared `IMFDXGIDeviceManager` + `ID3D11VideoProcessor` (`BGRA/RGBA -> NV12` 4-slot GPU texture ring pool, zero CPU color conversion) + D3D11 DXVA HW decoding with compact NV12 readback & AVX2 color conversion.
+    - **macOS / iOS:** Apple **VideoToolbox** (`VTCompressionSession` / `VTDecompressionSession`, `kVTCompressionPropertyKey_RealTime`, `AllowFrameReordering = false`).
+    - **Android:** NDK **AMediaCodec** (`KEY_LOW_LATENCY`, `KEY_MAX_B_FRAMES = 0`).
+    - **Linux:** VAAPI (`h264_vaapi` / `hevc_vaapi`) / NVENC / `libx264` / `libx265` zero-latency via `dlopen` FFmpeg (`libavcodec`).
+- **Resilient UDP Transport (`LVSP v1`):** Raw MTU-safe UDP datagrams (`<= 1400 B`), hardware-accelerated CRC32C, **slice-level XOR FEC** (instant single-packet recovery with zero NACK round-trips), **PLI/IDR** fast recovery for inter-frame codecs, and **AIMD Adaptive Quality / Bitrate** driven by 100 ms receiver telemetry feedback.
 - **Synchronized Low-Latency Audio + LAN Auto-Discovery:** 48 kHz Stereo `PCM16` / `Float32` in 2.5 ms or 5 ms UDP packets over the same socket, lock-free SPSC jitter buffer (~12 ms target) with adaptive 1-sample clock-drift compensation, WASAPI Loopback/Mic (Windows), native AAudio (Android), `AVAudioEngine` (Apple), and UDP broadcast LAN peer discovery (port `5099`).
 - **Hardware-Accelerated Preview & Desktop/Mobile Apps:**
-  - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux.
+  - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux, with live codec selector (`LanVid DCT` / `H.264` / `H.265`), bitrate slider, and hardware badge telemetry.
   - **Android App (`android/`):** Kotlin + Jetpack Compose + Camera2 (`YUV_420_888` zero-RGB-copy) + MediaProjection Foreground Service + `ANativeWindow` + native AAudio.
   - **One-Click Installers (`installer/` & `sdk/apple/installer/`):** Pre-flight environment, port-conflict, firewall, and dependency installers for Windows (`.exe` / Inno Setup), Linux (`.run` / `.deb` / `.AppImage`), and macOS (Universal `.pkg` / `.dmg`).
 
-### Measured Performance (AMD Zen 4, 16 HW Threads, AVX2)
+### Multi-Codec Comparison (1080p60 Live UDP Loopback — Windows 11, Ryzen Zen 4 + AMD VCN 3.1 D3D11 HW)
+
+| Codec Mode | Target / Avg Bitrate | Encode + TX (p50) | E2E UDP Latency (steady p50 / p99) | Delivered FPS | Recommended Use Case |
+|---|---:|---:|---:|---:|---|
+| **LanVid DCT (`Q=80`, AVX2)** | **76.1 Mbps** | **1.42 ms** | **2.00 ms / 2.34 ms** | **60.3 FPS** | 1GbE / 2.5GbE LAN, ultra-low-latency desktop & game capture |
+| **H.264 Zero-Latency (D3D11 HW)** | **7.0 Mbps** (8M target) | **7.92–8.11 ms** *(down from 14.46 ms CPU-NV12)* | **11.51–11.97 ms / 13.39 ms** *(down from 19.33 ms)* | **60.3 FPS** | Wi-Fi, mobile clients, 10–15× lower bandwidth with HW offload |
+| **H.264 + XOR FEC (`k=6`) + AIMD (1% loss)** | **5.3 Mbps** (adaptive) | **8.08 ms** | **11.29–11.90 ms / 13.27 ms** | **60.3 FPS** (`17/17` FEC, `0` drops) | Lossy Wi-Fi / congested LANs with zero stutter |
+| **H.265 / HEVC Zero-Latency (D3D11 HW)** | **~8–9 Mbps** (8M target) | **6.21–6.30 ms** *(VCN raw ~3.1 ms)* | Hardware TX verified *(requires HEVC decoder MFT)* | **60.2 FPS** | High-efficiency 1080p/4K streaming over bandwidth-limited links |
+
+> **Note on D3D11 GPU Pipeline:** Moving `BGRA/RGBA -> NV12` onto a 4-slot `ID3D11VideoProcessor` texture ring bound via `IMFDXGIDeviceManager` + `MFCreateDXGISurfaceBuffer`, paired with D3D11 DXVA hardware decoding and AVX2 NV12 readback (`~3.6 ms` total network + decode), cut H.264 `Encode+TX` by **~45%** (`14.46 ms -> 7.92 ms`) and steady-state loopback E2E latency by **~7.4 ms** (`19.33 ms -> 11.51 ms`), even with both sender and receiver sharing the same integrated 2-CU GPU on `127.0.0.1`. On separate LAN machines, encode and decode run on dedicated GPUs without contention.
+
+### Slice-Codec (`LanVid DCT`) Peak Performance (AMD Zen 4, 16 HW Threads, AVX2)
 
 | Workload | Encode (avg / p95) | Decode (avg / p95) | Throughput | E2E UDP Latency |
 |---|---:|---:|---:|---:|
 | **1080p (`1920×1080`, Q=75, AVX2)** | **0.22 ms** (0.26) | **0.18 ms** (0.20) | **4,471 FPS** | **1.76 ms p50 / 2.08 ms p99** |
 | **4K UHD (`3840×2160`, Q=75, AVX2)** | **0.87 ms** (0.99) | **0.80 ms** (0.86) | **1,147 FPS** | **3.45 ms p50 / 3.98–4.84 ms p99** (with D3D11 Preview + XOR FEC) |
 
-*Unit test suite: **31 / 31 passing** (including 4K AVX2 vs Scalar PSNR parity `ΔY = 0.03 dB`, XOR FEC single/double loss, AIMD feedback, lock-free audio drift, zero-copy SDK callbacks, and UDP loopback A/V + LAN discovery).*
+*Unit test suite: **35 / 35 passing** (including 4K AVX2 vs Scalar PSNR parity `ΔY = 0.03 dB`, XOR FEC single/double loss, AIMD feedback, lock-free audio drift, zero-copy SDK callbacks, UDP loopback A/V + LAN discovery, H.264 zero-latency roundtrip + PLI/IDR recovery, H.265 Annex-B VPS/SPS/PPS+IDR verification, and SDK H.264 auto-detect loopback).*
 
 ---
 
@@ -44,7 +60,7 @@ lanvid/
 │   └── lanvid_c_api.h       # Desktop/App C ABI header
 ├── src/
 │   ├── common/              # CPU SIMD dispatch, CRC32C, monotonic clock, Image buffers
-│   ├── codec/               # Color (Scalar/AVX2/NEON), 2D LLM DCT/IDCT, Quant, Huffman, Slice/Frame codec
+│   ├── codec/               # Color (Scalar/AVX2/NEON), 2D LLM DCT/IDCT, Slice/Frame codec, HW H.264/H.265 backends
 │   ├── parallel/            # Lock-free work pool for slice-level parallelism
 │   ├── audio/               # Lock-free SPSC AudioJitterBuffer + clock-drift compensation
 │   ├── net/                 # UDP sockets (Win32/POSIX sendmmsg/recvmmsg), Packetizer/FEC, Assembler, AIMD, Discovery
@@ -64,7 +80,7 @@ lanvid/
 │   └── examples/cpp_client/ # Standalone external CMake consumer demo
 ├── android/                 # Standalone LanVid Studio Android app (Kotlin + Compose + NDK)
 ├── installer/               # Windows (Setup Wizard + Inno Setup + preflight.ps1) & Linux (.run / .deb / .AppImage)
-├── tests/                   # 31 unit & loopback integration tests
+├── tests/                   # 35 unit & loopback integration tests (DCT + H.264/H.265 + PLI + FEC + SDK)
 ├── bench/                   # 1080p / 4K SIMD vs Scalar codec benchmark
 └── third_party/imgui/       # Vendored Dear ImGui v1.91.8 (MIT) for self-contained Desktop GUI builds
 ```
@@ -79,13 +95,15 @@ lanvid/
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Run all 31 unit tests & 4K benchmark
+# Run all 35 unit tests & 4K benchmark
 .\build\lanvid_tests.exe
 .\build\bench_codec.exe
 
-# Launch LanVid Studio GUI or CLI
+# Launch LanVid Studio GUI or CLI (DCT, H.264, H.265)
 .\build\lanvid_app.exe
 .\build\sender.exe --list-devices
+.\build\sender.exe --host 127.0.0.1 --port 5000 --codec h264 --bitrate 8000 --fps 60
+.\build\receiver.exe --port 5000 --preview
 ```
 
 ### Linux (Ubuntu / Debian / Arch / Fedora)

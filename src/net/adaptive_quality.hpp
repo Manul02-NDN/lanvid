@@ -13,13 +13,17 @@ struct AdaptiveQualityConfig {
     int q_min = 35;
     int q_max = 85;
     int initial_q = 75;
+    uint32_t bitrate_min_kbps = 1500;
+    uint32_t bitrate_max_kbps = 50000;
+    uint32_t initial_bitrate_kbps = 8000;
+    uint32_t bitrate_increase_step_kbps = 500;
     uint16_t loss_threshold_permille = 5;    // > 0.5% packet loss triggers multiplicative decrease
     uint16_t fec_threshold_permille = 50;    // > 5.0% FEC recovery also indicates channel stress
     double decrease_factor = 0.82;
     int increase_step = 2;
     uint64_t decrease_cooldown_us = 200000;  // 200 ms between drops
     uint64_t stable_hold_us = 500000;        // 500 ms clean before ramping up
-    uint64_t increase_interval_us = 200000;  // +2 Q every 200 ms while clean
+    uint64_t increase_interval_us = 200000;  // +2 Q / +500 kbps every 200 ms while clean
 };
 
 class AdaptiveQualityController {
@@ -28,11 +32,13 @@ public:
 
     void reset(const AdaptiveQualityConfig& cfg);
 
-    // Feeds a telemetry feedback packet. Returns true if the active quality changed.
+    // Feeds a telemetry feedback packet. Returns true if active quality or bitrate changed.
     bool on_feedback(const FeedbackPayload& fb, uint64_t now_us);
 
     bool enabled() const { return cfg_.enabled; }
     int current_quality() const { return q_; }
+    uint32_t current_bitrate_kbps() const { return bitrate_kbps_; }
+    void set_target_bitrate_kbps(uint32_t kbps);
     bool has_feedback() const { return has_fb_; }
     FeedbackPayload last_feedback() const { return last_fb_; }
     uint64_t feedback_count() const { return fb_count_; }
@@ -42,6 +48,7 @@ public:
 private:
     AdaptiveQualityConfig cfg_;
     int q_ = 75;
+    uint32_t bitrate_kbps_ = 8000;
     bool has_fb_ = false;
     FeedbackPayload last_fb_{};
     uint64_t fb_count_ = 0;

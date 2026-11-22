@@ -3,6 +3,12 @@ package com.lanvid.sdk
 import com.lanvid.sdk.internal.NativeBridge
 import org.json.JSONArray
 
+enum class LanVidCodec(val id: Int) {
+    DCT(0),
+    H264(1),
+    H265(2)
+}
+
 data class LanVidPeer(
     val ip: String,
     val port: Int,
@@ -31,6 +37,7 @@ data class LanVidStreamStats(
 object LanVidSdk {
     val version: String get() = NativeBridge.version()
     val simdInfo: String get() = NativeBridge.simdInfo()
+    val supportedCodecsJson: String get() = NativeBridge.supportedCodecsJson()
 }
 
 object LanVidDiscovery {

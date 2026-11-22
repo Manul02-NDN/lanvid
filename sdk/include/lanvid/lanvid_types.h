@@ -50,6 +50,16 @@ typedef enum LV_StreamState {
     LV_STATE_ERROR     = 4
 } LV_StreamState;
 
+/* ---- Video Codecs ---- */
+#ifndef LV_CODEC_TYPE_DEFINED
+#define LV_CODEC_TYPE_DEFINED
+typedef enum LV_CodecType {
+    LV_CODEC_LANVID_DCT = 0, /* Intra-only slice-parallel AVX2/NEON DCT (< 2 ms latency) */
+    LV_CODEC_H264       = 1, /* Zero-latency hardware/software H.264 (AVC) Annex-B */
+    LV_CODEC_H265       = 2  /* Zero-latency hardware/software H.265 (HEVC) Annex-B */
+} LV_CodecType;
+#endif
+
 /* ---- Chroma Subsampling ---- */
 typedef enum LV_ChromaFormat {
     LV_CHROMA_420 = 0,
@@ -76,7 +86,9 @@ typedef struct LV_VideoFrameView {
     uint16_t slices_ok;
     uint16_t slices_total;
     uint8_t quality;
-    uint8_t reserved[3];
+    uint8_t codec;        /* LV_CodecType */
+    uint8_t is_keyframe;  /* 1 for IDR / intra frame */
+    uint8_t reserved;
 } LV_VideoFrameView;
 
 /* ---- Zero-Copy Audio Chunk View (delivered to receiver audio callback) ---- */
@@ -121,6 +133,9 @@ typedef struct LV_SenderConfig {
     int32_t q_max;            /* default 85 */
     int32_t threads;          /* 0=auto */
     double pace_mbps;         /* 0=unpaced */
+    int32_t codec;            /* LV_CodecType (default LV_CODEC_LANVID_DCT) */
+    uint32_t bitrate_kbps;    /* Target bitrate for H.264/H.265 (default 8000 kbps) */
+    uint32_t keyframe_interval; /* IDR interval in frames for H.264/H.265 (default 120) */
 } LV_SenderConfig;
 
 /* ---- SDK Receiver Configuration ---- */
@@ -159,6 +174,11 @@ typedef struct LV_StreamStats {
     uint64_t audio_packets;
     double audio_kbps;
     double audio_buffer_ms;
+    int32_t active_codec;        /* LV_CodecType */
+    int32_t codec_is_hardware;   /* 1 if HW accelerated encoder/decoder active */
+    uint32_t target_bitrate_kbps;/* Active target bitrate for H.264/H.265 */
+    uint32_t reserved_u32;
+    char codec_backend[64];      /* Active backend string (e.g. "AMDh264Encoder (HW)") */
 } LV_StreamStats;
 
 /* ---- Discovered LAN Peer ---- */

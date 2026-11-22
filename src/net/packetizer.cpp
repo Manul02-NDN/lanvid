@@ -35,9 +35,10 @@ uint16_t packetize_slice(uint32_t frame_id, uint32_t timestamp_us, uint16_t slic
         parity_payload = heap_parity.data();
     }
 
+    const uint8_t extra = uint8_t(cfg.extra_flags & (kFlagKeyFrame | kFlagCodecConfig | kFlagCodecMask));
     const uint8_t base_flags =
         uint8_t((cfg.enable_crc ? kFlagHasCrc : 0) |
-                (slice_id + 1 == total_slices ? kFlagLastSliceOfFrame : 0));
+                (slice_id + 1 == total_slices ? kFlagLastSliceOfFrame : 0) | extra);
 
     uint16_t emitted = 0;
     uint16_t group_idx = 0;

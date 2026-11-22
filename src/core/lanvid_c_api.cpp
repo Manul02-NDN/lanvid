@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "codec/dct.hpp"
+#include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
@@ -310,6 +311,9 @@ struct LvReceiverHandle {
                 view.slices_ok = cf.slices_ok;
                 view.slices_total = cf.total_slices;
                 view.quality = cf.quality;
+                view.codec = uint8_t(cf.codec);
+                view.is_keyframe = cf.is_keyframe ? 1 : 0;
+                view.reserved = 0;
                 vcb(&view, vud);
             }
 
@@ -536,6 +540,10 @@ char* lv_enumerate_devices(void) {
     return dup_cstr(os.str());
 }
 
+char* lv_get_supported_codecs(void) {
+    return dup_cstr(lv::supported_codecs_json());
+}
+
 /* ---- SDK Default Configs ---- */
 void lv_sdk_sender_config_default(LV_SenderConfig* cfg) {
     if (!cfg) return;
@@ -556,6 +564,9 @@ void lv_sdk_sender_config_default(LV_SenderConfig* cfg) {
     cfg->q_max = 85;
     cfg->threads = 0;
     cfg->pace_mbps = 0.0;
+    cfg->codec = LV_CODEC_LANVID_DCT;
+    cfg->bitrate_kbps = 8000;
+    cfg->keyframe_interval = 120;
 }
 
 void lv_sdk_receiver_config_default(LV_ReceiverConfig* cfg) {
@@ -591,10 +602,15 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
     scfg.fec_group_size = uint16_t(std::max(0, cfg->fec_group_size));
     scfg.pace_mbps = cfg->pace_mbps;
     scfg.threads = uint32_t(std::max(0, cfg->threads));
+    scfg.codec = lv::VideoCodecId(std::clamp(cfg->codec, 0, 2));
+    scfg.bitrate_kbps = cfg->bitrate_kbps > 0 ? cfg->bitrate_kbps : 8000u;
+    scfg.keyframe_interval_frames = cfg->keyframe_interval > 0 ? cfg->keyframe_interval : 120u;
+    scfg.fps = cfg->fps > 1.0 ? cfg->fps : 60.0;
     scfg.adaptive.enabled = cfg->adaptive_quality != 0;
     scfg.adaptive.q_min = std::clamp(cfg->q_min > 0 ? cfg->q_min : 35, 1, 100);
     scfg.adaptive.q_max = std::clamp(cfg->q_max > 0 ? cfg->q_max : 85, scfg.adaptive.q_min, 100);
     scfg.adaptive.initial_q = std::clamp(cfg->quality > 0 ? cfg->quality : 80, 1, 100);
+    scfg.adaptive.initial_bitrate_kbps = scfg.bitrate_kbps;
 
     handle->codec_params = {};
     handle->codec_params.width = cfg->width;
@@ -767,9 +783,26 @@ int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality) {
     if (!handle || quality < 1 || quality > 100) return LV_ERR_INVALID_ARG;
     handle->override_quality.store(quality, std::memory_order_relaxed);
     handle->codec_params.quality = quality;
-    if (handle->sender && handle->adaptive_enabled.load(std::memory_order_relaxed)) {
-        handle->sender->set_adaptive_quality(true, 35, 95, quality);
+    if (handle->sender) {
+        handle->sender->force_keyframe();
+        if (handle->adaptive_enabled.load(std::memory_order_relaxed)) {
+            handle->sender->set_adaptive_quality(true, 35, 95, quality);
+        }
     }
+    return LV_OK;
+}
+
+int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps) {
+    if (!handle || bitrate_kbps < 250u || bitrate_kbps > 100000u) return LV_ERR_INVALID_ARG;
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    handle->sender->set_bitrate_kbps(bitrate_kbps);
+    return LV_OK;
+}
+
+int lv_sender_force_keyframe(LvSenderHandle* handle) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    handle->sender->force_keyframe();
     return LV_OK;
 }
 
@@ -827,6 +860,11 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     out->packets_total = st.packets_sent;
     out->audio_packets = st.audio_packets_sent;
     out->audio_kbps = handle->cached_audio_kbps;
+    out->active_codec = int32_t(st.active_codec);
+    out->codec_is_hardware = handle->sender->encoder_is_hardware() ? 1 : 0;
+    out->target_bitrate_kbps = st.active_bitrate_kbps;
+    std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s",
+                  handle->sender->encoder_backend_name().c_str());
     return LV_OK;
 }
 
@@ -986,6 +1024,10 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
     out->audio_packets = aud.packets_rx;
     out->audio_kbps = handle->cached_akbps;
     out->audio_buffer_ms = aud.buffered_ms;
+    out->active_codec = int32_t(handle->receiver->active_codec());
+    out->codec_is_hardware = handle->receiver->decoder_is_hardware() ? 1 : 0;
+    std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s",
+                  handle->receiver->decoder_backend_name().c_str());
     return LV_OK;
 }
 
@@ -1045,6 +1087,9 @@ void lv_sender_config_default(LvSenderConfig* cfg) {
     cfg->q_max = 85;
     cfg->audio_device_index = -1;
     cfg->audio_chunk_ms = 5.0;
+    cfg->codec = LV_CODEC_LANVID_DCT;
+    cfg->bitrate_kbps = 8000;
+    cfg->keyframe_interval = 120;
 }
 
 void lv_receiver_config_default(LvReceiverConfig* cfg) {
@@ -1080,6 +1125,9 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
     sc.q_max = cfg->q_max;
     sc.threads = cfg->threads;
     sc.pace_mbps = cfg->pace_mbps;
+    sc.codec = cfg->codec;
+    sc.bitrate_kbps = cfg->bitrate_kbps > 0 ? cfg->bitrate_kbps : 8000u;
+    sc.keyframe_interval = cfg->keyframe_interval > 0 ? cfg->keyframe_interval : 120u;
 
     if (lv_sdk_sender_start(handle, &sc) != LV_OK) return 0;
 
@@ -1256,6 +1304,10 @@ int lv_sender_get_stats(LvSenderHandle* handle, LvSenderStats* out) {
     out->packets_sent = st.packets_total;
     out->audio_packets_sent = st.audio_packets;
     out->audio_kbps = st.audio_kbps;
+    out->active_codec = st.active_codec;
+    out->codec_is_hardware = st.codec_is_hardware;
+    out->target_bitrate_kbps = st.target_bitrate_kbps;
+    std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s", st.codec_backend);
     if (handle->sender) {
         const auto raw = handle->sender->stats();
         out->send_errors = raw.send_errors;
@@ -1304,7 +1356,13 @@ int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out) {
     out->audio_packets_rx = st.audio_packets;
     out->audio_kbps = st.audio_kbps;
     out->audio_buffer_ms = st.audio_buffer_ms;
-    if (handle->receiver) out->audio_packets_lost = handle->receiver->audio_stats().packets_lost;
+    out->active_codec = st.active_codec;
+    out->codec_is_hardware = st.codec_is_hardware;
+    std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s", st.codec_backend);
+    if (handle->receiver) {
+        out->audio_packets_lost = handle->receiver->audio_stats().packets_lost;
+        out->pli_requests = handle->receiver->assembler_stats().pli_requests;
+    }
     return 1;
 }
 

@@ -8,9 +8,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "codec/slice_codec.hpp"
+#include "codec/video_decoder.hpp"
 #include "common/image.hpp"
 #include "net/packet.hpp"
 #include "parallel/thread_pool.hpp"
@@ -67,7 +69,9 @@ struct CompletedFrame {
     uint16_t slices_ok = 0;
     uint16_t slices_corrupt = 0;
     uint16_t slices_lost = 0;
-    uint8_t quality = 0;           // active encoder Q read from slice headers
+    uint8_t quality = 0;           // active encoder Q read from slice headers (DCT)
+    VideoCodecId codec = VideoCodecId::kLanVidDct;
+    bool is_keyframe = false;
     const Image* image = nullptr;  // valid for the duration of the callback
 };
 
@@ -84,15 +88,20 @@ struct AssemblerStats {
     uint64_t slices_ok = 0;
     uint64_t slices_lost = 0;
     uint64_t slices_corrupt = 0;
+    uint64_t pli_requests = 0;
+    uint64_t frames_dropped_awaiting_idr = 0;
 };
 
 class FrameAssembler {
 public:
     using FrameCallback = std::function<void(const CompletedFrame&)>;
+    using PliCallback = std::function<void(uint32_t failed_frame_id)>;
 
     explicit FrameAssembler(const AssemblerConfig& cfg, FrameCallback on_frame,
                             ThreadPool* decode_pool = nullptr);
     ~FrameAssembler();
+
+    void set_pli_callback(PliCallback cb) { on_pli_ = std::move(cb); }
 
     PacketParseStatus ingest_datagram(const uint8_t* dgram, size_t len, uint64_t now_us);
 
@@ -106,6 +115,11 @@ public:
 
     const AssemblerStats& stats() const { return stats_; }
     const SeqLossTracker& seq_tracker() const { return seq_; }
+
+    VideoCodecId active_codec() const { return active_codec_; }
+    std::string decoder_backend_name() const { return decoder_backend_; }
+    bool decoder_is_hardware() const { return decoder_is_hw_; }
+    bool awaiting_idr() const { return awaiting_idr_; }
 
     void set_conceal_mode(ConcealMode m) { conceal_mode_.store(uint8_t(m), std::memory_order_relaxed); }
     ConcealMode conceal_mode() const { return ConcealMode(conceal_mode_.load(std::memory_order_relaxed)); }
@@ -163,6 +177,9 @@ private:
         uint32_t sender_ts_us = 0;
         uint64_t first_arrival_us = 0;
         uint16_t total_slices = 0;
+        VideoCodecId codec = VideoCodecId::kLanVidDct;
+        bool is_keyframe = false;
+        bool has_codec_config = false;
         bool has_dims = false;
         int width = 0;
         int height = 0;
@@ -184,6 +201,8 @@ private:
     void try_fec_recover(FrameSlot& slot, SliceSlot& ss, uint16_t slice_id, uint64_t now_us);
     void dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id);
     void finalize_slot(FrameSlot& slot, uint64_t now_us);
+    void finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us);
+    void trigger_pli(uint32_t failed_frame_id, uint64_t now_us, bool immediate);
     void conceal_strip(Image& dst, int y0, int y1) const;
     void try_finalize_ready(uint64_t now_us);
     std::vector<size_t> active_slots_sorted() const;
@@ -191,6 +210,7 @@ private:
     AssemblerConfig cfg_;
     std::atomic<uint8_t> conceal_mode_{0};
     FrameCallback on_frame_;
+    PliCallback on_pli_;
     ThreadPool* pool_ = nullptr;
 
     struct alignas(64) WorkerScratch {
@@ -207,6 +227,16 @@ private:
 
     bool has_finalized_ = false;
     uint32_t last_finalized_id_ = 0;
+
+    // Inter-frame (H.264 / H.265) decoder & PLI recovery state
+    std::unique_ptr<IVideoDecoder> video_decoder_;
+    VideoCodecId active_codec_ = VideoCodecId::kLanVidDct;
+    std::string decoder_backend_ = "LanVid DCT";
+    bool decoder_is_hw_ = false;
+    bool awaiting_idr_ = false;
+    bool has_decoded_inter_frame_ = false;
+    uint32_t last_decoded_inter_fid_ = 0;
+    uint64_t last_pli_us_ = 0;
 
     SeqLossTracker seq_;
     AssemblerStats stats_;

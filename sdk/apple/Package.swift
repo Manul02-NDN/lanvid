@@ -23,6 +23,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("CoreMedia"),
+                .linkedFramework("VideoToolbox"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),

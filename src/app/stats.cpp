@@ -10,6 +10,7 @@ ReceiverStatsTracker::ReceiverStatsTracker(uint64_t start_us) : start_us_(start_
 void ReceiverStatsTracker::record_frame(const CompletedFrame& cf, double latency_ms) {
     last_frame_us_ = cf.complete_time_us;
     if (cf.quality > 0) last_quality_ = cf.quality;
+    last_codec_ = cf.codec;
     const bool complete = (cf.slices_corrupt == 0 && cf.slices_lost == 0);
     if (complete) {
         ++win_frames_ok_;
@@ -73,6 +74,8 @@ IntervalReport ReceiverStatsTracker::snapshot_interval(uint64_t now_us, const As
     r.crc_errors = as.crc_errors - prev_crc_;
     r.late_packets = as.late_packets - prev_late_;
     r.active_quality = last_quality_;
+    r.active_codec = last_codec_;
+    r.pli_requests = as.pli_requests;
     r.clock_synced = clock_synced;
     r.rtt_us = rtt_us;
     if (audio && audio->packets_rx > 0) {
@@ -123,6 +126,8 @@ IntervalReport ReceiverStatsTracker::snapshot_total(uint64_t now_us, const Assem
     r.crc_errors = as.crc_errors;
     r.late_packets = as.late_packets;
     r.active_quality = last_quality_;
+    r.active_codec = last_codec_;
+    r.pli_requests = as.pli_requests;
     r.clock_synced = clock_synced;
     r.rtt_us = rtt_us;
     if (audio && audio->packets_rx > 0) {
@@ -139,8 +144,10 @@ std::string ReceiverStatsTracker::format_line(const IntervalReport& r, const cha
     if (prefix) std::snprintf(tag, sizeof(tag), "%s", prefix);
     else std::snprintf(tag, sizeof(tag), "%5.1fs", r.elapsed_s);
 
-    int n = std::snprintf(buf, sizeof(buf),
-                          "[%s] FPS:%5.1f (ok:%llu conc:%llu) | Q:%-3u | %6.1f Mbps | "
+    int n = 0;
+    if (r.active_codec == VideoCodecId::kLanVidDct) {
+        n = std::snprintf(buf, sizeof(buf),
+                          "[%s] DCT | FPS:%5.1f (ok:%llu conc:%llu) | Q:%-3u | %6.1f Mbps | "
                           "Lat(ms) p50:%5.2f p99:%5.2f max:%5.2f | "
                           "Loss:%5.2f%% | FEC:%llu | Drop:%5.1f%% (sl:%4.2f%%) | CRC:%llu Late:%llu",
                           tag, r.fps, (unsigned long long)r.frames_ok, (unsigned long long)r.frames_concealed,
@@ -148,6 +155,16 @@ std::string ReceiverStatsTracker::format_line(const IntervalReport& r, const cha
                           r.lat_max_ms, r.pkt_loss_pct, (unsigned long long)r.fec_recovered,
                           r.frame_drop_pct, r.slice_loss_pct, (unsigned long long)r.crc_errors,
                           (unsigned long long)r.late_packets);
+    } else {
+        n = std::snprintf(buf, sizeof(buf),
+                          "[%s] %s | FPS:%5.1f (ok:%llu) | %6.2f Mbps | "
+                          "Lat(ms) p50:%5.2f p99:%5.2f max:%5.2f | "
+                          "Loss:%5.2f%% | FEC:%llu | PLI:%llu | CRC:%llu Late:%llu",
+                          tag, video_codec_name(r.active_codec), r.fps, (unsigned long long)r.frames_ok,
+                          r.bitrate_mbps, r.lat_p50_ms, r.lat_p99_ms, r.lat_max_ms, r.pkt_loss_pct,
+                          (unsigned long long)r.fec_recovered, (unsigned long long)r.pli_requests,
+                          (unsigned long long)r.crc_errors, (unsigned long long)r.late_packets);
+    }
     if (r.has_audio && n > 0 && size_t(n) < sizeof(buf)) {
         std::snprintf(buf + n, sizeof(buf) - size_t(n), " | Aud:%5.0f kbps buf:%4.1fms", r.audio_kbps,
                       r.audio_buf_ms);

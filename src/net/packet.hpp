@@ -25,12 +25,39 @@ enum class PacketType : uint8_t {
     kPong = 0x5,
 };
 
-enum PacketFlags : uint8_t {
-    kFlagHasCrc = 0x01,
-    kFlagLastFrag = 0x02,
-    kFlagLastSliceOfFrame = 0x04,
-    kFlagFecParity = 0x08,
+enum class VideoCodecId : uint8_t {
+    kLanVidDct = 0,  // Intra-only slice-parallel AVX2/NEON DCT/Huffman
+    kH264      = 1,  // H.264 / AVC Annex-B zero-latency (no B-frames)
+    kH265      = 2,  // H.265 / HEVC Annex-B zero-latency (no B-frames)
 };
+
+enum PacketFlags : uint8_t {
+    kFlagHasCrc           = 0x01,
+    kFlagLastFrag         = 0x02,
+    kFlagLastSliceOfFrame = 0x04,
+    kFlagFecParity        = 0x08,
+    kFlagKeyFrame         = 0x10,  // IDR / Random Access Point (carries VPS/SPS/PPS)
+    kFlagCodecConfig      = 0x20,  // Payload carries parameter sets (SPS/PPS/VPS)
+    kFlagCodecMask        = 0xC0,  // Top 2 bits: VideoCodecId (0=DCT, 1=H264, 2=H265)
+};
+
+inline VideoCodecId packet_codec_id(uint8_t flags) {
+    const uint8_t raw = uint8_t((flags & kFlagCodecMask) >> 6);
+    return raw <= uint8_t(VideoCodecId::kH265) ? VideoCodecId(raw) : VideoCodecId::kLanVidDct;
+}
+
+inline uint8_t encode_codec_flags(VideoCodecId codec) {
+    return uint8_t((uint8_t(codec) & 0x03u) << 6);
+}
+
+inline const char* video_codec_name(VideoCodecId codec) {
+    switch (codec) {
+        case VideoCodecId::kLanVidDct: return "DCT";
+        case VideoCodecId::kH264:      return "H.264";
+        case VideoCodecId::kH265:      return "H.265";
+        default:                       return "Unknown";
+    }
+}
 
 struct PacketHeader {
     uint8_t version = kProtocolVersion;
@@ -105,13 +132,16 @@ constexpr size_t kPingPongSize = 12;
 void write_ping_pong(uint8_t* out, const PingPongPayload& p);
 bool parse_ping_pong(const uint8_t* in, size_t len, PingPongPayload& p);
 
-// 16-byte Receiver -> Sender telemetry feedback payload (sent every ~100 ms for AIMD).
+// 16-byte Receiver -> Sender telemetry feedback + PLI (Picture Loss Indication) payload.
+// `request_idr` is wire-packed into bit 15 (0x8000) of the 16-bit `packet_loss_permille` field
+// (which only uses 0..1000), keeping kFeedbackSize == 16 and 100% wire compatibility.
 struct FeedbackPayload {
     uint32_t last_completed_frame_id = 0;
     uint16_t packet_loss_permille = 0;    // 0..1000 (0.1% steps)
     uint16_t fec_recovered_permille = 0;  // 0..1000 (0.1% steps)
     uint32_t jitter_us = 0;
     uint32_t decode_time_us = 0;
+    bool request_idr = false;             // PLI: sender immediately emits an IDR keyframe
 };
 
 void write_feedback(uint8_t* out, const FeedbackPayload& fb);

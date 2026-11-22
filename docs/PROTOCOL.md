@@ -17,7 +17,7 @@ Ultra-low-latency intra-only LAN video + audio streaming protocol and slice-para
 |---:|---:|---|---|
 | 0 | 2 | `magic` | `0x4C 0x56` (`"LV"`) |
 | 2 | 1 | `ver_type` | high nibble `version=1`, low nibble `type`: `1=VIDEO_SLICE, 2=PING, 3=AUDIO, 4=FEEDBACK, 5=PONG` |
-| 3 | 1 | `flags` | bit0 `HAS_CRC` (`0x01`), bit1 `LAST_FRAG` (`0x02`), bit2 `LAST_SLICE_OF_FRAME` (`0x04`), bit3 `FEC_PARITY` (`0x08`) |
+| 3 | 1 | `flags` | bit0 `HAS_CRC` (`0x01`), bit1 `LAST_FRAG` (`0x02`), bit2 `LAST_SLICE_OF_FRAME` (`0x04`), bit3 `FEC_PARITY` (`0x08`), bit4 `KEYFRAME` (`0x10`, IDR), bit5 `CODEC_CONFIG` (`0x20`, SPS/PPS/VPS present), bits 6–7 `codec_id` (`0xC0`: `0=LANVID_DCT`, `1=H264`, `2=H265`) |
 | 4 | 4 | `frame_id` | u32 monotonic video `frame_id` or `audio_seq_id` (RFC 1982 wrap comparison) |
 | 8 | 4 | `timestamp_us` | u32 shared monotonic clock (`steady_clock`/QPC) for A/V sync & E2E latency |
 | 12 | 2 | `slice_id` | u16 (`0 .. total_slices-1`) |
@@ -55,8 +55,20 @@ Each chunk is 2.5 ms (120 frames = 480 B) or 5 ms (240 frames = 960 B) at 48 kHz
 ### 4. Slice-Level XOR FEC Parity Payload (`type=VIDEO_SLICE`, `flags & FEC_PARITY`)
 8-byte `FecHeader` (`group_start_frag`, `group_data_count`, `xor_payload_len`, `reserved`) followed by byte-wise XOR parity (`max_len` bytes). When FEC is enabled (`--fec 1` or `--fec-group N`), data payload is capped at `MTU - 28 - 8` so parity datagrams remain `<= MTU`.
 
-### 5. Telemetry Feedback Payload (`type=FEEDBACK (4)`, Receiver -> Sender every 100 ms)
-16-byte `FeedbackPayload` (`last_completed_frame_id`, `packet_loss_permille`, `fec_recovered_permille`, `jitter_us`, `decode_time_us`) driving AIMD congestion control (`--adaptive-quality`).
+### 5. Telemetry Feedback & PLI Payload (`type=FEEDBACK (4)`, Receiver -> Sender every 100 ms or immediately on PLI)
+16-byte `FeedbackPayload` (`last_completed_frame_id`, `packet_loss_permille | (request_idr << 15)`, `fec_recovered_permille`, `jitter_us`, `decode_time_us`) driving:
+- **AIMD congestion control (`--adaptive-quality`):** adjusts JPEG Q (`35..85`) for `LANVID_DCT`, or dynamically updates `target_bitrate_kbps` (`1500..50000 kbps`) without recreating the encoder for `H.264` / `H.265`.
+- **Instant PLI / IDR Recovery (`request_idr = 1`, bit 15 of offset 4):** when an H.264/H.265 Access Unit cannot be recovered even after XOR FEC (or a late-joining receiver enters mid-GOP), the receiver sets `awaiting_idr = true`, drops dependent P-frames to avoid macroblock corruption, and transmits a `FEEDBACK` packet with `request_idr = 1` immediately. The sender forces the very next encoded frame to be an IDR keyframe prepended with `[VPS][SPS][PPS]`.
+
+### 6. H.264 (AVC) & H.265 (HEVC) Zero-Latency Annex-B Framing (`codec_id = 1 | 2`)
+- **Zero B-frames (`B = 0`, Low-Latency mode):** every encoded Access Unit is transmitted immediately upon completion with `slice_id = 0`, `total_slices = 1`, fragmented under `MTU` and optionally protected by slice-level XOR FEC (`--fec-group N`).
+- **Self-contained IDRs:** `[SPS][PPS]` (H.264) or `[VPS][SPS][PPS]` (H.265) in Annex-B start-code format (`00 00 00 01`) are always prepended to every IDR frame (`flags |= KEYFRAME | CODEC_CONFIG`), allowing late-joining receivers and post-PLI streams to decode cleanly on the very first keyframe.
+- **Auto-detection:** the receiver inspects bits 6–7 of `PacketHeader::flags` on every frame and switches transparently between `LANVID_DCT`, `H.264`, and `H.265` on the same UDP port.
+- **Hardware Acceleration Backends:**
+  - **Windows:** Windows Media Foundation (`IMFTransform` / `MFTEnumEx` HW MFT -> Sync MFT fallback; zero external DLLs).
+  - **macOS / iOS:** Apple VideoToolbox (`VTCompressionSession` / `VTDecompressionSession`, `RealTime=true`, `AllowFrameReordering=false`).
+  - **Android:** NDK `AMediaCodec` (`video/avc`, `video/hevc`, `KEY_LOW_LATENCY=1`).
+  - **Linux:** Optional FFmpeg `libavcodec` (`h264_nvenc` / `hevc_nvenc` / `h264_vaapi` / `hevc_vaapi` -> `libx264` / `libx265` `ultrafast`/`zerolatency`).
 
 ## Platform Backends & Build
 

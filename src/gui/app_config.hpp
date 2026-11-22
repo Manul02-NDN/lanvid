@@ -26,6 +26,9 @@ struct AppConfig {
     double audio_chunk_ms = 5.0;
 
     int preset = 0;            // 0=1080p60 Low Latency, 1=Ultra 4K60, 2=Wi-Fi Adaptive, 3=Custom
+    int codec = 0;             // 0=LanVid DCT, 1=H.264, 2=H.265 (HEVC)
+    int bitrate_mbps = 8;      // 1..50 Mbps target for H.264/H.265
+    int keyframe_interval = 120;
     int quality = 80;
     int fps = 60;
     int fec_group = 0;

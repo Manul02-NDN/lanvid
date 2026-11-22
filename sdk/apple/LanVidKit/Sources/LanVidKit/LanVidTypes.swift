@@ -28,11 +28,21 @@ public struct LanVidPeer: Identifiable, Hashable, Sendable {
     public let simd: String
 }
 
+public enum LanVidCodec: Int32, Sendable {
+    case dct  = 0
+    case h264 = 1
+    case h265 = 2
+}
+
 public struct LanVidStats: Sendable {
     public let state: Int32
     public let width: Int32
     public let height: Int32
     public let activeQuality: Int32
+    public let activeCodec: LanVidCodec
+    public let isHardwareAccelerated: Bool
+    public let targetBitrateKbps: UInt32
+    public let codecBackend: String
     public let fps: Double
     public let bitrateMbps: Double
     public let latencyP50Ms: Double
@@ -47,6 +57,10 @@ public struct LanVidStats: Sendable {
         self.width = c.width
         self.height = c.height
         self.activeQuality = c.active_quality
+        self.activeCodec = LanVidCodec(rawValue: c.active_codec) ?? .dct
+        self.isHardwareAccelerated = c.codec_is_hardware != 0
+        self.targetBitrateKbps = c.target_bitrate_kbps
+        self.codecBackend = cStringFromTuple(c.codec_backend)
         self.fps = c.fps
         self.bitrateMbps = c.bitrate_mbps
         self.latencyP50Ms = c.latency_p50_ms
@@ -73,6 +87,11 @@ public enum LanVidRuntime {
 
     public static var version: String { String(cString: lv_get_version_string()) }
     public static var simdInfo: String { String(cString: lv_get_cpu_simd_info()) }
+    public static var supportedCodecsJson: String {
+        guard let p = lv_get_supported_codecs() else { return "[]" }
+        defer { lv_free_string(p) }
+        return String(cString: p)
+    }
 }
 
 internal func cStringFromTuple<T>(_ tuple: T) -> String {

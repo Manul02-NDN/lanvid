@@ -15,6 +15,7 @@
 #include "app/test_pattern.hpp"
 #include "codec/dct.hpp"
 #include "codec/slice_format.hpp"
+#include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
@@ -48,7 +49,10 @@ void print_usage(const char* prog) {
         "  --width <px>             Frame width (default: 1920; native for screen/camera/y4m/ppm if omitted)\n"
         "  --height <px>            Frame height (default: 1080; native if omitted)\n"
         "  --fps <n>                Target frame rate (default: 60)\n"
-        "  --quality <1-100>        Quantization quality factor (default: 75)\n"
+        "  --codec <dct|h264|h265>  Video codec: dct (~2ms), h264, h265 (default: dct)\n"
+        "  --bitrate <kbps>         Target bitrate in kbps for h264/h265 (default: 8000)\n"
+        "  --keyint <frames>        IDR keyframe interval for h264/h265 (default: 120)\n"
+        "  --quality <1-100>        Quantization quality factor for dct (default: 75)\n"
         "  --chroma <420|422|444>   Chroma subsampling (default: 420)\n"
         "  --slice-height <n>       Slice height in luma rows (default: 16)\n"
         "  --mtu <bytes>            Max UDP datagram size (default: 1400)\n"
@@ -90,6 +94,15 @@ void print_devices() {
     std::printf("Audio Microphone / Capture Devices (%zu):\n", mic_devs.size());
     for (const auto& d : mic_devs) {
         std::printf("  [%d] %s%s\n", d.index, d.name.c_str(), d.is_default ? " [default]" : "");
+    }
+    const auto codecs = lv::get_supported_codecs();
+    std::printf("Video Codecs (%zu):\n", codecs.size());
+    for (const auto& c : codecs) {
+        std::printf("  [%d] %-10s enc=%s [%s] | dec=%s [%s]\n", int(c.codec), c.name.c_str(),
+                    c.encoder_available ? (c.encoder_hardware ? "HW" : "SW") : "N/A",
+                    c.encoder_backend.c_str(),
+                    c.decoder_available ? (c.decoder_hardware ? "HW" : "SW") : "N/A",
+                    c.decoder_backend.c_str());
     }
 }
 
@@ -138,6 +151,20 @@ int main(int argc, char** argv) {
         else if (arg == "--width") { cp.width = std::atoi(need_val("--width")); width_explicit = true; }
         else if (arg == "--height") { cp.height = std::atoi(need_val("--height")); height_explicit = true; }
         else if (arg == "--fps") { fps = std::atof(need_val("--fps")); fps_explicit = true; }
+        else if (arg == "--codec") {
+            const std::string c = need_val("--codec");
+            if (c == "dct" || c == "lanvid_dct") scfg.codec = lv::VideoCodecId::kLanVidDct;
+            else if (c == "h264" || c == "avc") scfg.codec = lv::VideoCodecId::kH264;
+            else if (c == "h265" || c == "hevc") scfg.codec = lv::VideoCodecId::kH265;
+            else {
+                std::fprintf(stderr, "Invalid --codec: %s (expected dct|h264|h265)\n", c.c_str());
+                return 2;
+            }
+        } else if (arg == "--bitrate") {
+            scfg.bitrate_kbps = uint32_t(std::clamp(std::atoi(need_val("--bitrate")), 250, 100000));
+        } else if (arg == "--keyint") {
+            scfg.keyframe_interval_frames = uint32_t(std::clamp(std::atoi(need_val("--keyint")), 1, 600));
+        }
         else if (arg == "--quality") { cp.quality = std::atoi(need_val("--quality")); quality_explicit = true; }
         else if (arg == "--slice-height") cp.slice_height = std::atoi(need_val("--slice-height"));
         else if (arg == "--mtu") scfg.mtu = size_t(std::atoi(need_val("--mtu")));
@@ -254,6 +281,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    scfg.fps = fps;
+    scfg.adaptive.initial_bitrate_kbps = scfg.bitrate_kbps;
     if (scfg.adaptive.enabled) {
         scfg.adaptive.initial_q = quality_explicit ? cp.quality : scfg.adaptive.q_max;
         cp.quality = std::clamp(scfg.adaptive.initial_q, scfg.adaptive.q_min, scfg.adaptive.q_max);
@@ -266,6 +295,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "Failed to initialize UDP sender to %s:%u\n", scfg.dest_ip.c_str(),
                      unsigned(scfg.dest_port));
         return 1;
+    }
+    if (scfg.codec != lv::VideoCodecId::kLanVidDct) {
+        if (!sender.prepare_encoder(cp.width, cp.height)) {
+            std::fprintf(stderr, "Failed to initialize %s video encoder for %dx%d\n",
+                         lv::video_codec_name(scfg.codec), cp.width, cp.height);
+            return 1;
+        }
     }
 
     // Optional WASAPI audio stream on the same UDP socket.
@@ -290,11 +326,21 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
 #endif
 
-    std::printf(
-        "LVSP Sender -> %s:%u | src=%s | audio=%s | %dx%d @ %.1f fps | Q=%d%s | slices=%d mtu=%zu fec=%u | kernel=%s | loss=%.1f%%\n",
-        scfg.dest_ip.c_str(), unsigned(scfg.dest_port), source_desc.c_str(), audio_desc.c_str(),
-        cp.width, cp.height, fps, cp.quality, scfg.adaptive.enabled ? " (AIMD)" : "", geom.total_slices,
-        scfg.mtu, unsigned(scfg.fec_group_size), lv::dct_kernels_best().name, scfg.sim_loss_pct);
+    if (scfg.codec == lv::VideoCodecId::kLanVidDct) {
+        std::printf(
+            "LVSP Sender -> %s:%u | src=%s | codec=DCT | audio=%s | %dx%d @ %.1f fps | Q=%d%s | slices=%d mtu=%zu fec=%u | kernel=%s | loss=%.1f%%\n",
+            scfg.dest_ip.c_str(), unsigned(scfg.dest_port), source_desc.c_str(), audio_desc.c_str(),
+            cp.width, cp.height, fps, cp.quality, scfg.adaptive.enabled ? " (AIMD)" : "", geom.total_slices,
+            scfg.mtu, unsigned(scfg.fec_group_size), lv::dct_kernels_best().name, scfg.sim_loss_pct);
+    } else {
+        std::printf(
+            "LVSP Sender -> %s:%u | src=%s | codec=%s | target=%u kbps%s | keyint=%u | audio=%s | %dx%d @ %.1f fps | mtu=%zu fec=%u | loss=%.1f%%\n",
+            scfg.dest_ip.c_str(), unsigned(scfg.dest_port), source_desc.c_str(),
+            lv::video_codec_name(scfg.codec), unsigned(scfg.bitrate_kbps),
+            scfg.adaptive.enabled ? " (AIMD)" : "", unsigned(scfg.keyframe_interval_frames),
+            audio_desc.c_str(), cp.width, cp.height, fps, scfg.mtu, unsigned(scfg.fec_group_size),
+            scfg.sim_loss_pct);
+    }
     std::fflush(stdout);
 
     lv::Image frame;
@@ -376,12 +422,22 @@ int main(int argc, char** argv) {
             const double pps = double(st.packets_sent - prev_pkts) / dt;
             const double avg_ms = win_proc_cnt ? (win_proc_ms_sum / double(win_proc_cnt)) : 0.0;
             const double aud_kbps = double(st.audio_bytes_sent - prev_aud_bytes) * 8.0 / (dt * 1000.0);
-            std::printf(
-                "[%5.1fs] TX FPS:%5.1f | Q:%-3d | %6.1f Mbps | %s:%5.2f ms | %6.0f pkt/s | rx_loss:%4.1f%% | sim_drop:%llu err:%llu",
-                double(t_done - t_start) / 1e6, tx_fps, st.active_quality, mbps,
-                live_capture ? "cap+tx" : "enc+tx", avg_ms, pps, double(st.last_rx_loss_permille) / 10.0,
-                (unsigned long long)(st.packets_dropped_sim - prev_sim_drop),
-                (unsigned long long)st.send_errors);
+            if (scfg.codec == lv::VideoCodecId::kLanVidDct) {
+                std::printf(
+                    "[%5.1fs] TX FPS:%5.1f | DCT Q:%-3d | %6.1f Mbps | %s:%5.2f ms | %6.0f pkt/s | rx_loss:%4.1f%% | sim_drop:%llu err:%llu",
+                    double(t_done - t_start) / 1e6, tx_fps, st.active_quality, mbps,
+                    live_capture ? "cap+tx" : "enc+tx", avg_ms, pps, double(st.last_rx_loss_permille) / 10.0,
+                    (unsigned long long)(st.packets_dropped_sim - prev_sim_drop),
+                    (unsigned long long)st.send_errors);
+            } else {
+                std::printf(
+                    "[%5.1fs] TX FPS:%5.1f | %s [%s] tgt:%ukbps | %6.2f Mbps | %s:%5.2f ms | %6.0f pkt/s | PLI:%llu | rx_loss:%4.1f%% | err:%llu",
+                    double(t_done - t_start) / 1e6, tx_fps, lv::video_codec_name(st.active_codec),
+                    sender.encoder_is_hardware() ? "HW" : "SW", unsigned(st.active_bitrate_kbps), mbps,
+                    live_capture ? "cap+tx" : "enc+tx", avg_ms, pps,
+                    (unsigned long long)st.pli_received, double(st.last_rx_loss_permille) / 10.0,
+                    (unsigned long long)st.send_errors);
+            }
             if (audio_cap.is_running() || st.audio_packets_sent > 0) {
                 std::printf(" | Aud:%5.0f kbps", aud_kbps);
             }
@@ -403,11 +459,12 @@ int main(int argc, char** argv) {
     const auto st = sender.stats();
     const double tot_s = std::max(1e-6, double(lv::now_us() - t_start) / 1e6);
     std::printf(
-        "[TOTAL ] frames:%llu (%.1f fps) | Q:%d | %.1f Mbps | pkts:%llu | aud_pkts:%llu | sim_drop:%llu | err:%llu | pongs:%llu fb:%llu\n",
+        "[TOTAL ] codec:%s [%s] | frames:%llu (%.1f fps) | Q:%d | %.2f Mbps | pkts:%llu | pli:%llu | aud_pkts:%llu | sim_drop:%llu | err:%llu | pongs:%llu fb:%llu\n",
+        lv::video_codec_name(st.active_codec), sender.encoder_backend_name().c_str(),
         (unsigned long long)st.frames_sent, double(st.frames_sent) / tot_s, st.active_quality,
         double(st.bytes_sent) * 8.0 / (tot_s * 1e6), (unsigned long long)st.packets_sent,
-        (unsigned long long)st.audio_packets_sent, (unsigned long long)st.packets_dropped_sim,
-        (unsigned long long)st.send_errors, (unsigned long long)st.pongs_sent,
-        (unsigned long long)st.feedbacks_received);
+        (unsigned long long)st.pli_received, (unsigned long long)st.audio_packets_sent,
+        (unsigned long long)st.packets_dropped_sim, (unsigned long long)st.send_errors,
+        (unsigned long long)st.pongs_sent, (unsigned long long)st.feedbacks_received);
     return 0;
 }

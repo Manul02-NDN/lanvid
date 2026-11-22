@@ -122,6 +122,9 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "audio_device_index", cfg.audio_device_index);
     read_dbl(j, "audio_chunk_ms", cfg.audio_chunk_ms);
     read_int(j, "preset", cfg.preset);
+    read_int(j, "codec", cfg.codec);
+    read_int(j, "bitrate_mbps", cfg.bitrate_mbps);
+    read_int(j, "keyframe_interval", cfg.keyframe_interval);
     read_int(j, "quality", cfg.quality);
     read_int(j, "fps", cfg.fps);
     read_int(j, "fec_group", cfg.fec_group);
@@ -137,6 +140,9 @@ bool load_app_config(AppConfig& cfg) {
 
     cfg.dest_port = std::clamp(cfg.dest_port, 1024, 65535);
     cfg.listen_port = std::clamp(cfg.listen_port, 1024, 65535);
+    cfg.codec = std::clamp(cfg.codec, 0, 2);
+    cfg.bitrate_mbps = std::clamp(cfg.bitrate_mbps, 1, 50);
+    cfg.keyframe_interval = std::clamp(cfg.keyframe_interval, 15, 300);
     cfg.quality = std::clamp(cfg.quality, 1, 100);
     cfg.fps = std::clamp(cfg.fps, 5, 240);
     cfg.volume = std::clamp(cfg.volume, 0.0f, 1.5f);
@@ -166,6 +172,9 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"audio_device_index\": " << cfg.audio_device_index << ",\n"
         << "  \"audio_chunk_ms\": " << cfg.audio_chunk_ms << ",\n"
         << "  \"preset\": " << cfg.preset << ",\n"
+        << "  \"codec\": " << cfg.codec << ",\n"
+        << "  \"bitrate_mbps\": " << cfg.bitrate_mbps << ",\n"
+        << "  \"keyframe_interval\": " << cfg.keyframe_interval << ",\n"
         << "  \"quality\": " << cfg.quality << ",\n"
         << "  \"fps\": " << cfg.fps << ",\n"
         << "  \"fec_group\": " << cfg.fec_group << ",\n"

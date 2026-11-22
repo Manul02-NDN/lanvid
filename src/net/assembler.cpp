@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 
+#include "codec/dct.hpp"
 #include "common/clock.hpp"
 
 namespace lv {
@@ -109,7 +110,8 @@ FrameAssembler::FrameAssembler(const AssemblerConfig& cfg, FrameCallback on_fram
     : cfg_(cfg),
       conceal_mode_(uint8_t(cfg.conceal)),
       on_frame_(std::move(on_frame)),
-      pool_(decode_pool) {
+      pool_(decode_pool),
+      decoder_backend_(std::string("LanVid DCT (") + dct_kernels_best().name + ")") {
     const uint32_t n = pool_ ? pool_->slot_count() : 1u;
     scratches_.resize(n);
 }
@@ -140,6 +142,9 @@ void FrameAssembler::init_slot(FrameSlot& slot, const PacketHeader& h, uint64_t 
     slot.sender_ts_us = h.timestamp_us;
     slot.first_arrival_us = now_us;
     slot.total_slices = h.total_slices;
+    slot.codec = packet_codec_id(h.flags);
+    slot.is_keyframe = (h.flags & kFlagKeyFrame) != 0;
+    slot.has_codec_config = (h.flags & kFlagCodecConfig) != 0;
     slot.has_dims = false;
     slot.width = last_known_w_;
     slot.height = last_known_h_;
@@ -195,8 +200,128 @@ void FrameAssembler::conceal_strip(Image& dst, int y0, int y1) const {
     }
 }
 
+void FrameAssembler::trigger_pli(uint32_t failed_frame_id, uint64_t now_us, bool immediate) {
+    constexpr uint64_t kPliMinIntervalUs = 35000;  // 35 ms cooldown for repeated PLIs
+    if (!immediate && last_pli_us_ != 0 && now_us >= last_pli_us_ &&
+        (now_us - last_pli_us_) < kPliMinIntervalUs) {
+        return;
+    }
+    last_pli_us_ = now_us;
+    ++stats_.pli_requests;
+    if (on_pli_) on_pli_(failed_frame_id);
+}
+
+void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us) {
+    if (!has_finalized_ || frame_newer(slot.frame_id, last_finalized_id_)) {
+        has_finalized_ = true;
+        last_finalized_id_ = slot.frame_id;
+    }
+
+    if (!video_decoder_ || video_decoder_->codec_id() != slot.codec) {
+        video_decoder_ = create_video_decoder(slot.codec, cfg_.output_order);
+        active_codec_ = slot.codec;
+        decoder_backend_ = video_decoder_ ? video_decoder_->backend_name() : "Unavailable";
+        decoder_is_hw_ = video_decoder_ ? video_decoder_->is_hardware() : false;
+        has_decoded_inter_frame_ = false;
+        awaiting_idr_ = !slot.is_keyframe;
+    }
+
+    const bool complete =
+        slot.total_slices >= 1 &&
+        SliceState(slot.slices[0].state.load(std::memory_order_acquire)) == SliceState::kComplete;
+
+    if (!complete) {
+        ++stats_.frames_concealed;
+        ++stats_.slices_lost;
+        const bool first_loss = !awaiting_idr_;
+        awaiting_idr_ = true;
+        trigger_pli(slot.frame_id, now_us, first_loss);
+        slot.active = false;
+        return;
+    }
+
+    const bool frame_gap =
+        has_decoded_inter_frame_ && (frame_diff(slot.frame_id, last_decoded_inter_fid_) != 1);
+    const bool need_idr_first = !has_decoded_inter_frame_ && !slot.is_keyframe;
+
+    if (!slot.is_keyframe && (awaiting_idr_ || frame_gap || need_idr_first)) {
+        ++stats_.frames_dropped_awaiting_idr;
+        const bool first_loss = !awaiting_idr_;
+        awaiting_idr_ = true;
+        trigger_pli(slot.frame_id, now_us, first_loss);
+        slot.active = false;
+        return;
+    }
+
+    if (!video_decoder_) {
+        ++stats_.slices_corrupt;
+        ++stats_.frames_concealed;
+        slot.active = false;
+        return;
+    }
+
+    if (slot.is_keyframe) {
+        awaiting_idr_ = false;
+    }
+
+    const SliceSlot& ss = slot.slices[0];
+    const uint64_t t0 = lv::now_us();
+    const bool decoded = video_decoder_->decode(ss.buf.data(), ss.total_size, cfg_.output_order, slot.frame);
+    const uint64_t dt = lv::now_us() - t0;
+
+    if (!decoded || slot.frame.width <= 0 || slot.frame.height <= 0) {
+        ++stats_.slices_corrupt;
+        ++stats_.frames_concealed;
+        awaiting_idr_ = true;
+        video_decoder_->reset();
+        trigger_pli(slot.frame_id, now_us, true);
+        slot.active = false;
+        return;
+    }
+
+    has_decoded_inter_frame_ = true;
+    last_decoded_inter_fid_ = slot.frame_id;
+    ++stats_.frames_complete;
+    ++stats_.slices_ok;
+    last_known_w_ = slot.frame.width;
+    last_known_h_ = slot.frame.height;
+
+    if (on_frame_) {
+        CompletedFrame cf;
+        cf.frame_id = slot.frame_id;
+        cf.sender_timestamp_us = slot.sender_ts_us;
+        cf.first_arrival_us = slot.first_arrival_us;
+        cf.complete_time_us = lv::now_us();
+        cf.decode_time_us = uint32_t(dt);
+        cf.total_slices = 1;
+        cf.slices_ok = 1;
+        cf.slices_corrupt = 0;
+        cf.slices_lost = 0;
+        cf.quality = 0;
+        cf.codec = slot.codec;
+        cf.is_keyframe = slot.is_keyframe;
+        cf.image = &slot.frame;
+        on_frame_(cf);
+    }
+
+    slot.active = false;
+}
+
 void FrameAssembler::finalize_slot(FrameSlot& slot, uint64_t now_us) {
     if (!slot.active) return;
+
+    if (slot.codec != VideoCodecId::kLanVidDct) {
+        finalize_inter_frame_slot(slot, now_us);
+        return;
+    }
+
+    if (active_codec_ != VideoCodecId::kLanVidDct) {
+        active_codec_ = VideoCodecId::kLanVidDct;
+        decoder_backend_ = std::string("LanVid DCT (") + dct_kernels_best().name + ")";
+        decoder_is_hw_ = false;
+        awaiting_idr_ = false;
+        has_decoded_inter_frame_ = false;
+    }
 
     bool waited = false;
     while (slot.in_flight.load(std::memory_order_acquire) > 0) {
@@ -274,6 +399,8 @@ void FrameAssembler::finalize_slot(FrameSlot& slot, uint64_t now_us) {
         cf.slices_corrupt = corrupt_cnt;
         cf.slices_lost = lost_cnt;
         cf.quality = slot.quality ? slot.quality : last_known_quality_;
+        cf.codec = VideoCodecId::kLanVidDct;
+        cf.is_keyframe = true;
         cf.image = &slot.frame;
         on_frame_(cf);
     }
@@ -399,7 +526,11 @@ void FrameAssembler::insert_data_fragment(FrameSlot& slot, SliceSlot& ss, uint16
         }
         ss.state.store(uint8_t(SliceState::kComplete), std::memory_order_release);
         ++slot.slices_dispatched;
-        dispatch_slice_decode(slot, slice_id);
+        if (slot.codec == VideoCodecId::kLanVidDct) {
+            dispatch_slice_decode(slot, slice_id);
+        } else {
+            slot.slices_done.fetch_add(1, std::memory_order_release);
+        }
     } else {
         // Attempt XOR FEC recovery in case a parity packet is waiting for this fragment.
         try_fec_recover(slot, ss, slice_id, now_us);
@@ -550,6 +681,8 @@ void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* p
         ++stats_.bad_packets;
         return;
     }
+    if (h.flags & kFlagKeyFrame) slot.is_keyframe = true;
+    if (h.flags & kFlagCodecConfig) slot.has_codec_config = true;
 
     SliceSlot& ss = slot.slices[h.slice_id];
     const auto cur_state = SliceState(ss.state.load(std::memory_order_acquire));
