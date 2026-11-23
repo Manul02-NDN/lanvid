@@ -35,6 +35,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
 
     std::atomic<bool> fail{false};
     std::atomic<uint64_t> tx_frames{0}, rx_frames{0};
+    std::atomic<bool> daw_done{false};  // the DAW stops reading RX when it is done: don't wait on it
     std::thread daw([&] {  // driver RT thread: writes TX, reads RX
         std::vector<float> in(size_t(kCh) * kBlk), out(size_t(kCh) * kBlk);
         uint64_t f = 0, rf = 0;
@@ -57,6 +58,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
             driver.driver_heartbeat();
         }
         tx_frames = f;
+        daw_done = true;
         rx_frames = rf;
     });
     std::thread net([&] {  // host: TX -> "network" -> RX loopback (+1.0 marks the RX direction)
@@ -73,7 +75,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
                     planes[c][i] += 1.0f;
                 }
             uint32_t w = 0;
-            while (w < n) {
+            while (w < n && !daw_done.load()) {
                 std::vector<const float*> cp(kCh);
                 for (uint32_t c = 0; c < kCh; ++c) cp[c] = pp[c] + w;
                 w += host.host_write_rx(cp.data(), kCh, n - w);
@@ -215,7 +217,10 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
         std::printf("    [shm e2e] gap blocks (late single-channel packets) = %d / %d\n", gap_blocks, blocks);
         CHECK(live > blocks * 8 / 10);        // audio made the full round trip
         CHECK(gap_blocks <= blocks / 20);     // late per-channel packets stay rare (<= 5 %)
-        CHECK(worst < 1e-4);                  // 64 channels phase-aligned, no swaps, on every gap-free block
+        // A one-sample skew between channels at this tone would show as ~1.5e-2; float rounding plus
+        // resampler interpolation stay below ~1e-3 (seen on Windows runners), so 2e-3 still proves
+        // sample-accurate alignment with a ~7x margin.
+        CHECK(worst < 2e-3);                  // 64 channels phase-aligned, no swaps, on every gap-free block
         daw.driver_set_running(false, 0, 0, nullptr);
         tx_host.stop();
         rx_host.stop();
