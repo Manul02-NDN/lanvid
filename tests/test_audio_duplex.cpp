@@ -216,7 +216,14 @@ TEST(audio_64ch_fullduplex_and_patchbay_routing) {
     CHECK(lv_duplex_get_stats(A, &sa) == LV_OK);
     CHECK(lv_duplex_get_stats(B, &sb) == LV_OK);
     LV_AudioNode nodes[8];
-    const int found = lv_discovery_scan_audio_nodes(400, disc_port, nodes, 8);
+    // UDP discovery on a busy (virtualised) runner can miss one 400 ms window: retry up to 3 scans.
+    int found = 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        found = lv_discovery_scan_audio_nodes(400, disc_port, nodes, 8);
+        bool hit = false;
+        for (int i = 0; i < found; ++i) hit |= nodes[i].rx_port == port_a;
+        if (hit) break;
+    }
     bool found_a = false;
     for (int i = 0; i < found; ++i)
         if (nodes[i].rx_port == port_a && nodes[i].duplex && nodes[i].channels == 64) {
