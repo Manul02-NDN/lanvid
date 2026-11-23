@@ -234,3 +234,54 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
 #endif
     }
 }
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+// Upgrade path: a v1 (4096-frame, smaller) segment left behind by a driver process that was killed
+// during IO (driver_running = 1, fresh heartbeat). Apps must not touch it; the new driver replaces it.
+TEST(shm_audio_bus_replaces_stale_older_layout) {
+    char name[64], full[80];
+    std::snprintf(name, sizeof(name), "LanVidAudioBus_upg_%u", unsigned(lv::shm_bus_now_ms() & 0xFFFFFF));
+    std::snprintf(full, sizeof(full), "/%s", name);
+    auto make_v1 = [&](bool driver_fresh, bool host_fresh) {
+        shm_unlink(full);
+        const int fd = shm_open(full, O_RDWR | O_CREAT | O_EXCL, 0666);
+        if (fd < 0) return false;
+        const size_t v1_size = 2113536;  // sizeof(ShmBusLayout) with 4096-frame rings
+        if (ftruncate(fd, off_t(v1_size)) != 0) { close(fd); return false; }
+        void* m = mmap(nullptr, v1_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        close(fd);
+        if (m == MAP_FAILED) return false;
+        auto* h = static_cast<lv::ShmBusHeader*>(m);
+        h->version = 1;
+        h->channels = 64;
+        h->frames = 4096;
+        h->driver_running.store(driver_fresh ? 1u : 0u);
+        h->driver_heartbeat_ms.store(driver_fresh ? lv::shm_bus_now_ms() : 0);
+        h->host_heartbeat_ms.store(host_fresh ? lv::shm_bus_now_ms() : 0);
+        h->magic.store(lv::kShmBusMagic);
+        munmap(m, v1_size);
+        return true;
+    };
+    REQUIRE(make_v1(true, false));
+    {
+        lv::ShmAudioBus app;
+        CHECK(!app.open(name));  // looks like a live v1 driver: an app must refuse
+    }
+    {
+        lv::ShmAudioBus drv;
+        REQUIRE(drv.open(name, true));  // the single driver instance knows the flag is stale
+        CHECK(drv.header()->version == lv::kShmBusVersion);
+        CHECK(drv.header()->frames == lv::kShmBusFrames);
+        lv::ShmAudioBus app;
+        CHECK(app.open(name));  // and apps attach to the replaced v2 segment
+    }
+    REQUIRE(make_v1(false, true));
+    {
+        lv::ShmAudioBus drv;
+        CHECK(!drv.open(name, true));  // a live (old) host app protects the segment even from the driver
+    }
+    shm_unlink(full);
+}
+#endif

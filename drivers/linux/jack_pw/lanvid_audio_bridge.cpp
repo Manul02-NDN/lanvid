@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
                      "  JACK2:    sudo apt install libjack-jackd2-0\n");
         return 3;
     }
-    if (!g_bus.open(bus_name.empty() ? nullptr : bus_name.c_str())) {
+    if (!g_bus.open(bus_name.empty() ? nullptr : bus_name.c_str(), true)) {
         std::fprintf(stderr, "lanvid-audio-bridge: cannot open shared memory bus\n");
         return 4;
     }

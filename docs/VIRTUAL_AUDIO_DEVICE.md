@@ -22,7 +22,7 @@ shared-memory bus with atomics and `memcpy` — no locks, allocations or system 
 | RX ring | network → DAW inputs. SPSC: producer = host, consumer = driver. 64 × 16384 float32 frames |
 | Cursors | 64-bit monotonic `write_pos` / `read_pos` per ring (+ overrun / underrun counters) |
 | Header | `sample_rate`, `buffer_size`, `active_channels`, `driver_running`, driver & host `heartbeat_ms`, `target_latency_ms`, MasterClock `clock_synced` / `clock_skew_ppb`, `driver_name` |
-| Size | ≈ 8 MB (layout versioned by `magic` = `LVAB`, `version` = 2; v1 used 4096-frame rings). An idle older segment is replaced on open; a v1 segment still in use is refused — reinstall the driver (`LanVidAudio.driver` / `LanVidASIO.dll` / `lanvid-audio-bridge`) together with the apps. |
+| Size | ≈ 8 MB (layout versioned by `magic` = `LVAB`, `version` = 2; v1 used 4096-frame rings). An idle older segment is replaced on open. Apps refuse an older segment that a live driver or host still uses; the driver itself only yields to a live host (a "driver running" flag left by a killed `coreaudiod` is stale). Reinstall the driver (`LanVidAudio.driver` / `LanVidASIO.dll` / `lanvid-audio-bridge`) together with the apps. |
 
 A DAW counts as connected while `driver_running = 1` and its heartbeat is younger than 500 ms.
 `LANVID_AUDIO_BUS_NAME` overrides the bus name (tests, several instances on one machine).

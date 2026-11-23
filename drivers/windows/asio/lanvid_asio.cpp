@@ -89,7 +89,7 @@ public:
     // ---- IASIO ----
     ASIOBool init(void*) override {
         int32_ = read_int32_preference();
-        if (!bus_.open()) {
+        if (!bus_.open(nullptr, true)) {
             std::snprintf(err_, sizeof(err_), "Cannot open shared audio bus %s", lv::kShmBusName);
             return ASIOFalse;
         }

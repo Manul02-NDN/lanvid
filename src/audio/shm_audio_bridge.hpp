@@ -67,7 +67,10 @@ public:
     ShmAudioBus& operator=(const ShmAudioBus&) = delete;
 
     // Creates the segment if missing, otherwise attaches. `name` overrides kShmBusName (tests).
-    bool open(const char* name = nullptr);
+    // `as_driver`: the caller is the (single) OS driver instance. An older-layout segment is then
+    // only protected by a live HOST heartbeat — a "driver running" flag in it can only be a leftover
+    // of a killed driver process (e.g. coreaudiod restarted during IO).
+    bool open(const char* name = nullptr, bool as_driver = false);
     void close();
     bool is_open() const { return bus_ != nullptr; }
     ShmBusHeader* header() { return bus_ ? &bus_->hdr : nullptr; }

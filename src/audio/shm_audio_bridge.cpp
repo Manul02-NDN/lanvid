@@ -31,7 +31,7 @@ uint64_t shm_bus_now_ms() {
     return uint64_t(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-bool ShmAudioBus::open(const char* name) {
+bool ShmAudioBus::open(const char* name, bool as_driver) {
     if (bus_) return true;
     // LANVID_AUDIO_BUS_NAME lets tests / multiple instances use a private bus (not read on RT threads).
     const char* env = std::getenv("LANVID_AUDIO_BUS_NAME");
@@ -71,7 +71,8 @@ bool ShmAudioBus::open(const char* name) {
                     const uint64_t now = shm_bus_now_ms();
                     const uint64_t dhb = oh->driver_heartbeat_ms.load(std::memory_order_acquire);
                     const uint64_t hhb = oh->host_heartbeat_ms.load(std::memory_order_acquire);
-                    busy = (oh->driver_running.load() && now - dhb < 2000) || (hhb && now - hhb < 2000);
+                    const bool driver_live = !as_driver && oh->driver_running.load() && now - dhb < 2000;
+                    busy = driver_live || (hhb && now - hhb < 2000);
                     munmap(hm, sizeof(ShmBusHeader));
                 }
             }
