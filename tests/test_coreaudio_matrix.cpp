@@ -13,6 +13,8 @@
 
 namespace {
 
+constexpr double kPi = 3.14159265358979323846;  // M_PI is not defined by MSVC without _USE_MATH_DEFINES
+
 // Converts a sine from `src_rate` to `dst_rate` in random-sized blocks and checks frame count,
 // amplitude and sample-to-sample continuity (a dropped/duplicated frame would show as a jump).
 void check_resample(uint32_t src_rate, uint32_t dst_rate, double& max_err, double& ratio_err) {
@@ -28,7 +30,7 @@ void check_resample(uint32_t src_rate, uint32_t dst_rate, double& max_err, doubl
     while (in_pos < total_in) {
         const uint32_t n = 16 + rng() % 1000;
         for (uint32_t i = 0; i < n; ++i) {
-            a[i] = float(0.8 * std::sin(2.0 * M_PI * f * double(in_pos + i) / src_rate));
+            a[i] = float(0.8 * std::sin(2.0 * kPi * f * double(in_pos + i) / src_rate));
             b[i] = -a[i];
         }
         const float* in[2] = {a.data(), b.data()};
@@ -39,7 +41,7 @@ void check_resample(uint32_t src_rate, uint32_t dst_rate, double& max_err, doubl
         for (uint32_t i = 0; i < got; ++i) {
             // Expected value at the output instant (linear interpolation error bound is tiny at 1 kHz).
             const double t = double(out_pos + i) / dst_rate;
-            const double ref = 0.8 * std::sin(2.0 * M_PI * f * t);
+            const double ref = 0.8 * std::sin(2.0 * kPi * f * t);
             max_err = std::max(max_err, std::fabs(double(o0[i]) - ref));
             max_err = std::max(max_err, std::fabs(double(o1[i]) + ref));
         }
