@@ -278,7 +278,8 @@ bool MidiInputPort::open(int device_index, const std::string& device_name, Callb
     }
     const ItemCount n = MIDIGetNumberOfSources();
     int idx = device_index;
-    if (!device_name.empty()) {
+    if (!device_name.empty() &&
+        (idx < 0 || ItemCount(idx) >= n || endpoint_name(MIDIGetSource(ItemCount(idx))) != device_name)) {
         for (ItemCount i = 0; i < n; ++i) {
             if (endpoint_name(MIDIGetSource(i)) == device_name) { idx = int(i); break; }
         }
@@ -326,7 +327,8 @@ bool MidiOutputPort::open(int device_index, const std::string& device_name) {
     }
     const ItemCount n = MIDIGetNumberOfDestinations();
     int idx = device_index;
-    if (!device_name.empty()) {
+    if (!device_name.empty() &&
+        (idx < 0 || ItemCount(idx) >= n || endpoint_name(MIDIGetDestination(ItemCount(idx))) != device_name)) {
         for (ItemCount i = 0; i < n; ++i) {
             if (endpoint_name(MIDIGetDestination(i)) == device_name) { idx = int(i); break; }
         }

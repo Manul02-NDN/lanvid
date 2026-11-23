@@ -1,4 +1,4 @@
-# LanVid v2.6.0 — Studio, Monitor & Opus
+# LanVid v2.6.0 — Studio, Monitor, Camera Pro, OBS Plugin & Opus
 
 > 🇺🇦 [Українською](#українською) · 🇬🇧 [English](#english)
 
@@ -6,11 +6,21 @@
 
 ## Українською
 
-**LanVid 2.6.0** додає персональний моніторинг на смартфонах (**LanVid Monitor** для iOS та Android), кодек Opus для аудіо,
-режим MIDI Only з затримкою близько 1,5 мс і виправлення, що усувають «сипучий» і сповільнений звук.
+**LanVid 2.6.0** додає персональний моніторинг на смартфонах (**LanVid Monitor** для iOS та Android), професійний камерний
+інтерфейс **LanVid Camera Pro HUD** із Tally та двостороннім Intercom (IFB/PTT), нативний плагін **OBS Studio (`obs-lanvid`)**,
+кодек Opus для аудіо, режим MIDI Only з затримкою близько 1,5 мс і виправлення, що усувають «сипучий» і сповільнений звук.
 
 ### Нове
 
+- **LanVid Camera Pro HUD, Tally (PGM / PVW / STBY) та Duplex Intercom (IFB / PTT)** (Android, iOS, LanVid Studio):
+  - повноцінна індикація **Tally** (червона рамка **PGM** — в ефірі, зелена **PVW** — прев'ю, **STBY** — очікування) із
+    керуванням зі Studio та OBS;
+  - двосторонній службовий зв'язок **Duplex Intercom** (режисер → оператор IFB + зворотний канал Push-to-Talk від оператора);
+  - професійний камерний HUD із ручним контролем експозиції, ISO, фокусу, балансу білого, сітки та телеметрії потоку.
+- **Нативний плагін для OBS Studio (`obs-lanvid`)** (Windows, macOS, Linux):
+  - джерело та вихід **LanVid** у OBS Studio із підтримкою роздільної здатності від **360p до 4K60** та **64-канального AoIP**;
+  - автоматичний **Auto-Tally** (автоматична передача статусів PGM/PVW із OBS на камери LanVid), вбудований **Duplex Intercom**
+    та зручна панель керування **Qt6 Dock** безпосередньо всередині OBS Studio.
 - **Кодек Opus (libopus 1.5.2, CELT 2,5 / 5 мс, Fullband 48 кГц) для AUDIO2** замість ADPCM: низька затримка кодування,
   приховування втрат пакетів (PLC), профілі бітрейту на канал: Lossless / 256 / 192 / 128 / 96 / 64 кбіт/с.
 - **LanVid Monitor — персональний моніторинг для iOS та Android** (`mobile/`):
@@ -44,11 +54,11 @@
 
 | Платформа | Файл |
 |---|---|
-| Windows | `LanVid_Setup_v2.6.0.exe`, `LanVidSDK-v2.6.0-Windows.zip` |
-| macOS | `LanVid-Studio-v2.6.0-macOS.dmg`, `LanVid-Studio-v2.6.0-macOS.pkg` (Studio + CoreAudio HAL «LanVid Virtual 64ch»; віртуальні порти CoreMIDI створює Studio), `LanVidSDK-v2.6.0-macOS.pkg/.dmg`, `LanVid-Studio-macOS.zip` |
-| Android | `LanVid-Monitor-v2.6.0-android.apk`, `LanVid-Android-v2.6.0.apk` (камера/стрімінг), `lanvid-sdk-2.6.0.aar` |
+| Windows | `LanVid_Setup_v2.6.0.exe` (Studio + плагін OBS Studio `obs-lanvid`), `LanVidSDK-v2.6.0-Windows.zip` |
+| macOS | `LanVid-Studio-v2.6.0-macOS.dmg`, `LanVid-Studio-v2.6.0-macOS.pkg` (Studio + CoreAudio HAL «LanVid Virtual 64ch»; віртуальні порти CoreMIDI створює Studio), `LanVidSDK-v2.6.0-macOS.pkg/.dmg` (вкл. `obs-lanvid`), `LanVid-Studio-macOS.zip` |
+| Android | `LanVid-Monitor-v2.6.0-android.apk`, `LanVid-Android-v2.6.0.apk` (LanVid Camera Pro: Tally + Intercom), `lanvid-sdk-2.6.0.aar` |
 | iOS | `LanVid-Monitor-v2.6.0-iOS.zip` (`.xcarchive`), `LanVid-Monitor-v2.6.0-iOS-unsigned.ipa`, `LanVidCore.xcframework.zip` |
-| Linux | `lanvid-v2.6.0-linux-x86_64.tar.gz`, `LanVid-Linux-x86_64.run` |
+| Linux | `lanvid-v2.6.0-linux-x86_64.tar.gz`, `LanVid-Linux-x86_64.run` (вкл. `obs-lanvid`) |
 | Усі | `LanVidSDK-Universal.zip`, `SHA256SUMS.txt` |
 
 > Збірки для iOS та macOS підписані ad-hoc / не підписані: `.xcarchive` та `.ipa` потрібно підписати вашим Apple Developer
@@ -58,11 +68,20 @@
 
 ## English
 
-**LanVid 2.6.0** adds personal monitoring on smartphones (**LanVid Monitor** for iOS and Android), the Opus audio codec,
+**LanVid 2.6.0** adds personal monitoring on smartphones (**LanVid Monitor** for iOS and Android), the **LanVid Camera Pro HUD**
+with Tally and Duplex Intercom (IFB/PTT), the native **OBS Studio plugin (`obs-lanvid`)**, the Opus audio codec,
 a MIDI Only mode with ~1.5 ms latency, and fixes for crackling / slowed-down audio.
 
 ### What's new
 
+- **LanVid Camera Pro HUD, Tally (PGM / PVW / STBY) & Duplex Intercom (IFB / PTT)** (Android, iOS, LanVid Studio):
+  - full-frame **Tally** indicators (red **PGM** on-air, green **PVW** preview, **STBY** standby) controlled from Studio and OBS;
+  - full-duplex **Intercom** (director → operator IFB + operator Push-to-Talk return channel);
+  - professional camera HUD with manual exposure, ISO, focus, white balance, framing guides, and live stream telemetry.
+- **Native OBS Studio plugin (`obs-lanvid`)** (Windows, macOS, Linux):
+  - **LanVid** source and output in OBS Studio supporting **360p to 4K60** video and **64-channel AoIP**;
+  - automatic **Auto-Tally** (pushes OBS PGM/PVW states straight to LanVid cameras), built-in **Duplex Intercom**,
+    and a dedicated **Qt6 Dock** panel inside OBS Studio.
 - **Opus codec (libopus 1.5.2, CELT 2.5 / 5 ms, Fullband 48 kHz) for AUDIO2** replacing ADPCM: low encoding delay,
   packet-loss concealment (PLC), per-channel bitrate profiles: Lossless / 256 / 192 / 128 / 96 / 64 kbps.
 - **LanVid Monitor — personal monitoring for iOS and Android** (`mobile/`):
@@ -96,11 +115,11 @@ a MIDI Only mode with ~1.5 ms latency, and fixes for crackling / slowed-down aud
 
 | Platform | Files |
 |---|---|
-| Windows | `LanVid_Setup_v2.6.0.exe`, `LanVidSDK-v2.6.0-Windows.zip` |
-| macOS | `LanVid-Studio-v2.6.0-macOS.dmg`, `LanVid-Studio-v2.6.0-macOS.pkg` (Studio + CoreAudio HAL "LanVid Virtual 64ch"; Studio creates its CoreMIDI virtual ports at run time), `LanVidSDK-v2.6.0-macOS.pkg/.dmg`, `LanVid-Studio-macOS.zip` |
-| Android | `LanVid-Monitor-v2.6.0-android.apk`, `LanVid-Android-v2.6.0.apk` (camera / streaming), `lanvid-sdk-2.6.0.aar` |
+| Windows | `LanVid_Setup_v2.6.0.exe` (Studio + OBS Studio `obs-lanvid` plugin), `LanVidSDK-v2.6.0-Windows.zip` |
+| macOS | `LanVid-Studio-v2.6.0-macOS.dmg`, `LanVid-Studio-v2.6.0-macOS.pkg` (Studio + CoreAudio HAL "LanVid Virtual 64ch"; Studio creates its CoreMIDI virtual ports at run time), `LanVidSDK-v2.6.0-macOS.pkg/.dmg` (incl. `obs-lanvid`), `LanVid-Studio-macOS.zip` |
+| Android | `LanVid-Monitor-v2.6.0-android.apk`, `LanVid-Android-v2.6.0.apk` (LanVid Camera Pro: Tally + Intercom), `lanvid-sdk-2.6.0.aar` |
 | iOS | `LanVid-Monitor-v2.6.0-iOS.zip` (`.xcarchive`), `LanVid-Monitor-v2.6.0-iOS-unsigned.ipa`, `LanVidCore.xcframework.zip` |
-| Linux | `lanvid-v2.6.0-linux-x86_64.tar.gz`, `LanVid-Linux-x86_64.run` |
+| Linux | `lanvid-v2.6.0-linux-x86_64.tar.gz`, `LanVid-Linux-x86_64.run` (incl. `obs-lanvid`) |
 | All | `LanVidSDK-Universal.zip`, `SHA256SUMS.txt` |
 
 > iOS and macOS builds are ad-hoc signed / unsigned: re-sign the `.xcarchive` / `.ipa` with your own Apple Developer

@@ -229,6 +229,10 @@ TEST(virtual_midi_daw_port_visibility_and_loopback) {
     if (opened) {
         CHECK(vport.is_open());
         CHECK(!vst.daw_port_name.empty());
+#if defined(__APPLE__)
+        // Wait for CoreMIDI MIDIServer to publish the newly created virtual endpoints.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+#endif
 
         // 1. Verify "LanVid MIDI" is visible in OS MIDI enumeration (same API REAPER / Logic use).
         const auto ins = list_midi_inputs();
@@ -255,6 +259,11 @@ TEST(virtual_midi_daw_port_visibility_and_loopback) {
         const bool daw_out_ok = daw_out.open(daw_out_idx, vst.daw_port_name);
         CHECK(daw_in_ok);
         CHECK(daw_out_ok);
+
+#if defined(__APPLE__)
+        // CoreMIDI registers virtual endpoints & MIDIPortConnectSource asynchronously with MIDIServer.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+#endif
 
         // LanVid Studio -> DAW ("LanVid MIDI" Input)
         CHECK(vport.send_to_daw(0x90, 60, 100));  // Note On C4
@@ -283,13 +292,17 @@ TEST(virtual_midi_daw_port_visibility_and_loopback) {
             std::printf("    [VirtualMIDI loopback] LanVid->DAW=%zu msgs | DAW->LanVid=%zu msgs\n",
                         rx_in_daw.size(), rx_from_daw.size());
             CHECK(rx_in_daw.size() >= 3);
-            CHECK(rx_in_daw[0].st == 0x90 && rx_in_daw[0].d1 == 60 && rx_in_daw[0].d2 == 100);
-            CHECK(rx_in_daw[1].st == 0xB0 && rx_in_daw[1].d1 == 74 && rx_in_daw[1].d2 == 64);
-            CHECK(rx_in_daw[2].st == 0x80 && rx_in_daw[2].d1 == 60 && rx_in_daw[2].d2 == 0);
+            if (rx_in_daw.size() >= 3) {
+                CHECK(rx_in_daw[0].st == 0x90 && rx_in_daw[0].d1 == 60 && rx_in_daw[0].d2 == 100);
+                CHECK(rx_in_daw[1].st == 0xB0 && rx_in_daw[1].d1 == 74 && rx_in_daw[1].d2 == 64);
+                CHECK(rx_in_daw[2].st == 0x80 && rx_in_daw[2].d1 == 60 && rx_in_daw[2].d2 == 0);
+            }
 
             CHECK(rx_from_daw.size() >= 2);
-            CHECK(rx_from_daw[0].st == 0x91 && rx_from_daw[0].d1 == 64 && rx_from_daw[0].d2 == 110);
-            CHECK(rx_from_daw[1].st == 0x81 && rx_from_daw[1].d1 == 64 && rx_from_daw[1].d2 == 0);
+            if (rx_from_daw.size() >= 2) {
+                CHECK(rx_from_daw[0].st == 0x91 && rx_from_daw[0].d1 == 64 && rx_from_daw[0].d2 == 110);
+                CHECK(rx_from_daw[1].st == 0x81 && rx_from_daw[1].d1 == 64 && rx_from_daw[1].d2 == 0);
+            }
         }
     }
 

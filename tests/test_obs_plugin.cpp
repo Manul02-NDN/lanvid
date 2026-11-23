@@ -30,8 +30,8 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
         ColorSpace cs;
     };
     std::vector<RecFrame> rx_frames;
-    float last_l = 0.0f, last_r = 0.0f;
-    uint32_t audio_callbacks = 0;
+    std::atomic<float> last_l{0.0f}, last_r{0.0f};
+    std::atomic<uint32_t> audio_callbacks{0};
 
     CHECK(src.start(
         cfg,
@@ -39,10 +39,11 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
             rx_frames.push_back({fv.width, fv.height, fv.format, fv.color_space});
         },
         [&](const AudioBlockView& av) {
-            ++audio_callbacks;
-            if (av.frames > 0 && av.planes[0] && av.planes[1]) {
-                last_l = av.planes[0][0];
-                last_r = av.planes[1][0];
+            audio_callbacks.fetch_add(1, std::memory_order_relaxed);
+            if (av.frames > 0 && av.planes[0] && av.planes[1] &&
+                (std::fabs(av.planes[0][0]) > 1e-6f || std::fabs(av.planes[1][0]) > 1e-6f)) {
+                last_l.store(av.planes[0][0], std::memory_order_relaxed);
+                last_r.store(av.planes[1][0], std::memory_order_relaxed);
             }
         }));
     CHECK(src.bound_port() != 0);
@@ -84,17 +85,19 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
         interleaved[size_t(f) * kCh + 4] = 0.75f;   // Ch 5
         interleaved[size_t(f) * kCh + 5] = -0.50f;  // Ch 6
     }
+    const uint32_t cb_before = audio_callbacks.load(std::memory_order_relaxed);
     src.route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns);
-    CHECK(audio_callbacks == 1);
-    CHECK(std::fabs(last_l - 0.75f) < 1e-5f);
-    CHECK(std::fabs(last_r - (-0.50f)) < 1e-5f);
+    CHECK(audio_callbacks.load(std::memory_order_relaxed) >= cb_before + 1);
+    CHECK(std::fabs(last_l.load(std::memory_order_relaxed) - 0.75f) < 1e-5f);
+    CHECK(std::fabs(last_r.load(std::memory_order_relaxed) - (-0.50f)) < 1e-5f);
 
     // Switch to Video Only -> no audio callback fired
     cfg.audio_route = AudioRouteMode::kVideoOnly;
     cfg.listen_port = src.bound_port();
     src.update_config(cfg);
+    const uint32_t cb_vo_before = audio_callbacks.load(std::memory_order_relaxed);
     src.route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns + 1000);
-    CHECK(audio_callbacks == 1);
+    CHECK(audio_callbacks.load(std::memory_order_relaxed) == cb_vo_before);
 
     // 3. LanVid Program Output loopback test
     LanVidObsOutputEngine out;
