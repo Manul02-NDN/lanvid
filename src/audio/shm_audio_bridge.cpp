@@ -31,7 +31,7 @@ uint64_t shm_bus_now_ms() {
     return uint64_t(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-bool ShmAudioBus::open(const char* name) {
+bool ShmAudioBus::open(const char* name, bool as_driver) {
     if (bus_) return true;
     // LANVID_AUDIO_BUS_NAME lets tests / multiple instances use a private bus (not read on RT threads).
     const char* env = std::getenv("LANVID_AUDIO_BUS_NAME");
@@ -60,8 +60,36 @@ bool ShmAudioBus::open(const char* name) {
         if (fd < 0) return false;
         struct stat st{};
         if (fstat(fd, &st) != 0) { ::close(fd); return false; }
-        if (size_t(st.st_size) < size && ftruncate(fd, off_t(size)) != 0) { ::close(fd); return false; }
+        if (size_t(st.st_size) < size && ftruncate(fd, off_t(size)) != 0) {
+            // An older, smaller layout (e.g. v1 = 4096 frames). POSIX shm cannot grow on macOS, so
+            // replace it — but only if no driver / host is actively using it.
+            bool busy = false;
+            if (size_t(st.st_size) >= sizeof(ShmBusHeader)) {
+                void* hm = mmap(nullptr, sizeof(ShmBusHeader), PROT_READ, MAP_SHARED, fd, 0);
+                if (hm != MAP_FAILED) {
+                    const auto* oh = static_cast<const ShmBusHeader*>(hm);
+                    const uint64_t now = shm_bus_now_ms();
+                    const uint64_t dhb = oh->driver_heartbeat_ms.load(std::memory_order_acquire);
+                    const uint64_t hhb = oh->host_heartbeat_ms.load(std::memory_order_acquire);
+                    const bool driver_live = !as_driver && oh->driver_running.load() && now - dhb < 2000;
+                    busy = driver_live || (hhb && now - hhb < 2000);
+                    munmap(hm, sizeof(ShmBusHeader));
+                }
+            }
+            ::close(fd);
+            if (busy) {
+                std::fprintf(stderr, "LanVidAudioBus: an older bus layout is in use (reinstall/restart the LanVid "
+                                     "virtual audio driver and LanVid apps)\n");
+                return false;
+            }
+            shm_unlink(full);
+            fd = shm_open(full, O_RDWR | O_CREAT | O_EXCL, 0666);
+            if (fd < 0) return false;
+            created = true;
+            if (ftruncate(fd, off_t(size)) != 0) { ::close(fd); shm_unlink(full); return false; }
+        }
     }
+    if (created) fchmod(fd, 0666);  // cross-user: coreaudiod's driver service <-> user apps
     mem = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     ::close(fd);
     if (mem == MAP_FAILED) return false;

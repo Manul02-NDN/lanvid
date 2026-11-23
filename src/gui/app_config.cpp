@@ -139,6 +139,9 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "aoip_tone", cfg.aoip_tone);
     read_int(j, "aoip_source", cfg.aoip_source);
     read_int(j, "aoip_output", cfg.aoip_output);
+    read_str(j, "dpx_peer_host", cfg.dpx_peer_host);
+    read_int(j, "dpx_peer_port", cfg.dpx_peer_port);
+    read_int(j, "dpx_listen_port", cfg.dpx_listen_port);
     read_bool(j, "show_hud", cfg.show_hud);
     read_str(j, "preview_backend", cfg.preview_backend);
     read_int(j, "active_tab", cfg.active_tab);
@@ -196,6 +199,9 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"aoip_tone\": " << (cfg.aoip_tone ? "true" : "false") << ",\n"
         << "  \"aoip_source\": " << cfg.aoip_source << ",\n"
         << "  \"aoip_output\": " << cfg.aoip_output << ",\n"
+        << "  \"dpx_peer_host\": \"" << json_esc(cfg.dpx_peer_host) << "\",\n"
+        << "  \"dpx_peer_port\": " << cfg.dpx_peer_port << ",\n"
+        << "  \"dpx_listen_port\": " << cfg.dpx_listen_port << ",\n"
         << "  \"show_hud\": " << (cfg.show_hud ? "true" : "false") << ",\n"
         << "  \"preview_backend\": \"" << json_esc(cfg.preview_backend) << "\",\n"
         << "  \"active_tab\": " << cfg.active_tab << "\n"

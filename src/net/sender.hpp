@@ -110,6 +110,11 @@ public:
 
     // Non-blocking poll for incoming control packets (PING -> PONG, FEEDBACK -> AIMD).
     void service_control();
+    // Same, but skips if another thread (an audio push) is already servicing the socket.
+    void service_control_try() {
+        std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
+        if (lk.owns_lock()) service_control();
+    }
 
     void set_sim_loss_pct(double pct) { sim_loss_pct_.store(pct, std::memory_order_relaxed); }
     double sim_loss_pct() const { return sim_loss_pct_.load(std::memory_order_relaxed); }

@@ -18,11 +18,11 @@ shared-memory bus with atomics and `memcpy` — no locks, allocations or system 
 | | |
 |---|---|
 | Name | `Local\LanVidAudioBus_v1` (Windows `CreateFileMapping`), `/LanVidAudioBus_v1` (`shm_open` + `mmap`) |
-| TX ring | DAW outputs → network. SPSC: producer = driver, consumer = host. 64 × 4096 float32 frames |
-| RX ring | network → DAW inputs. SPSC: producer = host, consumer = driver. 64 × 4096 float32 frames |
+| TX ring | DAW outputs → network. SPSC: producer = driver, consumer = host. 64 × 16384 float32 frames (~341 ms @ 48 kHz) |
+| RX ring | network → DAW inputs. SPSC: producer = host, consumer = driver. 64 × 16384 float32 frames |
 | Cursors | 64-bit monotonic `write_pos` / `read_pos` per ring (+ overrun / underrun counters) |
 | Header | `sample_rate`, `buffer_size`, `active_channels`, `driver_running`, driver & host `heartbeat_ms`, `target_latency_ms`, MasterClock `clock_synced` / `clock_skew_ppb`, `driver_name` |
-| Size | ≈ 2 MB (layout versioned by `magic` = `LVAB`, `version` = 1) |
+| Size | ≈ 8 MB (layout versioned by `magic` = `LVAB`, `version` = 2; v1 used 4096-frame rings). An idle older segment is replaced on open. Apps refuse an older segment that a live driver or host still uses; the driver itself only yields to a live host (a "driver running" flag left by a killed `coreaudiod` is stale). Reinstall the driver (`LanVidAudio.driver` / `LanVidASIO.dll` / `lanvid-audio-bridge`) together with the apps. |
 
 A DAW counts as connected while `driver_running = 1` and its heartbeat is younger than 500 ms.
 `LANVID_AUDIO_BUS_NAME` overrides the bus name (tests, several instances on one machine).
@@ -61,12 +61,55 @@ A DAW counts as connected while `driver_running = 1` and its heartbeat is younge
 Receiver tab → *Вихід шини* = `Virtual Audio Device (DAW inputs)`. The panel shows whether a DAW
 is attached, its sample rate, buffer size and ring fill.
 
-**Headless CLI:**
+**Headless CLI** (`--audio-only` / `--no-video`: no capture, encoding or video packets on the sender;
+no preview window and video packets dropped before decoding on the receiver):
 
 ```bash
-./build/sender   --host 192.168.1.50 --audio-device virtual --audio-channels 64 --audio-latency 20
-./build/receiver --audio-device virtual --audio-latency 20
+./build/sender   --audio-only --audio-device virtual --host 192.168.1.50 --audio-latency 20
+./build/receiver --audio-only --audio-device virtual --audio-latency 20
 ```
+
+`--audio-device virtual` defaults to 64 channels. Bandwidth note: 64 × 48 kHz float32 is ≈ 98 Mbit/s
+of raw audio (+ FEC parity and headers: ≈ 160 Mbit/s measured at 20 ms on loopback) — use wired
+Ethernet for full 64-channel float32, or fewer channels (`--audio-channels`) on Wi-Fi.
+
+## Full-duplex 64×64 node, patchbay and AoIP discovery
+
+A duplex node streams the DAW outputs (TX ring) to a peer **and** receives the peer's 64 channels
+into the DAW inputs (RX ring) at the same time. Each direction has its own sockets and threads:
+the TX pump pushes into its sender, the RX pump pulls from its receiver, and the receiver keeps its
+own MasterClock + RTT towards the peer's sender. A node measures the *incoming* direction; the
+peer measures the other one.
+
+```bash
+# node A (192.168.1.10)                      # node B (192.168.1.20)
+sender --duplex --host 192.168.1.20 \         sender --duplex --host 192.168.1.10 \
+       --port 5004 --listen-port 5005                 --port 5005 --listen-port 5004
+sender --duplex --list-nodes                  # LAN scan for AoIP nodes
+```
+
+C ABI: `lv_duplex_create/start/stop/get_stats/set_latency_ms`, `lv_audio_set_tx_routing`,
+`lv_audio_set_rx_routing`, `lv_audio_get_routing`, `lv_audio_set_channel_mute_solo`,
+`lv_discovery_scan_audio_nodes` (types `LV_DuplexConfig`, `LV_DuplexStats`, `LV_AudioNode`,
+`LV_AudioDirection`). Core-only / mobile builds return `LV_ERR_UNSUPPORTED` from `lv_duplex_start`.
+
+**Patchbay** (`src/audio/channel_patchbay.*`, one per direction): `dst_of_src[64]` (−1 = off;
+several sources may feed one destination and are summed), changed live with a 5 ms route
+crossfade. Mute / Solo act on the source channel with 5 ms linear gain ramps; Solo on any channel
+silences all non-soloed ones. Steady state (1:1, unity) is a bit-exact copy. CLI:
+`--tx-route 1:2,2:1`, `--rx-route ...`, `--tx-mute/--rx-mute/--tx-solo/--rx-solo <c,...>`
+(1-based; `5:0` unroutes channel 5).
+
+**AoIP discovery** (port 5099): duplex nodes add an optional field before the nonce of the
+discovery reply — `AOIP=1;host=<hostname>;drv=<CoreAudio HAL|ASIO|JACK/PipeWire>;conn=<0|1>;ch=64;rx=<port>;tx=<port>;dpx=1`.
+Older scanners read only the first four fields and are unaffected. The driver name / DAW state are
+evaluated live on every probe. Nodes answering on several interfaces are merged (non-loopback
+address preferred).
+
+**LanVid Studio:** tab *AoIP Duplex 64x64* — *Discovered AoIP Nodes* list (one click fills the peer
+IP and ports; manual IP stays as fallback), start/stop, per-direction status, and the
+*Channel Routing & Solo/Mute* block (TX/RX, src → dst editor, 1:1 / reverse presets, 8×8 M/S grid).
+Starting the duplex node releases the single-direction virtual-device bridges of the other tabs.
 
 ## Verification
 
@@ -78,6 +121,11 @@ is attached, its sample rate, buffer size and ring fill.
   channels both ways through `ReadInput` / `WriteMix`.
 * CI checks the ASIO DLL exports (`dumpbin`), the HAL bundle (`Info.plist`, both Mach-O slices,
   `_LanVidAudioDriverFactory`) and the Linux bridge start-up behaviour.
+
+* `audio_64ch_fullduplex_and_patchbay_routing`: two duplex nodes on loopback, each with its own
+  bus and simulated DAW, exchange 64×64 channels simultaneously (A→B reversed + one muted source,
+  live Solo on A's RX), checking bit-level phase alignment, zero mute/solo leakage, zero loss,
+  both MasterClocks synced and AoIP discovery of node A; plus deterministic ramp / crossfade checks.
 
 Not covered automatically: loading by a real DAW, `coreaudiod`'s sandbox, and ASIO hosts on
 Windows — these need a manual check on target machines.

@@ -196,6 +196,10 @@ void UdpReceiver::step_once() {
             if (h.type == PacketType::kPong) {
                 handle_pong(payload, h.payload_size, uint32_t(now));
             } else if (h.type == PacketType::kVideoSlice) {
+                if (cfg_.audio_only) {  // headless AoIP bridge: never reassemble / decode video
+                    ++video_ignored_;
+                    continue;
+                }
                 if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
                     sender_ep_ = batch[i].src;
                     has_sender_ = true;

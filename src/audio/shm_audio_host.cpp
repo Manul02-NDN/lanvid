@@ -1,5 +1,16 @@
 #include "audio/shm_audio_host.hpp"
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <mmsystem.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -54,6 +65,11 @@ void ShmAudioHost::loop() {
     bool drifting = false;
     clock::time_point drift_since{};
 
+#if defined(_WIN32)
+    // Default Windows timer resolution is ~15.6 ms, far longer than the RX headroom: without this
+    // the pump would wake up too rarely and the DAW inputs would underrun.
+    timeBeginPeriod(1);
+#endif
     while (!stop_.load(std::memory_order_acquire)) {
         bus_.host_heartbeat();
         const bool connected = bus_.driver_connected();
@@ -119,6 +135,9 @@ void ShmAudioHost::loop() {
         }
         std::this_thread::sleep_for(std::chrono::microseconds(500));
     }
+#if defined(_WIN32)
+    timeEndPeriod(1);
+#endif
 }
 
 ShmHostStatus ShmAudioHost::status() const {

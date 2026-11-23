@@ -32,6 +32,7 @@ struct ReceiverConfig {
     double audio_target_ms = 12.0;           // 10-15 ms jitter buffer target
     uint32_t audio_sample_rate = 48000;      // 64-channel bus rate (48000 / 96000)
     uint32_t audio_latency_ms = 20;          // 2..2000 ms multichannel playout latency
+    bool audio_only = false;                 // drop video slices before reassembly/decoding (AoIP bridge)
 };
 
 struct ClockSyncInfo {
@@ -68,6 +69,7 @@ public:
     ClockSyncInfo clock_sync() const { return sync_; }
     uint64_t feedbacks_sent() const { return feedbacks_sent_; }
     uint64_t plis_sent() const { return plis_sent_; }
+    uint64_t video_packets_ignored() const { return video_ignored_; }
     uint32_t jitter_us() const { return uint32_t(jitter_us_); }
 
     AudioJitterBuffer& audio_buffer() { return audio_buf_; }
@@ -130,6 +132,7 @@ private:
     uint64_t fb_dec_cnt_ = 0;
     uint64_t feedbacks_sent_ = 0;
     uint64_t plis_sent_ = 0;
+    uint64_t video_ignored_ = 0;
 
     uint8_t recv_batch_buf_[kRecvBatchSize][kRecvSlotCap];
 };

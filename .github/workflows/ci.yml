@@ -35,10 +35,11 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run Unit Tests (43 tests) & 4K Codec Benchmark
+      - name: Run Unit Tests (44 tests) & 4K Codec Benchmark
         shell: pwsh
         run: |
           .\build\lanvid_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "lanvid_tests.exe failed (exit $LASTEXITCODE)" }
           .\build\bench_codec.exe --width 3840 --height 2160 --frames 10 --quality 80
 
       - name: Verify LanVidASIO.dll (64-bit COM exports)

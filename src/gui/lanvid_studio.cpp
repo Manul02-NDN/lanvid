@@ -80,6 +80,10 @@ void LanVidStudioApp::init() {
     load_app_config(cfg_);
     std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", cfg_.dest_ip.c_str());
     std::snprintf(file_buf_, sizeof(file_buf_), "%s", cfg_.file_path.c_str());
+    std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", cfg_.dpx_peer_host.c_str());
+    duplex_ = lv_duplex_create();
+    for (int d = 0; d < 2; ++d)
+        for (int c = 0; c < 64; ++c) route_[d][c] = int8_t(c);
 
     sender_ = lv_sender_create();
     receiver_ = lv_receiver_create();
@@ -99,6 +103,13 @@ void LanVidStudioApp::shutdown() {
     stop_sender();
     stop_receiver();
     if (disc_thread_.joinable()) disc_thread_.join();
+    if (nodes_thread_.joinable()) nodes_thread_.join();
+    if (duplex_) {
+        lv_duplex_stop(duplex_);
+        lv_duplex_destroy(duplex_);
+        duplex_ = nullptr;
+        duplex_running_ = false;
+    }
 
     if (sender_) {
         stop_tone();
@@ -314,6 +325,197 @@ void LanVidStudioApp::draw_vdev_status(const ShmHostStatus& st, bool tx_side) {
         ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Очікування DAW: виберіть пристрій «LanVid»");
         ImGui::TextDisabled("Windows: ASIO «LanVid Virtual ASIO» | macOS: «LanVid Virtual 64ch» | Linux: lanvid-audio-bridge");
     }
+}
+
+// ---------------------------------------------------------------- Full-duplex 64x64 AoIP node
+
+void LanVidStudioApp::scan_aoip_nodes() {
+    if (nodes_scanning_.exchange(true)) return;
+    if (nodes_thread_.joinable()) nodes_thread_.join();
+    nodes_thread_ = std::thread([this] {
+        std::vector<LV_AudioNode> found(32);
+        const int n = lv_discovery_scan_audio_nodes(600, 0, found.data(), int(found.size()));
+        found.resize(size_t(std::max(n, 0)));
+        {
+            std::lock_guard<std::mutex> lk(nodes_mu_);
+            nodes_ = std::move(found);
+        }
+        nodes_scanning_.store(false);
+    });
+}
+
+void LanVidStudioApp::start_duplex() {
+    if (!duplex_) return;
+    // The duplex node owns both rings of the virtual device: release the single-direction bridges.
+    stop_vdev_tx();
+    vdev_rx_.stop();
+    cfg_.dpx_peer_host = dpx_peer_buf_;
+    save_app_config(cfg_);
+    LV_DuplexConfig dc;
+    lv_duplex_config_default(&dc);
+    std::snprintf(dc.peer_host, sizeof(dc.peer_host), "%s", dpx_peer_buf_);
+    dc.peer_port = uint16_t(std::clamp(cfg_.dpx_peer_port, 1024, 65535));
+    dc.listen_port = uint16_t(std::clamp(cfg_.dpx_listen_port, 1024, 65535));
+    dc.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
+    dc.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
+    const int rc = lv_duplex_start(duplex_, &dc);
+    duplex_running_ = rc == LV_OK;
+    if (duplex_running_) {
+        lv_audio_set_tx_routing(duplex_, route_[0]);
+        lv_audio_set_rx_routing(duplex_, route_[1]);
+        toast_msg_ = "Duplex 64x64: DAW -> " + std::string(dpx_peer_buf_) + ":" + std::to_string(dc.peer_port) +
+                     " | :" + std::to_string(dc.listen_port) + " -> DAW";
+    } else {
+        toast_msg_ = std::string("Не вдалося запустити duplex: ") + lv_error_string(rc);
+    }
+    toast_until_us_ = now_us() + 3500000ull;
+}
+
+void LanVidStudioApp::stop_duplex() {
+    if (duplex_) lv_duplex_stop(duplex_);
+    duplex_running_ = false;
+}
+
+void LanVidStudioApp::draw_patchbay_block() {
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "Channel Routing & Solo/Mute");
+    ImGui::SameLine();
+    ImGui::RadioButton("TX (DAW -> мережа)", &patch_dir_, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("RX (мережа -> DAW)", &patch_dir_, 1);
+    const LV_AudioDirection dir = patch_dir_ == 0 ? LV_AUDIO_DIR_TX : LV_AUDIO_DIR_RX;
+    const int d = patch_dir_;
+
+    // Routing editor
+    ImGui::SetNextItemWidth(90.0f);
+    ImGui::InputInt("Джерело", &patch_src_);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(90.0f);
+    ImGui::InputInt("-> Призначення (0 = вимк.)", &patch_dst_);
+    patch_src_ = std::clamp(patch_src_, 1, 64);
+    patch_dst_ = std::clamp(patch_dst_, 0, 64);
+    bool apply = false;
+    if (ImGui::Button("Призначити")) { route_[d][patch_src_ - 1] = int8_t(patch_dst_ - 1); apply = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("1:1")) { for (int c = 0; c < 64; ++c) route_[d][c] = int8_t(c); apply = true; }
+    ImGui::SameLine();
+    if (ImGui::Button("Реверс 1..N")) {
+        const int n = std::clamp(cfg_.aoip_channels, 1, 64);
+        for (int c = 0; c < 64; ++c) route_[d][c] = int8_t(c < n ? n - 1 - c : c);
+        apply = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Скинути M/S")) {
+        for (int c = 0; c < 64; ++c) {
+            mute_[d][c] = solo_[d][c] = false;
+            if (duplex_) lv_audio_set_channel_mute_solo(duplex_, dir, uint16_t(c), 0, 0);
+        }
+    }
+    if (apply && duplex_) {
+        if (d == 0) lv_audio_set_tx_routing(duplex_, route_[0]);
+        else lv_audio_set_rx_routing(duplex_, route_[1]);
+    }
+    std::string routes;
+    for (int c = 0; c < 64; ++c)
+        if (route_[d][c] != c) routes += std::to_string(c + 1) + "->" + (route_[d][c] < 0 ? std::string("off") : std::to_string(route_[d][c] + 1)) + "  ";
+    ImGui::TextDisabled("Маршрути: %s", routes.empty() ? "1:1 (без змін)" : routes.c_str());
+
+    // 8 x 8 grid of channels with M / S toggles (5 ms ramps in the core: no clicks)
+    const int n = std::clamp(cfg_.aoip_channels, 1, 64);
+    const ImVec4 on_m(0.85f, 0.25f, 0.22f, 1.0f), on_s(0.95f, 0.78f, 0.15f, 1.0f), off(0.20f, 0.23f, 0.29f, 1.0f);
+    for (int c = 0; c < n; ++c) {
+        ImGui::PushID(d * 64 + c);
+        if (c % 8) ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::Text("%2d", c + 1);
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, mute_[d][c] ? on_m : off);
+        if (ImGui::SmallButton("M")) {
+            mute_[d][c] = !mute_[d][c];
+            if (duplex_) lv_audio_set_channel_mute_solo(duplex_, dir, uint16_t(c), mute_[d][c] ? 1 : 0, -1);
+        }
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Button, solo_[d][c] ? on_s : off);
+        if (ImGui::SmallButton("S")) {
+            solo_[d][c] = !solo_[d][c];
+            if (duplex_) lv_audio_set_channel_mute_solo(duplex_, dir, uint16_t(c), -1, solo_[d][c] ? 1 : 0);
+        }
+        ImGui::PopStyleColor();
+        ImGui::EndGroup();
+        ImGui::PopID();
+    }
+}
+
+void LanVidStudioApp::draw_duplex_tab() {
+    const uint64_t now = now_us();
+    if (duplex_running_ && now - dpx_stats_us_ > 250000) {
+        dpx_stats_us_ = now;
+        lv_duplex_get_stats(duplex_, &dpx_stats_);
+    }
+    ImGui::BeginChild("##DpxLeft", ImVec2(420.0f, 0), true);
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "Full-Duplex 64x64 AoIP Transceiver");
+    ImGui::TextDisabled("DAW-виходи -> вузол-партнер | партнер -> DAW-входи");
+    ImGui::Separator();
+
+    if (ImGui::Button(nodes_scanning_.load() ? "Пошук..." : "Знайти AoIP-вузли в LAN")) scan_aoip_nodes();
+    {
+        std::lock_guard<std::mutex> lk(nodes_mu_);
+        const char* preview = nodes_.empty() ? "(натисніть «Знайти»)" : "Виберіть вузол...";
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::BeginCombo("##DiscoveredAoIP", preview)) {
+            for (size_t i = 0; i < nodes_.size(); ++i) {
+                const LV_AudioNode& nd = nodes_[i];
+                char lbl[320];
+                std::snprintf(lbl, sizeof(lbl), "%s  %s:%u  %uch %s  [%s%s]", nd.name, nd.ip, nd.rx_port, nd.channels,
+                              nd.duplex ? "duplex" : "rx", nd.audio_driver[0] ? nd.audio_driver : "без DAW",
+                              nd.driver_connected ? ", DAW on" : "");
+                if (ImGui::Selectable(lbl, false)) {  // one click: take the node's receive port as our target
+                    std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", nd.ip);
+                    cfg_.dpx_peer_port = nd.rx_port;
+                    if (nd.duplex && nd.tx_port) cfg_.dpx_listen_port = nd.tx_port;  // where it sends to us
+                    config_dirty_ = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("Discovered AoIP Nodes: %zu", nodes_.size());
+    }
+    ImGui::InputText("IP партнера (вручну)", dpx_peer_buf_, sizeof(dpx_peer_buf_));
+    if (ImGui::InputInt("Порт партнера", &cfg_.dpx_peer_port)) config_dirty_ = true;
+    if (ImGui::InputInt("Мій порт прийому", &cfg_.dpx_listen_port)) config_dirty_ = true;
+    if (ImGui::SliderInt("Затримка", &cfg_.aoip_latency_ms, 2, 2000, "%d мс", ImGuiSliderFlags_Logarithmic)) {
+        if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
+        config_dirty_ = true;
+    }
+    ImGui::Spacing();
+    if (!duplex_running_) {
+        if (ImGui::Button("Старт Duplex 64x64", ImVec2(-1, 34))) start_duplex();
+    } else if (ImGui::Button("Стоп Duplex", ImVec2(-1, 34))) {
+        stop_duplex();
+    }
+    ImGui::Separator();
+    if (duplex_running_) {
+        const LV_DuplexStats& st = dpx_stats_;
+        st.driver_connected ? ImGui::TextColored(ImVec4(0.24f, 0.90f, 0.52f, 1.0f), "DAW: %s | %u Гц | буфер %u",
+                                                 st.driver_name, st.sample_rate, st.buffer_size)
+                            : ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Очікування DAW на пристрої «LanVid»");
+        ImGui::Text("Партнер -> ми: годинник %s | RTT %.2f мс | %+.1f ppm", st.rx_clock_synced ? "synced" : "free-run",
+                    double(st.rx_rtt_us) / 1000.0, st.rx_clock_skew_ppm);
+        ImGui::TextDisabled("  пакети %llu | втрачено %llu | у DAW %llu кадрів | недоборів %llu",
+                            (unsigned long long)st.rx_packets, (unsigned long long)st.rx_lost,
+                            (unsigned long long)st.rx_frames_to_daw, (unsigned long long)st.rx_underruns);
+        ImGui::Text("Ми -> партнер: пакети %llu | з DAW %llu кадрів", (unsigned long long)st.tx_packets,
+                    (unsigned long long)st.tx_frames_from_daw);
+        ImGui::TextDisabled("  переповнень %llu | відповідей clock-sync %llu (годинник цього напрямку вимірює партнер)",
+                            (unsigned long long)st.tx_overruns, (unsigned long long)st.tx_pongs_sent);
+    } else {
+        ImGui::TextDisabled("Партнер запускає дзеркальні порти: його «Порт партнера» = мій порт прийому.");
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("##DpxPatch", ImVec2(0, 0), true);
+    draw_patchbay_block();
+    ImGui::EndChild();
 }
 
 void LanVidStudioApp::stop_tone() {
@@ -1051,6 +1253,10 @@ void LanVidStudioApp::render_frame() {
                                 cfg_.active_tab == 1 ? ImGuiTabItemFlags_None : 0)) {
             cfg_.active_tab = 1;
             draw_receiver_tab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("AoIP Duplex 64x64")) {
+            draw_duplex_tab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

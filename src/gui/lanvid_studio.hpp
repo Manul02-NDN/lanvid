@@ -55,6 +55,11 @@ private:
     void stop_vdev_tx();
     void apply_receiver_output();
     void draw_vdev_status(const ShmHostStatus& st, bool tx_side);
+    void draw_duplex_tab();
+    void draw_patchbay_block();
+    void start_duplex();
+    void stop_duplex();
+    void scan_aoip_nodes();
 
     void draw_top_bar();
     void draw_sender_tab();
@@ -95,6 +100,22 @@ private:
     uint64_t ch_stats_us_ = 0;
     ShmAudioHost vdev_tx_;  // DAW -> network (sender side)
     ShmAudioHost vdev_rx_;  // network -> DAW (receiver side)
+
+    // Full-duplex 64x64 node + patchbay
+    LvDuplexHandle* duplex_ = nullptr;
+    bool duplex_running_ = false;
+    LV_DuplexStats dpx_stats_{};
+    uint64_t dpx_stats_us_ = 0;
+    char dpx_peer_buf_[64]{};
+    std::mutex nodes_mu_;
+    std::vector<LV_AudioNode> nodes_;
+    std::thread nodes_thread_;
+    std::atomic<bool> nodes_scanning_{false};
+    int patch_dir_ = 0;  // 0 = TX (DAW -> peer), 1 = RX (peer -> DAW)
+    int patch_src_ = 1, patch_dst_ = 1;
+    bool mute_[2][64]{};
+    bool solo_[2][64]{};
+    int8_t route_[2][64]{};
 
     // Editable text buffers
     char ip_buf_[64]{};

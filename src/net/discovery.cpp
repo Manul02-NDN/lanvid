@@ -183,6 +183,54 @@ std::vector<NetInterfaceInfo> list_network_interfaces() {
     return out;
 }
 
+std::string local_host_name() {
+    char buf[256] = {};
+    if (gethostname(buf, sizeof(buf) - 1) != 0 || !buf[0]) return local_device_name();
+    return buf;
+}
+
+static std::string aoip_clean(const std::string& v) {
+    std::string o;
+    for (char ch : v) o += (ch == '|' || ch == ';' || ch == '=' || ch == '\n' || ch == '\r') ? '_' : ch;
+    return o.substr(0, 96);
+}
+
+std::string encode_aoip_field(const AoipAnnounce& a) {
+    return "AOIP=1;host=" + aoip_clean(a.hostname) + ";drv=" + aoip_clean(a.audio_driver) +
+           ";conn=" + (a.driver_connected ? "1" : "0") + ";ch=" + std::to_string(a.channels) +
+           ";rx=" + std::to_string(a.rx_port) + ";tx=" + std::to_string(a.tx_port) +
+           ";dpx=" + (a.duplex ? "1" : "0");
+}
+
+bool decode_aoip_field(const std::string& field, DiscoveredReceiver& r) {
+    if (field.rfind("AOIP=", 0) != 0) return false;
+    size_t pos = 0;
+    while (pos < field.size()) {
+        size_t end = field.find(';', pos);
+        if (end == std::string::npos) end = field.size();
+        const std::string kv = field.substr(pos, end - pos);
+        const size_t eq = kv.find('=');
+        if (eq != std::string::npos) {
+            const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+            if (k == "AOIP") r.aoip = (v == "1");
+            else if (k == "host") r.hostname = v;
+            else if (k == "drv") r.audio_driver = v;
+            else if (k == "conn") r.driver_connected = (v == "1");
+            else if (k == "ch") r.audio_channels = uint16_t(std::strtoul(v.c_str(), nullptr, 10));
+            else if (k == "rx") r.aoip_rx_port = uint16_t(std::strtoul(v.c_str(), nullptr, 10));
+            else if (k == "tx") r.aoip_tx_port = uint16_t(std::strtoul(v.c_str(), nullptr, 10));
+            else if (k == "dpx") r.duplex = (v == "1");
+        }
+        pos = end + 1;
+    }
+    return r.aoip;
+}
+
+void DiscoveryResponder::set_aoip_provider(std::function<AoipAnnounce()> provider) {
+    std::lock_guard<std::mutex> lk(aoip_mu_);
+    aoip_provider_ = std::move(provider);
+}
+
 bool DiscoveryResponder::start(uint16_t stream_port, const std::string& custom_name,
                                uint16_t discovery_port) {
     stop();
@@ -231,7 +279,15 @@ bool DiscoveryResponder::start(uint16_t stream_port, const std::string& custom_n
             if (std::strncmp(buf, kProbePrefix, std::strlen(kProbePrefix)) != 0) continue;
             // Echo the sender's nonce so RTT can be measured accurately.
             const std::string nonce(buf + std::strlen(kProbePrefix));
-            const std::string reply = resp_base + "|" + sanitize_field(nonce);
+            std::string reply = resp_base;
+            {
+                std::lock_guard<std::mutex> lk(aoip_mu_);
+                if (aoip_provider_) {
+                    const AoipAnnounce a = aoip_provider_();
+                    if (a.enabled) reply += "|" + encode_aoip_field(a);
+                }
+            }
+            reply += "|" + sanitize_field(nonce);
             ::sendto(s, reply.data(), int(reply.size()), 0,
                      reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
         }
@@ -296,7 +352,7 @@ std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discover
     bool resent = false;
     std::set<std::string> seen;
 
-    char buf[512];
+    char buf[1024];
     const uint64_t deadline = t_start + uint64_t(timeout_ms) * 1000ull;
     while (now_us() < deadline) {
         if (!resent && now_us() >= t_start + uint64_t(timeout_ms) * 500ull) {
@@ -345,6 +401,9 @@ std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discover
         r.simd = parts[2];
         r.device_name = parts[3];
         r.rtt_ms = uint32_t((now_us() - t_start) / 1000ull);
+        for (size_t k = 4; k + 1 < parts.size(); ++k) {  // optional fields sit between name and nonce
+            if (decode_aoip_field(parts[k], r)) break;
+        }
         out.push_back(std::move(r));
     }
 

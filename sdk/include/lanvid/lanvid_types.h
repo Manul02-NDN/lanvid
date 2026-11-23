@@ -238,6 +238,63 @@ typedef struct LV_DiscoveredPeer {
     char simd[32];
 } LV_DiscoveredPeer;
 
+/* ---- Full-duplex 64x64 AoIP transceiver (virtual device <-> peer node) ---- */
+typedef enum LV_AudioDirection {
+    LV_AUDIO_DIR_TX = 0, /* DAW outputs -> network (LanVidAudioBus_v1 TX ring)  */
+    LV_AUDIO_DIR_RX = 1  /* network -> DAW inputs  (LanVidAudioBus_v1 RX ring)  */
+} LV_AudioDirection;
+
+typedef struct LV_DuplexConfig {
+    char peer_host[64];       /* node we send our 64 channels to */
+    uint16_t peer_port;       /* its listen port (default 5004) */
+    uint16_t listen_port;     /* where we receive the peer's 64 channels (default 5005) */
+    char bind_ip[64];         /* default "0.0.0.0" */
+    uint32_t latency_ms;      /* 2..2000 (default 20) */
+    int32_t sample_rate;      /* 48000 / 96000 */
+    int32_t num_channels;     /* 1..64 (default 64) */
+    uint16_t discovery_port;  /* default 5099 */
+    uint16_t reserved;
+    int32_t enable_discovery; /* 1 = announce this node as an AoIP node on the LAN */
+    char device_name[128];    /* friendly name in discovery (default: host name) */
+    char bus_name[64];        /* shared-memory bus (default "LanVidAudioBus_v1") */
+} LV_DuplexConfig;
+
+typedef struct LV_DuplexStats {
+    int32_t running;
+    int32_t driver_connected;     /* a DAW has the virtual device open */
+    char driver_name[32];
+    uint32_t sample_rate;
+    uint32_t buffer_size;
+    /* peer -> us: measured locally (own MasterClock + RTT, independent of the TX direction) */
+    int32_t rx_clock_synced;
+    uint32_t rx_rtt_us;
+    double rx_clock_skew_ppm;
+    uint64_t rx_packets;
+    uint64_t rx_lost;
+    uint64_t rx_frames_to_daw;
+    uint64_t rx_underruns;
+    /* us -> peer (the peer measures this direction's clock/RTT on its side) */
+    uint64_t tx_packets;
+    uint64_t tx_frames_from_daw;
+    uint64_t tx_overruns;
+    uint64_t tx_pongs_sent;       /* clock-sync answers given to the peer's receiver */
+} LV_DuplexStats;
+
+/* Discovered AoIP node (LAN discovery, port 5099). */
+typedef struct LV_AudioNode {
+    char ip[64];
+    char name[128];
+    char hostname[128];
+    char audio_driver[32];        /* "CoreAudio HAL" / "ASIO" / "JACK/PipeWire" / "" */
+    uint16_t rx_port;             /* send to this port to reach the node */
+    uint16_t tx_port;
+    uint16_t channels;
+    uint8_t duplex;
+    uint8_t driver_connected;
+    uint32_t rtt_ms;
+    char os[32];
+} LV_AudioNode;
+
 /* Returns human-readable static string describing an LV_ErrorCode. */
 LV_API const char* lv_error_string(int err);
 

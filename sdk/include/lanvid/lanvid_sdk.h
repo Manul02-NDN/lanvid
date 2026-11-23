@@ -166,6 +166,32 @@ LV_API void lv_receiver_set_concealment(LvReceiverHandle* handle, int mode);
 LV_API int lv_receiver_save_screenshot(LvReceiverHandle* handle, const char* ppm_path);
 LV_API int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out);
 
+/* ---- Full-duplex 64x64 AoIP transceiver (desktop builds with the virtual device bridge) ----
+ * Reads the DAW outputs from the LanVidAudioBus_v1 TX ring and streams them to peer_host:peer_port,
+ * while receiving the peer's channels on listen_port, aligning them with the AudioSyncMatrix /
+ * MasterClock, and writing them to the RX ring (DAW inputs). TX and RX run on separate threads. */
+typedef struct LvDuplexHandle LvDuplexHandle;
+LV_API void lv_duplex_config_default(LV_DuplexConfig* cfg);
+LV_API LvDuplexHandle* lv_duplex_create(void);
+LV_API void lv_duplex_destroy(LvDuplexHandle* handle);
+LV_API int lv_duplex_start(LvDuplexHandle* handle, const LV_DuplexConfig* cfg);
+LV_API void lv_duplex_stop(LvDuplexHandle* handle);
+LV_API int lv_duplex_get_stats(LvDuplexHandle* handle, LV_DuplexStats* out);
+LV_API int lv_duplex_set_latency_ms(LvDuplexHandle* handle, uint32_t latency_ms);
+
+/* 64x64 patchbay of the duplex bridge, live (5 ms crossfade). dst_of_src[s] = destination channel
+ * (0..63) of source channel s, or -1 for unrouted; NULL resets to 1:1. */
+LV_API int lv_audio_set_tx_routing(LvDuplexHandle* handle, const int8_t dst_of_src[64]);
+LV_API int lv_audio_set_rx_routing(LvDuplexHandle* handle, const int8_t dst_of_src[64]);
+LV_API int lv_audio_get_routing(LvDuplexHandle* handle, LV_AudioDirection dir, int8_t dst_of_src[64]);
+/* Mute / Solo of a SOURCE channel (pre-routing) with a 5 ms gain ramp. mute/solo: 0/1, -1 = keep. */
+LV_API int lv_audio_set_channel_mute_solo(LvDuplexHandle* handle, LV_AudioDirection dir, uint16_t channel,
+                                          int mute, int solo);
+
+/* Scans for AoIP nodes (duplex transceivers and receivers announcing the bus). Returns count >= 0. */
+LV_API int lv_discovery_scan_audio_nodes(int timeout_ms, uint16_t discovery_port, LV_AudioNode* out_nodes,
+                                         int max_nodes);
+
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active receivers and populates `out_peers` (up to `max_peers`).
  * Returns number of discovered peers (>= 0). Pass discovery_port=0 for default (5099). */

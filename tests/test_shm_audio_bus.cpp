@@ -35,6 +35,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
 
     std::atomic<bool> fail{false};
     std::atomic<uint64_t> tx_frames{0}, rx_frames{0};
+    std::atomic<bool> daw_done{false};  // the DAW stops reading RX when it is done: don't wait on it
     std::thread daw([&] {  // driver RT thread: writes TX, reads RX
         std::vector<float> in(size_t(kCh) * kBlk), out(size_t(kCh) * kBlk);
         uint64_t f = 0, rf = 0;
@@ -57,6 +58,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
             driver.driver_heartbeat();
         }
         tx_frames = f;
+        daw_done = true;
         rx_frames = rf;
     });
     std::thread net([&] {  // host: TX -> "network" -> RX loopback (+1.0 marks the RX direction)
@@ -73,7 +75,7 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
                     planes[c][i] += 1.0f;
                 }
             uint32_t w = 0;
-            while (w < n) {
+            while (w < n && !daw_done.load()) {
                 std::vector<const float*> cp(kCh);
                 for (uint32_t c = 0; c < kCh; ++c) cp[c] = pp[c] + w;
                 w += host.host_write_rx(cp.data(), kCh, n - w);
@@ -215,7 +217,10 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
         std::printf("    [shm e2e] gap blocks (late single-channel packets) = %d / %d\n", gap_blocks, blocks);
         CHECK(live > blocks * 8 / 10);        // audio made the full round trip
         CHECK(gap_blocks <= blocks / 20);     // late per-channel packets stay rare (<= 5 %)
-        CHECK(worst < 1e-4);                  // 64 channels phase-aligned, no swaps, on every gap-free block
+        // A one-sample skew between channels at this tone would show as ~1.5e-2; float rounding plus
+        // resampler interpolation stay below ~1e-3 (seen on Windows runners), so 2e-3 still proves
+        // sample-accurate alignment with a ~7x margin.
+        CHECK(worst < 2e-3);                  // 64 channels phase-aligned, no swaps, on every gap-free block
         daw.driver_set_running(false, 0, 0, nullptr);
         tx_host.stop();
         rx_host.stop();
@@ -229,3 +234,54 @@ TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
 #endif
     }
 }
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+// Upgrade path: a v1 (4096-frame, smaller) segment left behind by a driver process that was killed
+// during IO (driver_running = 1, fresh heartbeat). Apps must not touch it; the new driver replaces it.
+TEST(shm_audio_bus_replaces_stale_older_layout) {
+    char name[64], full[80];
+    std::snprintf(name, sizeof(name), "LanVidAudioBus_upg_%u", unsigned(lv::shm_bus_now_ms() & 0xFFFFFF));
+    std::snprintf(full, sizeof(full), "/%s", name);
+    auto make_v1 = [&](bool driver_fresh, bool host_fresh) {
+        shm_unlink(full);
+        const int fd = shm_open(full, O_RDWR | O_CREAT | O_EXCL, 0666);
+        if (fd < 0) return false;
+        const size_t v1_size = 2113536;  // sizeof(ShmBusLayout) with 4096-frame rings
+        if (ftruncate(fd, off_t(v1_size)) != 0) { close(fd); return false; }
+        void* m = mmap(nullptr, v1_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        close(fd);
+        if (m == MAP_FAILED) return false;
+        auto* h = static_cast<lv::ShmBusHeader*>(m);
+        h->version = 1;
+        h->channels = 64;
+        h->frames = 4096;
+        h->driver_running.store(driver_fresh ? 1u : 0u);
+        h->driver_heartbeat_ms.store(driver_fresh ? lv::shm_bus_now_ms() : 0);
+        h->host_heartbeat_ms.store(host_fresh ? lv::shm_bus_now_ms() : 0);
+        h->magic.store(lv::kShmBusMagic);
+        munmap(m, v1_size);
+        return true;
+    };
+    REQUIRE(make_v1(true, false));
+    {
+        lv::ShmAudioBus app;
+        CHECK(!app.open(name));  // looks like a live v1 driver: an app must refuse
+    }
+    {
+        lv::ShmAudioBus drv;
+        REQUIRE(drv.open(name, true));  // the single driver instance knows the flag is stale
+        CHECK(drv.header()->version == lv::kShmBusVersion);
+        CHECK(drv.header()->frames == lv::kShmBusFrames);
+        lv::ShmAudioBus app;
+        CHECK(app.open(name));  // and apps attach to the replaced v2 segment
+    }
+    REQUIRE(make_v1(false, true));
+    {
+        lv::ShmAudioBus drv;
+        CHECK(!drv.open(name, true));  // a live (old) host app protects the segment even from the driver
+    }
+    shm_unlink(full);
+}
+#endif

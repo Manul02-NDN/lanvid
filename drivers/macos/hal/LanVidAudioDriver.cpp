@@ -97,7 +97,7 @@ ULONG Release(void*) {
 OSStatus Initialize(AudioServerPlugInDriverRef, AudioServerPlugInHostRef host) {
     g_host = host;
     g_ticks_per_frame.store(host_ticks_per_second() / g_rate.load());
-    g_bus.open();  // creates LanVidAudioBus_v1 if LanVid Studio is not running yet
+    g_bus.open(nullptr, true);  // creates LanVidAudioBus_v1 if LanVid Studio is not running yet
     return kAudioHardwareNoError;
 }
 
@@ -359,7 +359,7 @@ OSStatus StartIO(AudioServerPlugInDriverRef, AudioObjectID dev, UInt32) {
     if (dev != kObjDevice) return kAudioHardwareBadObjectError;
     if (g_io_count.fetch_add(1) == 0) {
         g_anchor_host.store(mach_absolute_time());
-        g_bus.open();
+        g_bus.open(nullptr, true);
         g_bus.driver_set_running(true, UInt32(g_rate.load()), g_buffer_frames.load(), "CoreAudio HAL");
     }
     return kAudioHardwareNoError;
