@@ -25,6 +25,7 @@ enum class PacketType : uint8_t {
     kPong = 0x5,
     kAudio2 = 0x6,     // AudioHeader v2: independent per-channel stream (up to 64), media-clock timestamps
     kAudioNack = 0x7,  // Receiver -> Sender selective retransmission request (bitmask of missing seq)
+    kMidiFrame = 0x8,  // MIDI2: sample-accurate MIDI batch synced to MasterClock + 16-event redundancy ring
 };
 
 enum class VideoCodecId : uint8_t {
@@ -198,6 +199,45 @@ struct AudioNack {
 };
 void write_audio_nack(uint8_t* out, const AudioNack& n);
 bool parse_audio_nack(const uint8_t* in, size_t len, AudioNack& n);
+
+// ---------------------------------------------------------------------------------------------
+// LVSP MIDI v2 (PacketType::kMidiFrame): sample-accurate MIDI over IP synced to MasterClock.
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kMidiFrameHeaderSize = 20;
+constexpr size_t kMidiEventPacketSize = 12;
+constexpr uint8_t kMaxMidiPorts = 16;
+constexpr uint16_t kMaxMidiEventsPerPacket = 64;
+
+enum MidiFlags2 : uint16_t {
+    kMidiFlagRedundant = 0x0001,  // carries recent history events for zero-stuck-note Wi-Fi recovery
+    kMidiFlagHeartbeat = 0x0002,  // periodic heartbeat carrying recent events (prevents stuck Note Off)
+};
+
+// 20-byte header (little-endian):
+//  0 stream_id u32 | 4 batch_seq u32 | 8 base_media_ts_us u64 | 16 event_count u16 | 18 flags u16
+struct MidiFrameHeader {
+    uint32_t stream_id = 0;
+    uint32_t batch_seq = 0;
+    uint64_t base_media_ts_us = 0;
+    uint16_t event_count = 0;
+    uint16_t flags = 0;
+};
+
+// 12-byte event (little-endian):
+//  0 event_seq u32 | 4 offset_us i32 | 8 status u8 | 9 data1 u8 | 10 data2 u8 | 11 port_index u8
+struct MidiEventPacket {
+    uint32_t event_seq = 0;
+    int32_t offset_us = 0;
+    uint8_t status = 0;
+    uint8_t data1 = 0;
+    uint8_t data2 = 0;
+    uint8_t port_index = 0;  // 0..15
+};
+
+size_t write_midi_frame(uint8_t* out, size_t cap, const MidiFrameHeader& hdr,
+                        const MidiEventPacket* events, uint16_t count);
+bool parse_midi_frame(const uint8_t* in, size_t len, MidiFrameHeader& hdr,
+                      MidiEventPacket* out_events, uint16_t max_events);
 
 // Extended PONG tail (16 bytes, optional after the 12-byte PingPongPayload): sender master clock.
 // t2/t3 are the sender's *master clock* microseconds (64-bit, since the sender's epoch).

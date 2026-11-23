@@ -63,6 +63,8 @@ struct AppConfig {
     bool matrix_feedback_guard = true;
     std::vector<MatrixSlotConfig> matrix_slots;
     std::vector<MatrixCrosspoint> matrix_crosspoints;
+    std::vector<MidiSlotConfig> midi_slots;
+    std::vector<MidiCrosspoint> midi_crosspoints;
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\config.json or ~/.config/lanvid/config.json).

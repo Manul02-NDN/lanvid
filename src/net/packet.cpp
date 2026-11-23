@@ -187,6 +187,55 @@ bool parse_audio_nack(const uint8_t* in, size_t len, AudioNack& n) {
     return n.stream_id < kMaxAudioChannels && n.mask != 0;
 }
 
+size_t write_midi_frame(uint8_t* out, size_t cap, const MidiFrameHeader& hdr,
+                        const MidiEventPacket* events, uint16_t count) {
+    if (!out || count > kMaxMidiEventsPerPacket) return 0;
+    const size_t total = kMidiFrameHeaderSize + size_t(count) * kMidiEventPacketSize;
+    if (cap < total) return 0;
+    store_le32(out + 0, hdr.stream_id);
+    store_le32(out + 4, hdr.batch_seq);
+    store_le64(out + 8, hdr.base_media_ts_us);
+    store_le16(out + 16, count);
+    store_le16(out + 18, hdr.flags);
+    for (uint16_t i = 0; i < count; ++i) {
+        uint8_t* ep = out + kMidiFrameHeaderSize + size_t(i) * kMidiEventPacketSize;
+        store_le32(ep + 0, events[i].event_seq);
+        store_le32(ep + 4, uint32_t(events[i].offset_us));
+        ep[8] = events[i].status;
+        ep[9] = events[i].data1;
+        ep[10] = events[i].data2;
+        ep[11] = events[i].port_index;
+    }
+    return total;
+}
+
+bool parse_midi_frame(const uint8_t* in, size_t len, MidiFrameHeader& hdr,
+                      MidiEventPacket* out_events, uint16_t max_events) {
+    if (!in || len < kMidiFrameHeaderSize) return false;
+    hdr.stream_id = load_le32(in + 0);
+    hdr.batch_seq = load_le32(in + 4);
+    hdr.base_media_ts_us = load_le64(in + 8);
+    hdr.event_count = load_le16(in + 16);
+    hdr.flags = load_le16(in + 18);
+    if (hdr.event_count > kMaxMidiEventsPerPacket) return false;
+    const size_t need = kMidiFrameHeaderSize + size_t(hdr.event_count) * kMidiEventPacketSize;
+    if (len < need) return false;
+    if (out_events) {
+        const uint16_t n = hdr.event_count < max_events ? hdr.event_count : max_events;
+        for (uint16_t i = 0; i < n; ++i) {
+            const uint8_t* ep = in + kMidiFrameHeaderSize + size_t(i) * kMidiEventPacketSize;
+            out_events[i].event_seq = load_le32(ep + 0);
+            out_events[i].offset_us = int32_t(load_le32(ep + 4));
+            out_events[i].status = ep[8];
+            out_events[i].data1 = ep[9];
+            out_events[i].data2 = ep[10];
+            out_events[i].port_index = ep[11];
+            if (out_events[i].port_index >= kMaxMidiPorts) return false;
+        }
+    }
+    return true;
+}
+
 void write_pong_master_tail(uint8_t* out, uint64_t t2_master_us, uint64_t t3_master_us) {
     store_le64(out + 0, t2_master_us);
     store_le64(out + 8, t3_master_us);

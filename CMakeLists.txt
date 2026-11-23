@@ -87,6 +87,8 @@ set(LV_CORE_SOURCES
   src/core/lanvid_c_api.cpp
   src/audio/channel_patchbay.cpp
   src/audio/multi_device_matrix.cpp
+  src/midi/midi_sync_engine.cpp
+  src/midi/midi_device_manager.cpp
 )
 
 # Desktop-only: LanVidAudioBus_v1 shared-memory bridge to the OS virtual audio devices
@@ -189,6 +191,7 @@ else()
       "-framework CoreMedia"
       "-framework CoreVideo"
       "-framework CoreFoundation"
+      "-framework CoreMIDI"
     )
     set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation")
     if(NOT IOS)  # CoreAudio HAL: System Audio slots of the Multi-Device Audio Matrix
@@ -409,6 +412,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_audio_duplex.cpp
     tests/test_multi_device_matrix.cpp
     tests/test_coreaudio_matrix.cpp
+    tests/test_midi_sync.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

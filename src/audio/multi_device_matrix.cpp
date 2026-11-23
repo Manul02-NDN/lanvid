@@ -9,6 +9,7 @@
 
 #include "common/clock.hpp"
 #include "audio/stream_resampler.hpp"
+#include "midi/midi_device_manager.hpp"
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -955,9 +956,21 @@ struct MultiDeviceAudioMatrix::Impl {
 #endif
     };
 
+    struct MidiSlotState {
+        bool used = false;
+        MidiSlotConfig cfg{};
+        std::unique_ptr<MidiInputPort> in_port;
+        std::unique_ptr<MidiOutputPort> out_port;
+        std::atomic<uint64_t> events_count{0};
+        std::atomic<uint64_t> last_activity_us{0};
+    };
+
     mutable std::mutex mu;
     std::array<SlotState, kMatrixMaxSlots> slots{};
     std::vector<MatrixCrosspoint> crosspoints;
+    std::array<MidiSlotState, kMatrixMaxMidiSlots> midi_slots{};
+    std::vector<MidiCrosspoint> midi_crosspoints;
+    MidiOutSinkFn midi_sink;
     bool feedback_guard = true;
     int buffer_size = 256;
 
@@ -1458,6 +1471,241 @@ uint32_t MultiDeviceAudioMatrix::extract_slot_output(int slot_id, float* const* 
 
 void MultiDeviceAudioMatrix::process_block_sync(uint32_t frames) {
     impl_->process_block(frames);
+}
+
+// ---------------------------------------------------------------- MIDI Slots & Crosspoint Routing
+
+int MultiDeviceAudioMatrix::add_midi_slot(const MidiSlotConfig& cfg) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    int target = -1;
+    if (cfg.id >= 0 && cfg.id < kMatrixMaxMidiSlots && !impl_->midi_slots[cfg.id].used) {
+        target = cfg.id;
+    } else {
+        for (int i = 0; i < kMatrixMaxMidiSlots; ++i) {
+            if (!impl_->midi_slots[i].used) { target = i; break; }
+        }
+    }
+    if (target < 0) return -1;
+    auto& st = impl_->midi_slots[target];
+    st.used = true;
+    st.cfg = cfg;
+    st.cfg.id = target;
+    st.cfg.port_index = cfg.port_index < 16 ? cfg.port_index : uint8_t(target & 0x0F);
+    st.events_count.store(0, std::memory_order_relaxed);
+    st.last_activity_us.store(0, std::memory_order_relaxed);
+    if (st.cfg.active) {
+        if (st.cfg.type == MidiSlotType::kMidiInput) {
+            st.in_port = std::make_unique<MidiInputPort>();
+            st.in_port->open(st.cfg.device_index, st.cfg.device_name,
+                             [this, target](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                                 inject_midi_event(target, s, d1, d2, ts);
+                             });
+        } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
+            st.out_port = std::make_unique<MidiOutputPort>();
+            st.out_port->open(st.cfg.device_index, st.cfg.device_name);
+        }
+    }
+    return target;
+}
+
+bool MultiDeviceAudioMatrix::update_midi_slot(int slot_id, const MidiSlotConfig& cfg) {
+    if (slot_id < 0 || slot_id >= kMatrixMaxMidiSlots) return false;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    auto& st = impl_->midi_slots[slot_id];
+    if (!st.used) return false;
+    st.in_port.reset();
+    st.out_port.reset();
+    st.cfg = cfg;
+    st.cfg.id = slot_id;
+    if (st.cfg.active) {
+        if (st.cfg.type == MidiSlotType::kMidiInput) {
+            st.in_port = std::make_unique<MidiInputPort>();
+            st.in_port->open(st.cfg.device_index, st.cfg.device_name,
+                             [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                                 inject_midi_event(slot_id, s, d1, d2, ts);
+                             });
+        } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
+            st.out_port = std::make_unique<MidiOutputPort>();
+            st.out_port->open(st.cfg.device_index, st.cfg.device_name);
+        }
+    }
+    return true;
+}
+
+bool MultiDeviceAudioMatrix::remove_midi_slot(int slot_id) {
+    if (slot_id < 0 || slot_id >= kMatrixMaxMidiSlots) return false;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    auto& st = impl_->midi_slots[slot_id];
+    if (!st.used) return false;
+    st.in_port.reset();
+    st.out_port.reset();
+    st.used = false;
+    auto& cps = impl_->midi_crosspoints;
+    cps.erase(std::remove_if(cps.begin(), cps.end(), [slot_id](const MidiCrosspoint& c) {
+                  return c.src_slot == slot_id || c.dst_slot == slot_id;
+              }),
+              cps.end());
+    return true;
+}
+
+void MultiDeviceAudioMatrix::clear_midi_slots() {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    for (auto& st : impl_->midi_slots) {
+        st.in_port.reset();
+        st.out_port.reset();
+        st.used = false;
+    }
+    impl_->midi_crosspoints.clear();
+}
+
+std::vector<MidiSlotConfig> MultiDeviceAudioMatrix::midi_slots() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    std::vector<MidiSlotConfig> out;
+    for (const auto& st : impl_->midi_slots) {
+        if (st.used) out.push_back(st.cfg);
+    }
+    return out;
+}
+
+bool MultiDeviceAudioMatrix::set_midi_crosspoint(int src_slot, int dst_slot, int channel_filter, bool mute) {
+    if (src_slot < 0 || src_slot >= kMatrixMaxMidiSlots || dst_slot < 0 || dst_slot >= kMatrixMaxMidiSlots ||
+        src_slot == dst_slot) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    if (!impl_->midi_slots[src_slot].used || !impl_->midi_slots[dst_slot].used) return false;
+    channel_filter = std::clamp(channel_filter, 0, 16);
+    for (auto& c : impl_->midi_crosspoints) {
+        if (c.src_slot == src_slot && c.dst_slot == dst_slot) {
+            c.channel_filter = channel_filter;
+            c.mute = mute;
+            return true;
+        }
+    }
+    impl_->midi_crosspoints.push_back({src_slot, dst_slot, channel_filter, mute});
+    return true;
+}
+
+bool MultiDeviceAudioMatrix::remove_midi_crosspoint(int src_slot, int dst_slot) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    auto& cps = impl_->midi_crosspoints;
+    const size_t before = cps.size();
+    cps.erase(std::remove_if(cps.begin(), cps.end(), [&](const MidiCrosspoint& c) {
+                  return c.src_slot == src_slot && c.dst_slot == dst_slot;
+              }),
+              cps.end());
+    return cps.size() != before;
+}
+
+bool MultiDeviceAudioMatrix::has_midi_crosspoint(int src_slot, int dst_slot, MidiCrosspoint* out) const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    for (const auto& c : impl_->midi_crosspoints) {
+        if (c.src_slot == src_slot && c.dst_slot == dst_slot) {
+            if (out) *out = c;
+            return true;
+        }
+    }
+    return false;
+}
+
+void MultiDeviceAudioMatrix::clear_midi_crosspoints() {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->midi_crosspoints.clear();
+}
+
+std::vector<MidiCrosspoint> MultiDeviceAudioMatrix::midi_crosspoints() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->midi_crosspoints;
+}
+
+void MultiDeviceAudioMatrix::set_midi_sink(MidiOutSinkFn sink) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->midi_sink = std::move(sink);
+}
+
+void MultiDeviceAudioMatrix::inject_midi_event(int src_slot_id, uint8_t status, uint8_t d1, uint8_t d2,
+                                               uint64_t ts_us) {
+    if (src_slot_id < 0 || src_slot_id >= kMatrixMaxMidiSlots) return;
+    const uint64_t act_now = now_us();
+    std::vector<std::pair<int, uint8_t>> targets;
+    MidiOutSinkFn sink;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        auto& src = impl_->midi_slots[src_slot_id];
+        if (!src.used || !src.cfg.active) return;
+        src.events_count.fetch_add(1, std::memory_order_relaxed);
+        src.last_activity_us.store(act_now, std::memory_order_relaxed);
+        sink = impl_->midi_sink;
+
+        const bool is_channel_msg = (status >= 0x80u && status < 0xF0u);
+        const int midi_ch = is_channel_msg ? int((status & 0x0Fu) + 1) : 0;
+
+        for (const auto& cp : impl_->midi_crosspoints) {
+            if (cp.mute || cp.src_slot != src_slot_id) continue;
+            if (cp.channel_filter > 0 && is_channel_msg && midi_ch != cp.channel_filter) continue;
+            auto& dst = impl_->midi_slots[cp.dst_slot];
+            if (!dst.used || !dst.cfg.active) continue;
+            if (dst.out_port && dst.out_port->is_open()) {
+                dst.out_port->send_short(status, d1, d2);
+            }
+            dst.events_count.fetch_add(1, std::memory_order_relaxed);
+            dst.last_activity_us.store(act_now, std::memory_order_relaxed);
+            targets.emplace_back(cp.dst_slot, dst.cfg.port_index);
+        }
+    }
+    if (sink) {
+        for (const auto& t : targets) {
+            sink(t.first, status, d1, d2, t.second, ts_us);
+        }
+    }
+}
+
+void MultiDeviceAudioMatrix::send_midi_panic(int slot_id) {
+    const uint64_t act_now = now_us();
+    MidiOutSinkFn sink;
+    std::vector<std::pair<int, uint8_t>> targets;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        sink = impl_->midi_sink;
+        for (int i = 0; i < kMatrixMaxMidiSlots; ++i) {
+            if (slot_id >= 0 && i != slot_id) continue;
+            auto& st = impl_->midi_slots[i];
+            if (!st.used || !st.cfg.active) continue;
+            if (st.cfg.type == MidiSlotType::kMidiOutput || st.cfg.type == MidiSlotType::kNetworkMidiTx) {
+                if (st.out_port && st.out_port->is_open()) st.out_port->send_panic();
+                st.last_activity_us.store(act_now, std::memory_order_relaxed);
+                targets.emplace_back(i, st.cfg.port_index);
+            }
+        }
+    }
+    if (sink) {
+        for (const auto& t : targets) {
+            for (uint8_t ch = 0; ch < 16; ++ch) {
+                sink(t.first, uint8_t(0xB0u | ch), 123, 0, t.second, act_now);
+                sink(t.first, uint8_t(0xB0u | ch), 120, 0, t.second, act_now);
+            }
+        }
+    }
+}
+
+MidiSlotRuntimeStatus MultiDeviceAudioMatrix::midi_slot_status(int slot_id) const {
+    MidiSlotRuntimeStatus out{};
+    if (slot_id < 0 || slot_id >= kMatrixMaxMidiSlots) return out;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    const auto& st = impl_->midi_slots[slot_id];
+    out.id = slot_id;
+    out.active = st.used && st.cfg.active;
+    out.events_count = st.events_count.load(std::memory_order_relaxed);
+    out.last_activity_us = st.last_activity_us.load(std::memory_order_relaxed);
+    if (!st.used) return out;
+    if (st.cfg.type == MidiSlotType::kMidiInput) {
+        out.connected = st.in_port && st.in_port->is_open();
+    } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
+        out.connected = st.out_port && st.out_port->is_open();
+    } else {
+        out.connected = st.cfg.active;
+    }
+    return out;
 }
 
 }  // namespace lv

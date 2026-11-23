@@ -21,8 +21,41 @@
 namespace lv {
 
 constexpr int kMatrixMaxSlots = 8;
+constexpr int kMatrixMaxMidiSlots = 16;
 constexpr int kMatrixMaxChannels = 64;
 constexpr uint32_t kMatrixSampleRate = 48000;
+
+enum class MidiSlotType : int {
+    kMidiInput = 0,     // OS physical/virtual MIDI input (keyboard, e-drums, controller)
+    kMidiOutput = 1,    // OS physical/virtual MIDI output (DAW, hardware synth)
+    kNetworkMidiTx = 2, // MIDI2 over IP outgoing bus
+    kNetworkMidiRx = 3  // MIDI2 over IP incoming bus
+};
+
+struct MidiSlotConfig {
+    int id = -1;  // 0..kMatrixMaxMidiSlots-1
+    MidiSlotType type = MidiSlotType::kMidiInput;
+    std::string name;
+    std::string device_name;
+    int device_index = -1;
+    uint8_t port_index = 0;  // 0..15 for MIDI2 wire port_index
+    bool active = true;
+};
+
+struct MidiCrosspoint {
+    int src_slot = 0;
+    int dst_slot = 0;
+    int channel_filter = 0;  // 0 = All channels, 1..16 = only MIDI channel 1..16
+    bool mute = false;
+};
+
+struct MidiSlotRuntimeStatus {
+    int id = 0;
+    bool active = false;
+    bool connected = false;
+    uint64_t events_count = 0;
+    uint64_t last_activity_us = 0;  // for blinking MIDI ACTIVITY LED in GUI
+};
 
 enum class MatrixSlotType : int {
     kVirtualBus = 0,   // LanVidAudioBus_v1 SHM v2 (DAW 64ch)
@@ -157,6 +190,28 @@ public:
     uint32_t extract_slot_output(int slot_id, float* const* planes, uint32_t channels, uint32_t frames);
     // Runs one deterministic mixing block synchronously (does not require start()).
     void process_block_sync(uint32_t frames);
+
+    // ---- MIDI Slots & Routing (up to 16 MIDI devices, many-to-1 merge & 1-to-many split) ----
+    using MidiOutSinkFn = std::function<void(int dst_slot_id, uint8_t status, uint8_t d1, uint8_t d2,
+                                             uint8_t port_index, uint64_t ts_us)>;
+    int add_midi_slot(const MidiSlotConfig& cfg);
+    bool update_midi_slot(int slot_id, const MidiSlotConfig& cfg);
+    bool remove_midi_slot(int slot_id);
+    void clear_midi_slots();
+    std::vector<MidiSlotConfig> midi_slots() const;
+
+    bool set_midi_crosspoint(int src_slot, int dst_slot, int channel_filter = 0, bool mute = false);
+    bool remove_midi_crosspoint(int src_slot, int dst_slot);
+    bool has_midi_crosspoint(int src_slot, int dst_slot, MidiCrosspoint* out = nullptr) const;
+    void clear_midi_crosspoints();
+    std::vector<MidiCrosspoint> midi_crosspoints() const;
+
+    void set_midi_sink(MidiOutSinkFn sink);
+    // Injects an incoming MIDI event into `src_slot_id` and routes it through all active MIDI crosspoints.
+    void inject_midi_event(int src_slot_id, uint8_t status, uint8_t d1, uint8_t d2, uint64_t ts_us);
+    // Sends CC 123 (All Notes Off) + CC 120 (All Sound Off) on all 16 channels to `slot_id` (or all if -1).
+    void send_midi_panic(int slot_id = -1);
+    MidiSlotRuntimeStatus midi_slot_status(int slot_id) const;
 
 private:
     struct Impl;

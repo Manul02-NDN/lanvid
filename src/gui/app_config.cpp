@@ -162,6 +162,62 @@ void deserialize_matrix_crosspoints(const std::string& raw, std::vector<MatrixCr
     }
 }
 
+std::string serialize_midi_slots(const std::vector<MidiSlotConfig>& slots) {
+    std::ostringstream os;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (i) os << ";";
+        const auto& s = slots[i];
+        os << s.id << "|" << int(s.type) << "|" << int(s.port_index) << "|" << (s.active ? 1 : 0) << "|"
+           << s.device_index << "|" << sanitize_pipe(s.name) << "|" << sanitize_pipe(s.device_name);
+    }
+    return os.str();
+}
+
+void deserialize_midi_slots(const std::string& raw, std::vector<MidiSlotConfig>& out) {
+    out.clear();
+    if (raw.empty()) return;
+    for (const auto& entry : split_char(raw, ';')) {
+        if (entry.empty()) continue;
+        const auto parts = split_char(entry, '|');
+        if (parts.size() < 7) continue;
+        MidiSlotConfig s{};
+        s.id = std::clamp(std::atoi(parts[0].c_str()), 0, kMatrixMaxMidiSlots - 1);
+        s.type = static_cast<MidiSlotType>(std::clamp(std::atoi(parts[1].c_str()), 0, 3));
+        s.port_index = uint8_t(std::clamp(std::atoi(parts[2].c_str()), 0, 15));
+        s.active = std::atoi(parts[3].c_str()) != 0;
+        s.device_index = std::atoi(parts[4].c_str());
+        s.name = parts[5];
+        s.device_name = parts[6];
+        out.push_back(std::move(s));
+    }
+}
+
+std::string serialize_midi_crosspoints(const std::vector<MidiCrosspoint>& cps) {
+    std::ostringstream os;
+    for (size_t i = 0; i < cps.size(); ++i) {
+        if (i) os << ";";
+        const auto& c = cps[i];
+        os << c.src_slot << "|" << c.dst_slot << "|" << c.channel_filter << "|" << (c.mute ? 1 : 0);
+    }
+    return os.str();
+}
+
+void deserialize_midi_crosspoints(const std::string& raw, std::vector<MidiCrosspoint>& out) {
+    out.clear();
+    if (raw.empty()) return;
+    for (const auto& entry : split_char(raw, ';')) {
+        if (entry.empty()) continue;
+        const auto parts = split_char(entry, '|');
+        if (parts.size() < 4) continue;
+        MidiCrosspoint c{};
+        c.src_slot = std::clamp(std::atoi(parts[0].c_str()), 0, kMatrixMaxMidiSlots - 1);
+        c.dst_slot = std::clamp(std::atoi(parts[1].c_str()), 0, kMatrixMaxMidiSlots - 1);
+        c.channel_filter = std::clamp(std::atoi(parts[2].c_str()), 0, 16);
+        c.mute = std::atoi(parts[3].c_str()) != 0;
+        out.push_back(c);
+    }
+}
+
 }  // namespace
 
 std::string config_file_path() {
@@ -233,11 +289,15 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "matrix_buffer_size", cfg.matrix_buffer_size);
     read_bool(j, "matrix_feedback_guard", cfg.matrix_feedback_guard);
     {
-        std::string raw_slots, raw_cps;
+        std::string raw_slots, raw_cps, raw_mslots, raw_mcps;
         read_str(j, "matrix_slots", raw_slots);
         read_str(j, "matrix_crosspoints", raw_cps);
+        read_str(j, "midi_slots", raw_mslots);
+        read_str(j, "midi_crosspoints", raw_mcps);
         deserialize_matrix_slots(raw_slots, cfg.matrix_slots);
         deserialize_matrix_crosspoints(raw_cps, cfg.matrix_crosspoints);
+        deserialize_midi_slots(raw_mslots, cfg.midi_slots);
+        deserialize_midi_crosspoints(raw_mcps, cfg.midi_crosspoints);
     }
 
     cfg.dest_port = std::clamp(cfg.dest_port, 1024, 65535);
@@ -311,7 +371,9 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"matrix_buffer_size\": " << cfg.matrix_buffer_size << ",\n"
         << "  \"matrix_feedback_guard\": " << (cfg.matrix_feedback_guard ? "true" : "false") << ",\n"
         << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"
-        << "  \"matrix_crosspoints\": \"" << json_esc(serialize_matrix_crosspoints(cfg.matrix_crosspoints)) << "\"\n"
+        << "  \"matrix_crosspoints\": \"" << json_esc(serialize_matrix_crosspoints(cfg.matrix_crosspoints)) << "\",\n"
+        << "  \"midi_slots\": \"" << json_esc(serialize_midi_slots(cfg.midi_slots)) << "\",\n"
+        << "  \"midi_crosspoints\": \"" << json_esc(serialize_midi_crosspoints(cfg.midi_crosspoints)) << "\"\n"
         << "}\n";
     return out.good();
 }

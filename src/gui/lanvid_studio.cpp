@@ -196,6 +196,8 @@ void LanVidStudioApp::refresh_devices() {
     loop_devs_ = list_audio_devices(true);
     mic_devs_ = list_audio_devices(false);
     asio_devs_ = list_external_asio_drivers(true);
+    midi_in_devs_ = list_midi_inputs();
+    midi_out_devs_ = list_midi_outputs();
     sys_out_devs_ = list_system_audio_devices(true);   // macOS CoreAudio (empty on Windows/Linux)
     sys_in_devs_ = list_system_audio_devices(false);
     ifaces_ = list_network_interfaces();
@@ -660,6 +662,18 @@ void LanVidStudioApp::init_audio_matrix() {
         }
     }
 
+    // Restore or initialize MIDI slots (Network MIDI TX/RX + saved OS MIDI devices)
+    audio_matrix_.clear_midi_slots();
+    if (cfg_.midi_slots.empty()) {
+        audio_matrix_.add_midi_slot({0, MidiSlotType::kNetworkMidiTx, "Network MIDI TX (MIDI2)", "", -1, 0, true});
+        audio_matrix_.add_midi_slot({1, MidiSlotType::kNetworkMidiRx, "Network MIDI RX (MIDI2)", "", -1, 0, true});
+    } else {
+        for (const auto& ms : cfg_.midi_slots) audio_matrix_.add_midi_slot(ms);
+        for (const auto& mc : cfg_.midi_crosspoints) {
+            audio_matrix_.set_midi_crosspoint(mc.src_slot, mc.dst_slot, mc.channel_filter, mc.mute);
+        }
+    }
+
     audio_matrix_.set_network_io(
         [this](const float* const* planes, uint32_t ch, uint32_t frames) {
             if (sender_ && sender_running_) {
@@ -685,6 +699,8 @@ void LanVidStudioApp::sync_matrix_to_config() {
     cfg_.matrix_feedback_guard = audio_matrix_.feedback_guard();
     cfg_.matrix_slots = audio_matrix_.slots();
     cfg_.matrix_crosspoints = audio_matrix_.crosspoints();
+    cfg_.midi_slots = audio_matrix_.midi_slots();
+    cfg_.midi_crosspoints = audio_matrix_.midi_crosspoints();
 }
 
 void LanVidStudioApp::draw_segmented_vu(float dbfs, float width, float height) {
@@ -734,7 +750,7 @@ void LanVidStudioApp::draw_sidebar() {
         {0, "TX", "SENDER"},
         {1, "RX", "RECEIVER"},
         {2, "DX", "DUPLEX"},
-        {3, "MX", "AUDIO MATRIX"},
+        {3, "MX", "AUDIO & MIDI"},
     };
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -935,9 +951,32 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
     ImGui::TextDisabled("(%zu / %d)", slots.size(), kMatrixMaxSlots);
     ImGui::Separator();
 
-    if (ImGui::Button("+ Add Audio Device", ImVec2(col1_w * 0.66f, 28.0f))) ImGui::OpenPopup("##AddAudioDev");
+    if (ImGui::Button("+ Audio", ImVec2(col1_w * 0.34f, 28.0f))) ImGui::OpenPopup("##AddAudioDev");
     ImGui::SameLine();
-    if (ImGui::Button("Refresh", ImVec2(-1, 28.0f))) refresh_devices();
+    if (ImGui::Button("+ Add MIDI Device", ImVec2(col1_w * 0.42f, 28.0f))) ImGui::OpenPopup("##AddMidiDev");
+    ImGui::SameLine();
+    if (ImGui::Button("Ref", ImVec2(-1, 28.0f))) refresh_devices();
+
+    if (ImGui::BeginPopup("##AddMidiDev")) {
+        ImGui::TextColored(kColCyan, "MIDI Inputs (Keyboards / E-Drums / Controllers)");
+        if (midi_in_devs_.empty()) ImGui::TextDisabled("  No OS MIDI inputs found");
+        for (const auto& m : midi_in_devs_) {
+            if (ImGui::Selectable((m.name + " [MIDI IN]").c_str())) {
+                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiInput, m.name, m.name, m.index, 0, true});
+                config_dirty_ = true;
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextColored(kColTeal, "MIDI Outputs (DAW / Synths)");
+        if (midi_out_devs_.empty()) ImGui::TextDisabled("  No OS MIDI outputs found");
+        for (const auto& m : midi_out_devs_) {
+            if (ImGui::Selectable((m.name + " [MIDI OUT]").c_str())) {
+                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiOutput, m.name, m.name, m.index, 0, true});
+                config_dirty_ = true;
+            }
+        }
+        ImGui::EndPopup();
+    }
 
     if (ImGui::BeginPopup("##AddAudioDev")) {
 #if defined(__APPLE__)
@@ -1066,13 +1105,151 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
         ImGui::PopStyleColor();
         ImGui::PopID();
     }
+
+    // ---- MIDI DEVICES SECTION IN COLUMN 1 ----
+    const auto mslots = audio_matrix_.midi_slots();
+    if (!mslots.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(kColTeal, "MIDI DEVICES (%zu / %d)", mslots.size(), kMatrixMaxMidiSlots);
+        ImGui::SameLine(std::max(150.0f, col1_w - 88.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, kColRed);
+        if (ImGui::SmallButton("PANIC ALL")) {
+            audio_matrix_.send_midi_panic(-1);
+            toast_msg_ = "MIDI PANIC: CC 123 (All Notes Off) sent to all 16 channels";
+            toast_until_us_ = now_us() + 2500000ull;
+        }
+        ImGui::PopStyleColor();
+        const uint64_t now_t = now_us();
+        for (auto ms : mslots) {
+            ImGui::PushID(2000 + ms.id);
+            const auto mst = audio_matrix_.midi_slot_status(ms.id);
+            const bool blinking = (mst.last_activity_us > 0 && now_t - mst.last_activity_us < 150000ull);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, kColSidebar);
+            ImGui::BeginChild("##MidiCard", ImVec2(0, 62.0f), true, ImGuiWindowFlags_NoScrollbar);
+
+            // Blinking MIDI ACTIVITY LED
+            ImGui::TextColored(blinking ? kColTeal : kColTextMuted, "●");
+            ImGui::SameLine();
+            ImGui::TextColored(kColTextMain, "%s", ms.name.c_str());
+            ImGui::SameLine(std::max(140.0f, ImGui::GetContentRegionAvail().x - 56.0f));
+            bool act = ms.active;
+            if (studio_toggle("##MidiAct", &act, kColTeal)) {
+                ms.active = act;
+                audio_matrix_.update_midi_slot(ms.id, ms);
+                config_dirty_ = true;
+            }
+
+            const char* mtag = (ms.type == MidiSlotType::kMidiInput)
+                                   ? "MIDI IN"
+                                   : (ms.type == MidiSlotType::kMidiOutput
+                                          ? "MIDI OUT"
+                                          : (ms.type == MidiSlotType::kNetworkMidiTx ? "NET TX" : "NET RX"));
+            ImGui::TextColored(blinking ? kColCyan : kColTextMuted, "MIDI ACTIVITY: %llu ev | %s",
+                               (unsigned long long)mst.events_count, mtag);
+            if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("PANIC")) audio_matrix_.send_midi_panic(ms.id);
+            }
+            if (ms.type == MidiSlotType::kMidiInput || ms.type == MidiSlotType::kMidiOutput) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x")) {
+                    audio_matrix_.remove_midi_slot(ms.id);
+                    config_dirty_ = true;
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                    break;
+                }
+            }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::PopID();
+        }
+    }
     ImGui::EndChild();
 
     // ==================== COLUMN 2: PATCHBAY MATRIX GRID (~45%) ====================
     ImGui::SameLine();
     ImGui::BeginChild("##MatrixGrid", ImVec2(col2_w, 0), true);
-    ImGui::TextColored(kColCyan, "PATCHBAY MATRIX GRID");
+    ImGui::TextColored(kColCyan, matrix_patch_mode_ == 0 ? "AUDIO PATCHBAY GRID" : "MIDI PATCHBAY GRID");
+    ImGui::SameLine(std::max(180.0f, col2_w - 205.0f));
+    auto mode_pill = [&](int mode, const char* lbl) {
+        const bool cur = (matrix_patch_mode_ == mode);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, cur ? kColCyan : ImVec4(0.118f, 0.153f, 0.220f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, cur ? ImVec4(0.05f, 0.07f, 0.10f, 1.0f) : kColTextMain);
+        if (ImGui::SmallButton(lbl)) matrix_patch_mode_ = mode;
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+    };
+    mode_pill(0, "Audio Patch");
+    ImGui::SameLine();
+    mode_pill(1, "MIDI Patch");
     ImGui::Separator();
+
+    if (matrix_patch_mode_ == 1) {
+        // ---- MIDI ROUTING MATRIX (many-to-1 merge & 1-to-many split with channel filter) ----
+        const char* ch_filters[17] = {"All Ch", "Ch 1",  "Ch 2",  "Ch 3",  "Ch 4",  "Ch 5",  "Ch 6",  "Ch 7", "Ch 8",
+                                      "Ch 9",   "Ch 10", "Ch 11", "Ch 12", "Ch 13", "Ch 14", "Ch 15", "Ch 16"};
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("Channel Filter", &midi_channel_filter_, ch_filters, 17);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Clear MIDI Routes")) {
+            audio_matrix_.clear_midi_crosspoints();
+            config_dirty_ = true;
+        }
+        ImGui::Spacing();
+
+        std::vector<MidiSlotConfig> srcs, dsts;
+        for (const auto& s : audio_matrix_.midi_slots()) {
+            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx) srcs.push_back(s);
+            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx) dsts.push_back(s);
+        }
+        if (srcs.empty() || dsts.empty()) {
+            ImGui::TextDisabled("Add MIDI Input / Output devices on the left to patch MIDI routes.");
+        } else if (ImGui::BeginTable("##MidiPatchTbl", int(dsts.size()) + 1,
+                                     ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("MIDI Source \\ Dest");
+            for (const auto& d : dsts) ImGui::TableSetupColumn(d.name.c_str());
+            ImGui::TableHeadersRow();
+            for (const auto& s : srcs) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%s", s.name.c_str());
+                for (size_t j = 0; j < dsts.size(); ++j) {
+                    ImGui::TableSetColumnIndex(int(j) + 1);
+                    MidiCrosspoint mcp{};
+                    const bool linked = audio_matrix_.has_midi_crosspoint(s.id, dsts[j].id, &mcp);
+                    ImGui::PushID(s.id * 32 + dsts[j].id);
+                    const ImVec4 bcol = linked ? (mcp.mute ? kColRed : kColTeal) : ImVec4(0.16f, 0.19f, 0.25f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, bcol);
+                    char blbl[16];
+                    if (!linked) std::snprintf(blbl, sizeof(blbl), "·");
+                    else if (mcp.mute) std::snprintf(blbl, sizeof(blbl), "M");
+                    else if (mcp.channel_filter == 0) std::snprintf(blbl, sizeof(blbl), "ALL");
+                    else std::snprintf(blbl, sizeof(blbl), "C%d", mcp.channel_filter);
+                    if (ImGui::SmallButton(blbl)) {
+                        if (linked) audio_matrix_.remove_midi_crosspoint(s.id, dsts[j].id);
+                        else audio_matrix_.set_midi_crosspoint(s.id, dsts[j].id, midi_channel_filter_, false);
+                        config_dirty_ = true;
+                    }
+                    if (linked && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        audio_matrix_.set_midi_crosspoint(s.id, dsts[j].id, mcp.channel_filter, !mcp.mute);
+                        config_dirty_ = true;
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Many-to-1 Merge & 1-to-Many Split | LMB: Patch/Unpatch | RMB: Mute");
+        ImGui::EndChild();
+        ImGui::SameLine();
+        draw_studio_config_panel();
+        return;
+    }
 
     const int net_id = find_slot_by_type(MatrixSlotType::kNetworkAoip);
     const int daw_id = find_slot_by_type(MatrixSlotType::kVirtualBus);

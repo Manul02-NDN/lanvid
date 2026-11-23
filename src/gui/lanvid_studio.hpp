@@ -10,6 +10,7 @@
 
 #include "audio/multi_device_matrix.hpp"
 #include "audio/shm_audio_host.hpp"
+#include "midi/midi_device_manager.hpp"
 #include "gui/app_config.hpp"
 #include "gui/gpu_texture.hpp"
 #include "lanvid_c_api.h"
@@ -88,6 +89,8 @@ private:
     std::vector<AsioDriverEntry> asio_devs_;
     std::vector<SystemAudioDeviceEntry> sys_out_devs_;  // CoreAudio outputs (macOS)
     std::vector<SystemAudioDeviceEntry> sys_in_devs_;   // CoreAudio inputs (macOS)
+    std::vector<MidiDeviceInfo> midi_in_devs_;
+    std::vector<MidiDeviceInfo> midi_out_devs_;
     std::vector<NetInterfaceInfo> ifaces_;
     std::string local_lan_ip_ = "127.0.0.1";
 
@@ -158,6 +161,8 @@ private:
     int matrix_src_page_ = 0;  // 0..3 (blocks of 16 channels)
     int matrix_dst_page_ = 0;  // 0..3 (blocks of 16 channels)
     int matrix_active_preset_ = 0;  // 0, 1, 2, or -1 (custom)
+    int matrix_patch_mode_ = 0;     // 0 = Audio Patch, 1 = MIDI Patch
+    int midi_channel_filter_ = 0;   // 0 = All, 1..16 = Ch 1..16
     float matrix_new_gain_db_ = 0.0f;
 
     // UI status / toast notifications
