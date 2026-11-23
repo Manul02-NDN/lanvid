@@ -5,22 +5,18 @@ plugins {
 
 android {
     namespace = "com.lanvid.monitor"
-    compileSdk {
-        version = release(37) {
-            minorApiLevel = 2
-        }
-    }
+    compileSdk = 35
     ndkVersion = "28.2.13676358"
 
     defaultConfig {
-        applicationId = "com.lanvid.monitor"
-        minSdk = 28            // AAudio usage / content type (API 28) + low-latency MMAP paths
+        applicationId = "com.manul02.lanvid.monitor"
+        minSdk = 26            // Android 8.0+ with native AAudio low-latency paths
         targetSdk = 35
-        versionCode = 260
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1) + 100
         versionName = "2.6.0"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {
@@ -31,25 +27,50 @@ android {
         }
     }
 
-    // Release signing: mobile/android/lanvid-release.jks (CI creates an ephemeral key or decodes the
-    // ANDROID_KEYSTORE_BASE64 secret). Without the file the release APK is left unsigned.
-    val releaseKeystore = rootProject.file("lanvid-release.jks")
+    // Release signing for Google Play Upload Keystore.
+    // Reads ANDROID_KEYSTORE_PATH / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD
+    // (also accepts legacy LANVID_KS_PASS / LANVID_KEY_ALIAS / LANVID_KEY_PASS).
+    // Safely falls back to debug signing for local development when no release keystore is present.
+    val envKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+    val releaseKeystore = if (envKeystorePath != null) file(envKeystorePath) else rootProject.file("lanvid-release.jks")
+    val hasReleaseKeystore = releaseKeystore.exists()
+
     signingConfigs {
-        if (releaseKeystore.exists()) {
-            create("release") {
+        create("release") {
+            if (hasReleaseKeystore) {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("LANVID_KS_PASS") ?: "lanvid2026"
-                keyAlias = System.getenv("LANVID_KEY_ALIAS") ?: "lanvid"
-                keyPassword = System.getenv("LANVID_KEY_PASS") ?: "lanvid2026"
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                    ?: System.getenv("LANVID_KS_PASS")
+                    ?: "lanvid2026"
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS")
+                    ?: System.getenv("LANVID_KEY_ALIAS")
+                    ?: "lanvid"
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+                    ?: System.getenv("LANVID_KEY_PASS")
+                    ?: "lanvid2026"
             }
         }
     }
 
     buildTypes {
         release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
+        }
+        debug {
             isMinifyEnabled = false
-            if (releaseKeystore.exists()) signingConfig = signingConfigs.getByName("release")
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
 
@@ -62,6 +83,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -77,9 +99,9 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.18.0")
-    implementation("androidx.activity:activity-compose:1.13.0")
-    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation(platform("androidx.compose:compose-bom:2025.04.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")

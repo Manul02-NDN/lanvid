@@ -1,0 +1,2 @@
+json_key_file(ENV["GOOGLE_PLAY_JSON_KEY_PATH"] || "play-service-account.json")
+package_name("com.manul02.lanvid.monitor")

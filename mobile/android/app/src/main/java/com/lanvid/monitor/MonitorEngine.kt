@@ -24,6 +24,8 @@ object MonitorEngine {
 
     var connected by mutableStateOf<Studio?>(null)
         private set
+    var isDemo by mutableStateOf(false)
+        private set
     val channels = mutableStateListOf<ChannelState>()
     var telemetry by mutableStateOf(Telemetry())
         private set
@@ -75,9 +77,31 @@ object MonitorEngine {
         main.post(tick)
     }
 
+    fun connectDemo() {
+        disconnect()
+        isDemo = true
+        lastError = null
+        connected = Studio("Demo Studio (Local Preview)", "127.0.0.1", 5020)
+        channels.clear()
+        val demoNames = listOf("Kick", "Snare", "Bass", "Guitar L", "Guitar R", "Keys", "Lead Vox", "Click")
+        val demoGains = listOf(0f, -1.5f, -2.0f, -4.0f, -4.0f, -3.5f, 1.5f, -6.0f)
+        val demoPans = listOf(0f, 0f, 0f, -0.7f, 0.7f, 0.15f, 0f, 0f)
+        demoNames.forEachIndexed { i, nm ->
+            val c = ChannelState(i, nm)
+            c.gainDb = demoGains[i]
+            c.pan = demoPans[i]
+            c.peakDbfs = -18f
+            channels.add(c)
+        }
+        demoStep = 0
+        main.removeCallbacks(tick)
+        main.post(tick)
+    }
+
     fun disconnect() {
         main.removeCallbacks(tick)
-        if (connected != null) MonitorNative.nativeDisconnect(handle)
+        if (connected != null && !isDemo) MonitorNative.nativeDisconnect(handle)
+        isDemo = false
         connected = null
         telemetry = Telemetry()
         stopService()
@@ -120,20 +144,53 @@ object MonitorEngine {
     }
 
     private fun pushMix(c: ChannelState) {
-        if (connected != null) MonitorNative.nativeSetChannelMix(handle, c.index, c.gainDb, c.pan, c.mute, c.solo)
+        if (connected != null && !isDemo) MonitorNative.nativeSetChannelMix(handle, c.index, c.gainDb, c.pan, c.mute, c.solo)
     }
 
     private fun pushDsp() {
-        if (connected != null) MonitorNative.nativeSetDsp(handle, dsp.params(), dsp.flags())
+        if (connected != null && !isDemo) MonitorNative.nativeSetDsp(handle, dsp.params(), dsp.flags())
     }
+
+    private var demoStep = 0
 
     // ---- Channel names / VU / telemetry from the PC (15 Hz) ----
 
     private val tick = object : Runnable {
         override fun run() {
-            pullMeta()
+            if (isDemo) updateDemoTick() else pullMeta()
             main.postDelayed(this, 66)
         }
+    }
+
+    private fun updateDemoTick() {
+        if (connected == null) return
+        demoStep++
+        val anySolo = channels.any { it.solo }
+        var maxBusDb = -60f
+        for (c in channels) {
+            val audible = if (anySolo) (c.solo && !c.mute) else !c.mute
+            val phase = demoStep * 0.22 + c.index * 0.85
+            val beat = kotlin.math.abs(kotlin.math.sin(phase)).toFloat()
+            val rawDb = -26f + beat * 20f
+            c.peakDbfs = if (audible) (rawDb + c.gainDb).coerceIn(-60f, -1f) else -60f
+            if (audible && c.peakDbfs > maxBusDb) maxBusDb = c.peakDbfs
+        }
+        val mixPeak = if (dsp.masterMute) -60f else (maxBusDb + dsp.masterVolumeDb).coerceIn(-60f, -0.5f)
+        val gr = if (dsp.compOn && mixPeak > dsp.compThresholdDb) {
+            ((mixPeak - dsp.compThresholdDb) * (1f / dsp.compRatio - 1f)).coerceIn(-18f, 0f)
+        } else 0f
+        telemetry = Telemetry(
+            gainReductionDb = gr,
+            mixPeakDbfs = mixPeak,
+            bufferMs = buffer.ms.toDouble(),
+            audioPackets = demoStep.toLong() * 14L,
+            receiving = true,
+            burstFrames = 96,
+            deviceBufferFrames = 192,
+            deviceRate = 48000,
+            exclusive = true,
+            xruns = 0,
+        )
     }
 
     private fun pullMeta() {

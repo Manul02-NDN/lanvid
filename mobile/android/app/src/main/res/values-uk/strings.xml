@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">LanVid Monitor</string>
+    <string name="notif_channel">Моніторинг</string>
+    <string name="notif_text">Персональний моніторинг з %1$s</string>
+    <string name="tab_connect">Підключення</string>
+    <string name="tab_mix">Мікшер</string>
+    <string name="tab_fx">Monitor FX</string>
+    <string name="tab_settings">Налаштування</string>
+    <string name="demo_title">Демо-студія (Перегляд)</string>
+    <string name="demo_desc">Спробуйте 8 каналів, VU-метри та Monitor FX DSP локально без підключеного ПК.</string>
+    <string name="demo_open">Open Demo Studio</string>
+    <string name="demo_exit">Вийти з демо</string>
+    <string name="settings_about">Про програму</string>
+    <string name="settings_privacy">Політика конфіденційності</string>
+    <string name="settings_support">Підтримка</string>
+    <string name="settings_lan_only">100% локальна мережа: жодної телеметрії, хмарних серверів чи реклами. Весь звук лишається у вашій LAN.</string>
+</resources>

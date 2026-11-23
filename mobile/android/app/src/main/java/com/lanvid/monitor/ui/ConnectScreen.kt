@@ -143,6 +143,20 @@ fun ConnectScreen() {
             Text("До 15 символів — так телефон підписаний у списку смартфонів на ПК.", color = Lv.muted, fontSize = 12.sp)
         }
 
+        if (connected == null) {
+            SectionCard("Demo Studio Preview") {
+                Text(
+                    "Перегляньте всі 8 каналів, VU-метри та Monitor FX DSP локально без підключеного ПК.",
+                    color = Lv.muted, fontSize = 12.sp,
+                )
+                Button(
+                    onClick = { MonitorEngine.connectDemo() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = Lv.accent2),
+                ) { Text("Open Demo Studio") }
+            }
+        }
+
         MonitorEngine.lastError?.let { Text(it, color = Lv.red, fontSize = 13.sp) }
     }
 }

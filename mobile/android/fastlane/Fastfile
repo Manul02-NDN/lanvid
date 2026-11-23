@@ -1,0 +1,57 @@
+default_platform(:android)
+
+platform :android do
+  desc "Build signed Release AAB and upload to Google Play Internal Testing track"
+  lane :internal do |options|
+    aab_path = options[:aab] || "app/build/outputs/bundle/release/app-release.aab"
+    unless File.exist?(aab_path)
+      gradle(task: "bundle", build_type: "Release")
+    end
+
+    upload_to_play_store(
+      track: "internal",
+      aab: aab_path,
+      skip_upload_apk: true,
+      skip_upload_metadata: false,
+      skip_upload_images: false,
+      skip_upload_screenshots: false,
+      release_status: "completed"
+    )
+  end
+
+  desc "Build signed Release AAB and upload to Google Play Closed Testing (alpha) track"
+  lane :closed do |options|
+    aab_path = options[:aab] || "app/build/outputs/bundle/release/app-release.aab"
+    unless File.exist?(aab_path)
+      gradle(task: "bundle", build_type: "Release")
+    end
+
+    upload_to_play_store(
+      track: "alpha",
+      aab: aab_path,
+      skip_upload_apk: true,
+      skip_upload_metadata: false,
+      skip_upload_images: false,
+      skip_upload_screenshots: false,
+      release_status: "completed"
+    )
+  end
+
+  desc "Upload or promote signed Release AAB to Google Play Production track"
+  lane :production do |options|
+    aab_path = options[:aab] || "app/build/outputs/bundle/release/app-release.aab"
+    unless File.exist?(aab_path)
+      gradle(task: "bundle", build_type: "Release")
+    end
+
+    upload_to_play_store(
+      track: "production",
+      aab: aab_path,
+      skip_upload_apk: true,
+      skip_upload_metadata: false,
+      skip_upload_images: false,
+      skip_upload_screenshots: false,
+      release_status: "completed"
+    )
+  end
+end

@@ -23,11 +23,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import com.lanvid.monitor.ui.ConnectScreen
 import com.lanvid.monitor.ui.FxScreen
 import com.lanvid.monitor.ui.LanVidMonitorTheme
 import com.lanvid.monitor.ui.Lv
 import com.lanvid.monitor.ui.MixScreen
+import com.lanvid.monitor.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,20 +45,26 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var tab by rememberSaveable { mutableIntStateOf(0) }
-                val titles = listOf("Підключення", "Channels Mix", "Monitor FX")
+                val titles = listOf(
+                    stringResource(R.string.tab_connect),
+                    stringResource(R.string.tab_mix),
+                    stringResource(R.string.tab_fx),
+                    stringResource(R.string.tab_settings),
+                )
                 Column(Modifier.fillMaxSize().background(Lv.bg).safeDrawingPadding()) {
                     TabRow(
                         selectedTabIndex = tab, containerColor = Lv.card, contentColor = Lv.text,
                         indicator = { pos -> TabRowDefaults.SecondaryIndicator(Modifier.tabIndicatorOffset(pos[tab]), color = Lv.accent2) },
                     ) {
                         titles.forEachIndexed { i, t ->
-                            Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t) })
+                            Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) })
                         }
                     }
                     when (tab) {
                         0 -> ConnectScreen()
                         1 -> MixScreen()
-                        else -> FxScreen()
+                        2 -> FxScreen()
+                        else -> SettingsScreen()
                     }
                 }
             }
