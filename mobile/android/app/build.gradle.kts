@@ -17,7 +17,7 @@ android {
         minSdk = 28            // AAudio usage / content type (API 28) + low-latency MMAP paths
         targetSdk = 35
         versionCode = 250
-        versionName = "2.5.0"
+        versionName = "2.6.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
