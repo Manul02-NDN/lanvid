@@ -86,6 +86,7 @@ set(LV_CORE_SOURCES
   src/net/discovery.cpp
   src/core/lanvid_c_api.cpp
   src/audio/channel_patchbay.cpp
+  src/audio/multi_device_matrix.cpp
 )
 
 # Desktop-only: LanVidAudioBus_v1 shared-memory bridge to the OS virtual audio devices
@@ -394,6 +395,8 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_c_api.cpp
     tests/test_video_codecs.cpp
     tests/test_audio_duplex.cpp
+    tests/test_multi_device_matrix.cpp
+    src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
   if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)

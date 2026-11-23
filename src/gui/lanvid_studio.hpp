@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio/multi_device_matrix.hpp"
 #include "audio/shm_audio_host.hpp"
 #include "gui/app_config.hpp"
 #include "gui/gpu_texture.hpp"
@@ -57,6 +58,9 @@ private:
     void draw_vdev_status(const ShmHostStatus& st, bool tx_side);
     void draw_duplex_tab();
     void draw_patchbay_block();
+    void draw_audio_matrix_tab();
+    void init_audio_matrix();
+    void sync_matrix_to_config();
     void start_duplex();
     void stop_duplex();
     void scan_aoip_nodes();
@@ -78,6 +82,7 @@ private:
     std::vector<CameraInfo> cameras_;
     std::vector<AudioDeviceInfo> loop_devs_;
     std::vector<AudioDeviceInfo> mic_devs_;
+    std::vector<AsioDriverEntry> asio_devs_;
     std::vector<NetInterfaceInfo> ifaces_;
     std::string local_lan_ip_ = "127.0.0.1";
 
@@ -140,6 +145,14 @@ private:
     float rx_mbps_hist_[kHistLen]{};
     int hist_idx_ = 0;
     uint64_t last_stat_poll_us_ = 0;
+
+    // Multi-Device Audio Matrix (64x64 across up to 8 slots)
+    MultiDeviceAudioMatrix audio_matrix_;
+    int matrix_src_slot_ = 1;  // default Network AoIP
+    int matrix_dst_slot_ = 0;  // default Virtual Bus (DAW)
+    int matrix_src_page_ = 0;  // 0..3 (blocks of 16 channels)
+    int matrix_dst_page_ = 0;  // 0..3 (blocks of 16 channels)
+    float matrix_new_gain_db_ = 0.0f;
 
     // UI status / toast notifications
     std::string toast_msg_;

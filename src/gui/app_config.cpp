@@ -79,6 +79,89 @@ void read_str(const std::string& j, const char* k, std::string& dst) {
     if (find_json_raw(j, k, v)) dst = v;
 }
 
+std::string sanitize_pipe(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) if (c == '|' || c == ';' || c == '\n' || c == '\r') c = ' ';
+    return out;
+}
+
+std::vector<std::string> split_char(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= s.size()) {
+        const size_t pos = s.find(sep, start);
+        if (pos == std::string::npos) {
+            out.push_back(s.substr(start));
+            break;
+        }
+        out.push_back(s.substr(start, pos - start));
+        start = pos + 1;
+    }
+    return out;
+}
+
+std::string serialize_matrix_slots(const std::vector<MatrixSlotConfig>& slots) {
+    std::ostringstream os;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (i) os << ";";
+        const auto& s = slots[i];
+        os << s.id << "|" << int(s.type) << "|" << int(s.role) << "|" << s.channels << "|"
+           << s.buffer_size << "|" << (s.active ? 1 : 0) << "|" << s.device_index << "|"
+           << sanitize_pipe(s.name) << "|" << sanitize_pipe(s.device_id);
+    }
+    return os.str();
+}
+
+void deserialize_matrix_slots(const std::string& raw, std::vector<MatrixSlotConfig>& out) {
+    out.clear();
+    if (raw.empty()) return;
+    for (const auto& entry : split_char(raw, ';')) {
+        if (entry.empty()) continue;
+        const auto parts = split_char(entry, '|');
+        if (parts.size() < 9) continue;
+        MatrixSlotConfig s{};
+        s.id = std::clamp(std::atoi(parts[0].c_str()), 0, kMatrixMaxSlots - 1);
+        s.type = static_cast<MatrixSlotType>(std::clamp(std::atoi(parts[1].c_str()), 0, 3));
+        s.role = static_cast<MatrixSlotRole>(std::clamp(std::atoi(parts[2].c_str()), 0, 2));
+        s.channels = std::clamp(std::atoi(parts[3].c_str()), 1, kMatrixMaxChannels);
+        s.buffer_size = std::clamp(std::atoi(parts[4].c_str()), 64, 1024);
+        s.active = std::atoi(parts[5].c_str()) != 0;
+        s.device_index = std::atoi(parts[6].c_str());
+        s.name = parts[7];
+        s.device_id = parts[8];
+        out.push_back(std::move(s));
+    }
+}
+
+std::string serialize_matrix_crosspoints(const std::vector<MatrixCrosspoint>& cps) {
+    std::ostringstream os;
+    for (size_t i = 0; i < cps.size(); ++i) {
+        if (i) os << ";";
+        const auto& c = cps[i];
+        os << c.src_slot << "|" << c.src_ch << "|" << c.dst_slot << "|" << c.dst_ch << "|"
+           << c.gain_db << "|" << (c.mute ? 1 : 0);
+    }
+    return os.str();
+}
+
+void deserialize_matrix_crosspoints(const std::string& raw, std::vector<MatrixCrosspoint>& out) {
+    out.clear();
+    if (raw.empty()) return;
+    for (const auto& entry : split_char(raw, ';')) {
+        if (entry.empty()) continue;
+        const auto parts = split_char(entry, '|');
+        if (parts.size() < 6) continue;
+        MatrixCrosspoint c{};
+        c.src_slot = std::clamp(std::atoi(parts[0].c_str()), 0, kMatrixMaxSlots - 1);
+        c.src_ch = std::clamp(std::atoi(parts[1].c_str()), 0, kMatrixMaxChannels - 1);
+        c.dst_slot = std::clamp(std::atoi(parts[2].c_str()), 0, kMatrixMaxSlots - 1);
+        c.dst_ch = std::clamp(std::atoi(parts[3].c_str()), 0, kMatrixMaxChannels - 1);
+        c.gain_db = std::clamp(float(std::atof(parts[4].c_str())), -96.0f, 12.0f);
+        c.mute = std::atoi(parts[5].c_str()) != 0;
+        out.push_back(c);
+    }
+}
+
 }  // namespace
 
 std::string config_file_path() {
@@ -146,6 +229,15 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "show_hud", cfg.show_hud);
     read_str(j, "preview_backend", cfg.preview_backend);
     read_int(j, "active_tab", cfg.active_tab);
+    read_int(j, "matrix_buffer_size", cfg.matrix_buffer_size);
+    read_bool(j, "matrix_feedback_guard", cfg.matrix_feedback_guard);
+    {
+        std::string raw_slots, raw_cps;
+        read_str(j, "matrix_slots", raw_slots);
+        read_str(j, "matrix_crosspoints", raw_cps);
+        deserialize_matrix_slots(raw_slots, cfg.matrix_slots);
+        deserialize_matrix_crosspoints(raw_cps, cfg.matrix_crosspoints);
+    }
 
     cfg.dest_port = std::clamp(cfg.dest_port, 1024, 65535);
     cfg.listen_port = std::clamp(cfg.listen_port, 1024, 65535);
@@ -161,7 +253,8 @@ bool load_app_config(AppConfig& cfg) {
     cfg.aoip_output = std::clamp(cfg.aoip_output, 0, 1);
     cfg.dpx_peer_port = std::clamp(cfg.dpx_peer_port, 1024, 65535);
     cfg.dpx_listen_port = std::clamp(cfg.dpx_listen_port, 1024, 65535);
-    cfg.active_tab = std::clamp(cfg.active_tab, 0, 2);
+    cfg.active_tab = std::clamp(cfg.active_tab, 0, 3);
+    cfg.matrix_buffer_size = (cfg.matrix_buffer_size <= 128) ? 128 : (cfg.matrix_buffer_size <= 256 ? 256 : 512);
     return true;
 }
 
@@ -211,7 +304,11 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"dpx_listen_port\": " << cfg.dpx_listen_port << ",\n"
         << "  \"show_hud\": " << (cfg.show_hud ? "true" : "false") << ",\n"
         << "  \"preview_backend\": \"" << json_esc(cfg.preview_backend) << "\",\n"
-        << "  \"active_tab\": " << cfg.active_tab << "\n"
+        << "  \"active_tab\": " << cfg.active_tab << ",\n"
+        << "  \"matrix_buffer_size\": " << cfg.matrix_buffer_size << ",\n"
+        << "  \"matrix_feedback_guard\": " << (cfg.matrix_feedback_guard ? "true" : "false") << ",\n"
+        << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"
+        << "  \"matrix_crosspoints\": \"" << json_esc(serialize_matrix_crosspoints(cfg.matrix_crosspoints)) << "\"\n"
         << "}\n";
     return out.good();
 }

@@ -93,6 +93,7 @@ void LanVidStudioApp::init() {
     }
 
     refresh_devices();
+    init_audio_matrix();
     if (monitors_.empty() && cfg_.source_type == LV_SOURCE_SCREEN) {
         cfg_.source_type = LV_SOURCE_PATTERN;
     }
@@ -100,6 +101,7 @@ void LanVidStudioApp::init() {
 }
 
 void LanVidStudioApp::shutdown() {
+    audio_matrix_.stop();
     stop_sender();
     stop_receiver();
     if (disc_thread_.joinable()) disc_thread_.join();
@@ -135,6 +137,7 @@ void LanVidStudioApp::shutdown() {
     cfg_.dest_ip = ip_buf_;
     cfg_.file_path = file_buf_;
     cfg_.dpx_peer_host = dpx_peer_buf_;
+    sync_matrix_to_config();
     save_app_config(cfg_);
     lv_shutdown();
 }
@@ -144,6 +147,7 @@ void LanVidStudioApp::refresh_devices() {
     cameras_ = list_cameras();
     loop_devs_ = list_audio_devices(true);
     mic_devs_ = list_audio_devices(false);
+    asio_devs_ = list_external_asio_drivers(true);
     ifaces_ = list_network_interfaces();
     local_lan_ip_ = "127.0.0.1";
     for (const auto& iface : ifaces_) {
@@ -544,6 +548,421 @@ void LanVidStudioApp::draw_duplex_tab() {
     ImGui::EndChild();
 }
 
+// ---------------------------------------------------------------- Multi-Device Audio Matrix (64x64)
+
+void LanVidStudioApp::init_audio_matrix() {
+    audio_matrix_.clear_slots();
+    audio_matrix_.set_buffer_size(cfg_.matrix_buffer_size);
+    audio_matrix_.set_feedback_guard(cfg_.matrix_feedback_guard);
+
+    if (cfg_.matrix_slots.empty()) {
+        MatrixSlotConfig daw{};
+        daw.id = 0;
+        daw.type = MatrixSlotType::kVirtualBus;
+        daw.role = MatrixSlotRole::kDuplex;
+        daw.name = "DAW Virtual Bus (64ch)";
+        daw.channels = 64;
+        daw.buffer_size = cfg_.matrix_buffer_size;
+        daw.active = true;
+        audio_matrix_.add_slot(daw);
+
+        MatrixSlotConfig net{};
+        net.id = 1;
+        net.type = MatrixSlotType::kNetworkAoip;
+        net.role = MatrixSlotRole::kDuplex;
+        net.name = "Network AoIP (64ch)";
+        net.channels = 64;
+        net.buffer_size = cfg_.matrix_buffer_size;
+        net.active = true;
+        audio_matrix_.add_slot(net);
+
+        MatrixSlotConfig hp{};
+        hp.id = 2;
+        hp.type = MatrixSlotType::kSystemAudio;
+        hp.role = MatrixSlotRole::kOutput;
+        hp.name = "PC Headphones / Output";
+        hp.device_index = -1;
+        hp.channels = 2;
+        hp.buffer_size = cfg_.matrix_buffer_size;
+        hp.active = true;
+        audio_matrix_.add_slot(hp);
+
+        audio_matrix_.apply_preset(0, 1, 0, 2);
+        sync_matrix_to_config();
+    } else {
+        for (const auto& s : cfg_.matrix_slots) audio_matrix_.add_slot(s);
+        for (const auto& c : cfg_.matrix_crosspoints) {
+            audio_matrix_.set_crosspoint(c.src_slot, c.src_ch, c.dst_slot, c.dst_ch, c.gain_db, c.mute,
+                                         !cfg_.matrix_feedback_guard);
+        }
+    }
+
+    audio_matrix_.set_network_io(
+        [this](const float* const* planes, uint32_t ch, uint32_t frames) {
+            if (sender_ && sender_running_) {
+                lv_sender_push_audio_multichannel(sender_, planes, uint16_t(ch), frames,
+                                                  LV_AUDIO_FORMAT_F32, LV_AUDIO_LAYOUT_PLANAR, LV_MEDIA_TS_AUTO);
+            }
+        },
+        [this](float* const* planes, uint32_t ch, uint32_t frames) {
+            if (receiver_ && receiver_running_) {
+                static thread_local std::vector<float> tmp;
+                tmp.resize(size_t(ch) * frames);
+                lv_receiver_pop_audio_multichannel(receiver_, tmp.data(), uint16_t(ch), frames,
+                                                   LV_AUDIO_LAYOUT_PLANAR);
+                for (uint32_t c = 0; c < ch; ++c) {
+                    std::copy(tmp.begin() + size_t(c) * frames, tmp.begin() + size_t(c + 1) * frames, planes[c]);
+                }
+            }
+        });
+}
+
+void LanVidStudioApp::sync_matrix_to_config() {
+    cfg_.matrix_buffer_size = audio_matrix_.buffer_size();
+    cfg_.matrix_feedback_guard = audio_matrix_.feedback_guard();
+    cfg_.matrix_slots = audio_matrix_.slots();
+    cfg_.matrix_crosspoints = audio_matrix_.crosspoints();
+}
+
+void LanVidStudioApp::draw_audio_matrix_tab() {
+    auto slots = audio_matrix_.slots();
+    const bool running = audio_matrix_.is_running();
+
+    auto find_slot_by_type = [&](MatrixSlotType t, MatrixSlotRole role_hint = MatrixSlotRole::kDuplex,
+                                 bool check_role = false) -> int {
+        for (const auto& s : slots) {
+            if (s.type == t && (!check_role || s.role == role_hint)) return s.id;
+        }
+        return -1;
+    };
+
+    const float left_w = std::min(430.0f, ImGui::GetContentRegionAvail().x * 0.40f);
+
+    // ---- LEFT PANEL: Audio Device Slots (up to 8) ----
+    ImGui::BeginChild("##MatrixDevices", ImVec2(left_w, 0), true);
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "Multi-Device Audio Matrix (48 kHz)");
+    ImGui::TextDisabled("Слоти пристроїв (%zu / %d): WASAPI + ASIO + DAW SHM + AoIP", slots.size(), kMatrixMaxSlots);
+    ImGui::Separator();
+
+    if (!running) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.62f, 0.34f, 1.0f));
+        if (ImGui::Button("Старт Audio Matrix", ImVec2(-1, 34))) {
+            stop_vdev_tx();
+            vdev_rx_.stop();
+            audio_matrix_.start();
+            toast_msg_ = "Audio Matrix запущено (48 kHz, буфер " + std::to_string(audio_matrix_.buffer_size()) + ")";
+            toast_until_us_ = now_us() + 3000000ull;
+        }
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.76f, 0.20f, 0.22f, 1.0f));
+        if (ImGui::Button("Стоп Audio Matrix", ImVec2(-1, 34))) {
+            audio_matrix_.stop();
+        }
+        ImGui::PopStyleColor();
+    }
+
+    int buf_idx = (cfg_.matrix_buffer_size <= 128) ? 0 : (cfg_.matrix_buffer_size <= 256 ? 1 : 2);
+    const char* buf_items[] = {"128 семплів (2.7 мс)", "256 семплів (5.3 мс)", "512 семплів (10.7 мс)"};
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("##MatrixBuf", &buf_idx, buf_items, 3)) {
+        cfg_.matrix_buffer_size = (buf_idx == 0) ? 128 : (buf_idx == 1 ? 256 : 512);
+        audio_matrix_.set_buffer_size(cfg_.matrix_buffer_size);
+        config_dirty_ = true;
+    }
+
+    if (ImGui::Checkbox("Feedback Loop Guard (захист від замикання)", &cfg_.matrix_feedback_guard)) {
+        audio_matrix_.set_feedback_guard(cfg_.matrix_feedback_guard);
+        config_dirty_ = true;
+    }
+
+    if (ImGui::Button("+ Add Output Device")) ImGui::OpenPopup("##AddOutDev");
+    ImGui::SameLine();
+    if (ImGui::Button("+ Add Input Device")) ImGui::OpenPopup("##AddInDev");
+    ImGui::SameLine();
+    if (ImGui::Button("Оновити")) refresh_devices();
+
+    if (ImGui::BeginPopup("##AddOutDev")) {
+        ImGui::TextDisabled("WASAPI Виходи (навушники / звукові карти):");
+        if (ImGui::Selectable("Системний вихід за замовчуванням (WASAPI)")) {
+            MatrixSlotConfig s{};
+            s.id = -1;
+            s.type = MatrixSlotType::kSystemAudio;
+            s.role = MatrixSlotRole::kOutput;
+            s.name = "Default Output (WASAPI)";
+            s.device_index = -1;
+            s.channels = 2;
+            s.buffer_size = cfg_.matrix_buffer_size;
+            audio_matrix_.add_slot(s);
+            config_dirty_ = true;
+        }
+        for (const auto& d : loop_devs_) {
+            if (ImGui::Selectable(d.name.c_str())) {
+                MatrixSlotConfig s{};
+                s.id = -1;
+                s.type = MatrixSlotType::kSystemAudio;
+                s.role = MatrixSlotRole::kOutput;
+                s.name = d.name;
+                s.device_id = d.name;
+                s.device_index = d.index;
+                s.channels = 2;
+                s.buffer_size = cfg_.matrix_buffer_size;
+                audio_matrix_.add_slot(s);
+                config_dirty_ = true;
+            }
+        }
+        if (!asio_devs_.empty()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Зовнішні ASIO-драйвери (Duplex):");
+            for (const auto& a : asio_devs_) {
+                if (ImGui::Selectable((a.name + " [ASIO]").c_str())) {
+                    MatrixSlotConfig s{};
+                    s.id = -1;
+                    s.type = MatrixSlotType::kExternalAsio;
+                    s.role = MatrixSlotRole::kDuplex;
+                    s.name = a.name;
+                    s.device_id = a.name;
+                    s.channels = 16;
+                    s.buffer_size = cfg_.matrix_buffer_size;
+                    audio_matrix_.add_slot(s);
+                    config_dirty_ = true;
+                }
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopup("##AddInDev")) {
+        ImGui::TextDisabled("WASAPI Входи (мікрофон / Line-In):");
+        if (ImGui::Selectable("Системний мікрофон за замовчуванням (WASAPI)")) {
+            MatrixSlotConfig s{};
+            s.id = -1;
+            s.type = MatrixSlotType::kSystemAudio;
+            s.role = MatrixSlotRole::kInput;
+            s.name = "Default Mic/Line In (WASAPI)";
+            s.device_index = -1;
+            s.channels = 2;
+            s.buffer_size = cfg_.matrix_buffer_size;
+            audio_matrix_.add_slot(s);
+            config_dirty_ = true;
+        }
+        for (const auto& d : mic_devs_) {
+            if (ImGui::Selectable(d.name.c_str())) {
+                MatrixSlotConfig s{};
+                s.id = -1;
+                s.type = MatrixSlotType::kSystemAudio;
+                s.role = MatrixSlotRole::kInput;
+                s.name = d.name;
+                s.device_id = d.name;
+                s.device_index = d.index;
+                s.channels = 2;
+                s.buffer_size = cfg_.matrix_buffer_size;
+                audio_matrix_.add_slot(s);
+                config_dirty_ = true;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::Separator();
+    slots = audio_matrix_.slots();
+    for (auto s : slots) {
+        ImGui::PushID(s.id);
+        const auto st = audio_matrix_.slot_status(s.id);
+        bool act = s.active;
+        if (ImGui::Checkbox("##Act", &act)) {
+            s.active = act;
+            audio_matrix_.update_slot(s.id, s);
+            config_dirty_ = true;
+        }
+        ImGui::SameLine();
+        const char* type_tag = (s.type == MatrixSlotType::kVirtualBus)
+                                   ? "SHM"
+                                   : (s.type == MatrixSlotType::kNetworkAoip
+                                          ? "AoIP"
+                                          : (s.type == MatrixSlotType::kExternalAsio ? "ASIO" : "WASAPI"));
+        ImGui::Text("[%d:%s] %s (%dch)", s.id, type_tag, s.name.c_str(), s.channels);
+        if (s.type != MatrixSlotType::kVirtualBus && s.type != MatrixSlotType::kNetworkAoip) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) {
+                audio_matrix_.remove_slot(s.id);
+                config_dirty_ = true;
+                ImGui::PopID();
+                break;
+            }
+        }
+        ImGui::TextColored(st.connected ? ImVec4(0.24f, 0.90f, 0.52f, 1.0f) : ImVec4(0.75f, 0.78f, 0.85f, 1.0f),
+                           "  %s | %u Hz | xruns: %llu", st.status_text.c_str(), st.device_sample_rate,
+                           (unsigned long long)st.xruns);
+        const float vu_in = std::clamp((st.peak_in_dbfs + 60.0f) / 60.0f, 0.0f, 1.0f);
+        const float vu_out = std::clamp((st.peak_out_dbfs + 60.0f) / 60.0f, 0.0f, 1.0f);
+        ImGui::ProgressBar(vu_in, ImVec2(left_w * 0.44f, 8.0f), "");
+        ImGui::SameLine();
+        ImGui::ProgressBar(vu_out, ImVec2(left_w * 0.44f, 8.0f), "");
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    // ---- RIGHT PANEL: Presets + Interactive Crosspoint Patchbay Grid ----
+    ImGui::SameLine();
+    ImGui::BeginChild("##MatrixGrid", ImVec2(0, 0), true);
+    ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "Crosspoint Routing Grid (1-to-many / many-to-1)");
+
+    const int net_id = find_slot_by_type(MatrixSlotType::kNetworkAoip);
+    const int daw_id = find_slot_by_type(MatrixSlotType::kVirtualBus);
+    const int mon_id = find_slot_by_type(MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput, true);
+
+    if (ImGui::Button("Preset 1: Mac/Net -> DAW (64ch) + Headphones (1/2)")) {
+        audio_matrix_.apply_preset(0, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preset 2: Full-Duplex 64x64 + Monitor")) {
+        audio_matrix_.apply_preset(1, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preset 3: 1:1 Direct")) {
+        audio_matrix_.apply_preset(2, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Очистити")) {
+        audio_matrix_.clear_crosspoints();
+        config_dirty_ = true;
+    }
+    ImGui::Separator();
+
+    // Slot pair selectors for the interactive 16x16 grid view
+    slots = audio_matrix_.slots();
+    MatrixSlotConfig src_cfg{}, dst_cfg{};
+    bool has_src = false, has_dst = false;
+    for (const auto& s : slots) {
+        if (s.id == matrix_src_slot_) { src_cfg = s; has_src = true; }
+        if (s.id == matrix_dst_slot_) { dst_cfg = s; has_dst = true; }
+    }
+    if (!has_src && !slots.empty()) { src_cfg = slots.front(); matrix_src_slot_ = src_cfg.id; has_src = true; }
+    if (!has_dst && !slots.empty()) { dst_cfg = slots.back(); matrix_dst_slot_ = dst_cfg.id; has_dst = true; }
+
+    ImGui::SetNextItemWidth(220.0f);
+    if (ImGui::BeginCombo("Джерело (рядки)", has_src ? src_cfg.name.c_str() : "(немає)")) {
+        for (const auto& s : slots) {
+            if (s.role == MatrixSlotRole::kOutput) continue;
+            if (ImGui::Selectable(s.name.c_str(), s.id == matrix_src_slot_)) {
+                matrix_src_slot_ = s.id;
+                matrix_src_page_ = 0;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220.0f);
+    if (ImGui::BeginCombo("Приймач (стовпці)", has_dst ? dst_cfg.name.c_str() : "(немає)")) {
+        for (const auto& s : slots) {
+            if (s.role == MatrixSlotRole::kInput) continue;
+            if (ImGui::Selectable(s.name.c_str(), s.id == matrix_dst_slot_)) {
+                matrix_dst_slot_ = s.id;
+                matrix_dst_page_ = 0;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0f);
+    ImGui::SliderFloat("Gain", &matrix_new_gain_db_, -24.0f, 6.0f, "%.1f dB");
+
+    const char* page_lbl[] = {"Ch 1-16", "Ch 17-32", "Ch 33-48", "Ch 49-64"};
+    if (has_src && src_cfg.channels > 16) {
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("Рядки", &matrix_src_page_, page_lbl, std::min(4, (src_cfg.channels + 15) / 16));
+        ImGui::SameLine();
+    } else {
+        matrix_src_page_ = 0;
+    }
+    if (has_dst && dst_cfg.channels > 16) {
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("Стовпці", &matrix_dst_page_, page_lbl, std::min(4, (dst_cfg.channels + 15) / 16));
+    } else {
+        matrix_dst_page_ = 0;
+    }
+
+    if (has_src && has_dst) {
+        const int r0 = matrix_src_page_ * 16;
+        const int r1 = std::min(src_cfg.channels, r0 + 16);
+        const int c0 = matrix_dst_page_ * 16;
+        const int c1 = std::min(dst_cfg.channels, c0 + 16);
+        const int cols = c1 - c0;
+
+        if (cols > 0 && ImGui::BeginTable("##PatchTable", cols + 1,
+                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("Src \\ Dst");
+            for (int dc = c0; dc < c1; ++dc) {
+                char ch_lbl[16];
+                std::snprintf(ch_lbl, sizeof(ch_lbl), "D%d", dc + 1);
+                ImGui::TableSetupColumn(ch_lbl);
+            }
+            ImGui::TableHeadersRow();
+
+            for (int sc = r0; sc < r1; ++sc) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("S%02d", sc + 1);
+                for (int dc = c0; dc < c1; ++dc) {
+                    ImGui::TableSetColumnIndex(dc - c0 + 1);
+                    MatrixCrosspoint cp{};
+                    const bool linked = audio_matrix_.has_crosspoint(src_cfg.id, sc, dst_cfg.id, dc, &cp);
+                    ImGui::PushID(sc * 100 + dc);
+                    const ImVec4 btn_col = linked
+                                               ? (cp.mute ? ImVec4(0.80f, 0.30f, 0.22f, 1.0f)
+                                                          : ImVec4(0.18f, 0.72f, 0.42f, 1.0f))
+                                               : ImVec4(0.16f, 0.19f, 0.25f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Button, btn_col);
+                    if (ImGui::SmallButton(linked ? (cp.mute ? "M" : "●") : "·")) {
+                        if (linked) {
+                            audio_matrix_.remove_crosspoint(src_cfg.id, sc, dst_cfg.id, dc);
+                            config_dirty_ = true;
+                        } else {
+                            const auto res = audio_matrix_.set_crosspoint(
+                                src_cfg.id, sc, dst_cfg.id, dc, matrix_new_gain_db_, false, !cfg_.matrix_feedback_guard);
+                            if (res == CrosspointResult::kBlockedFeedbackLoop) {
+                                toast_msg_ = "Feedback Loop Guard: пряме замикання слоту на себе заблоковано!";
+                                toast_until_us_ = now_us() + 3500000ull;
+                            } else if (res == CrosspointResult::kOk) {
+                                config_dirty_ = true;
+                            }
+                        }
+                    }
+                    if (linked && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        audio_matrix_.set_crosspoint(src_cfg.id, sc, dst_cfg.id, dc, cp.gain_db, !cp.mute, true);
+                        config_dirty_ = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        if (linked) {
+                            ImGui::SetTooltip("%s Ch%d -> %s Ch%d\nGain: %.1f dB | %s\n(ЛКМ: видалити, ПКМ: Mute)",
+                                              src_cfg.name.c_str(), sc + 1, dst_cfg.name.c_str(), dc + 1, cp.gain_db,
+                                              cp.mute ? "MUTED" : "ACTIVE");
+                        } else {
+                            ImGui::SetTooltip("З'єднати %s Ch%d -> %s Ch%d (%.1f dB)",
+                                              src_cfg.name.c_str(), sc + 1, dst_cfg.name.c_str(), dc + 1,
+                                              matrix_new_gain_db_);
+                        }
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    const auto all_cps = audio_matrix_.crosspoints();
+    ImGui::Spacing();
+    ImGui::TextDisabled("Активних з'єднань (crosspoints): %zu  |  ЛКМ: з'єднати/розірвати, ПКМ: Mute",
+                        all_cps.size());
+    ImGui::EndChild();
+}
+
 void LanVidStudioApp::stop_tone() {
     tone_stop_.store(true);
     if (tone_thread_.joinable()) tone_thread_.join();
@@ -753,6 +1172,7 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
         cfg_.dest_ip = ip_buf_;
         cfg_.file_path = file_buf_;
         cfg_.dpx_peer_host = dpx_peer_buf_;
+        sync_matrix_to_config();
         save_app_config(cfg_);
         config_dirty_ = false;
         last_save_us_ = now;
@@ -1301,6 +1721,7 @@ void LanVidStudioApp::render_frame() {
         const ImGuiTabItemFlags f0 = (!initial_tab_applied_ && cfg_.active_tab == 0) ? ImGuiTabItemFlags_SetSelected : 0;
         const ImGuiTabItemFlags f1 = (!initial_tab_applied_ && cfg_.active_tab == 1) ? ImGuiTabItemFlags_SetSelected : 0;
         const ImGuiTabItemFlags f2 = (!initial_tab_applied_ && cfg_.active_tab == 2) ? ImGuiTabItemFlags_SetSelected : 0;
+        const ImGuiTabItemFlags f3 = (!initial_tab_applied_ && cfg_.active_tab == 3) ? ImGuiTabItemFlags_SetSelected : 0;
         initial_tab_applied_ = true;
 
         if (ImGui::BeginTabItem("Передача (Sender)", nullptr, f0)) {
@@ -1316,6 +1737,11 @@ void LanVidStudioApp::render_frame() {
         if (ImGui::BeginTabItem("AoIP Duplex 64x64", nullptr, f2)) {
             if (cfg_.active_tab != 2) { cfg_.active_tab = 2; config_dirty_ = true; }
             draw_duplex_tab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Audio Matrix", nullptr, f3)) {
+            if (cfg_.active_tab != 3) { cfg_.active_tab = 3; config_dirty_ = true; }
+            draw_audio_matrix_tab();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

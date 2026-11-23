@@ -5,6 +5,9 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+
+#include "audio/multi_device_matrix.hpp"
 
 namespace lv::gui {
 
@@ -52,7 +55,13 @@ struct AppConfig {
     double audio_target_ms = 12.0;
     bool show_hud = true;
     std::string preview_backend = "auto";  // "auto", "d3d11", "gdi"
-    int active_tab = 0;        // 0=Sender, 1=Receiver, 2=Duplex
+    int active_tab = 0;        // 0=Sender, 1=Receiver, 2=Duplex, 3=Audio Matrix
+
+    // Multi-Device Audio Matrix persistence
+    int matrix_buffer_size = 256;
+    bool matrix_feedback_guard = true;
+    std::vector<MatrixSlotConfig> matrix_slots;
+    std::vector<MatrixCrosspoint> matrix_crosspoints;
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\config.json or ~/.config/lanvid/config.json).
