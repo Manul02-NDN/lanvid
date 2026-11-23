@@ -36,7 +36,7 @@ jobs:
           name: rel-windows
           path: |
             installer/windows/LanVid_Setup.exe
-            dist/LanVidSDK-v2.4.0/
+            dist/LanVidSDK-v2.5.0/
           if-no-files-found: error
 
   release-linux:
@@ -64,12 +64,12 @@ jobs:
           name: rel-linux
           path: |
             installer/linux/LanVid-Linux-x86_64.run
-            dist/LanVidSDK-v2.4.0/lib/
+            dist/LanVidSDK-v2.5.0/lib/
           if-no-files-found: error
 
   release-macos-ios:
     name: Release macOS & iOS (Universal)
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -91,8 +91,8 @@ jobs:
         with:
           name: rel-apple
           path: |
-            dist/apple/LanVidSDK-v2.4.0-macOS.pkg
-            dist/apple/LanVidSDK-v2.4.0-macOS.dmg
+            dist/apple/LanVidSDK-v2.5.0-macOS.pkg
+            dist/apple/LanVidSDK-v2.5.0-macOS.dmg
             dist/apple/LanVid-Studio-macOS.zip
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
@@ -135,16 +135,16 @@ jobs:
         run: |
           (cd sdk/android && gradle --no-daemon exportAar)
           (cd android && gradle --no-daemon exportUniversalApk)
-          cp android/LanVid-Android-universal.apk dist/android/LanVid-Android-v2.4.0.apk
+          cp android/LanVid-Android-universal.apk dist/android/LanVid-Android-v2.5.0.apk
           cp android/LanVid-Android-universal.apk dist/android/LanVid-Android.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: rel-android
           path: |
-            dist/android/LanVid-Android-v2.4.0.apk
+            dist/android/LanVid-Android-v2.5.0.apk
             dist/android/LanVid-Android.apk
-            dist/android/lanvid-sdk-2.4.0.aar
+            dist/android/lanvid-sdk-2.5.0.aar
           if-no-files-found: error
 
   publish-release:
@@ -170,21 +170,21 @@ jobs:
           # Individual platform installers & libraries
           cp release-staging/rel-windows/installer/windows/LanVid_Setup.exe release-assets/
           cp release-staging/rel-linux/installer/linux/LanVid-Linux-x86_64.run release-assets/
-          cp release-staging/rel-apple/LanVidSDK-v2.4.0-macOS.pkg release-assets/
-          cp release-staging/rel-apple/LanVidSDK-v2.4.0-macOS.dmg release-assets/
+          cp release-staging/rel-apple/LanVidSDK-v2.5.0-macOS.pkg release-assets/
+          cp release-staging/rel-apple/LanVidSDK-v2.5.0-macOS.dmg release-assets/
           cp release-staging/rel-apple/LanVid-Studio-macOS.zip release-assets/
-          cp release-staging/rel-android/LanVid-Android-v2.4.0.apk release-assets/
+          cp release-staging/rel-android/LanVid-Android-v2.5.0.apk release-assets/
           cp release-staging/rel-android/LanVid-Android.apk release-assets/
-          cp release-staging/rel-android/lanvid-sdk-2.4.0.aar release-assets/
+          cp release-staging/rel-android/lanvid-sdk-2.5.0.aar release-assets/
 
           # Combine unified cross-platform LanVidSDK-Universal.zip
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.4.0/* sdk-universal/
+          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/* sdk-universal/
           mkdir -p sdk-universal/windows/bin sdk-universal/windows/lib
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.4.0/bin/* sdk-universal/windows/bin/
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.4.0/lib/* sdk-universal/windows/lib/
-          cp -R release-staging/rel-linux/dist/LanVidSDK-v2.4.0/lib/* sdk-universal/linux/
+          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/bin/* sdk-universal/windows/bin/
+          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/lib/* sdk-universal/windows/lib/
+          cp -R release-staging/rel-linux/dist/LanVidSDK-v2.5.0/lib/* sdk-universal/linux/
           cp -R release-staging/rel-apple/LanVidCore.xcframework sdk-universal/apple/
-          cp release-staging/rel-android/lanvid-sdk-2.4.0.aar sdk-universal/android/
+          cp release-staging/rel-android/lanvid-sdk-2.5.0.aar sdk-universal/android/
 
           (cd sdk-universal && zip -r -q ../release-assets/LanVidSDK-Universal.zip .)
           ls -lh release-assets/
@@ -204,10 +204,10 @@ jobs:
           files: |
             release-assets/LanVid_Setup.exe
             release-assets/LanVid-Linux-x86_64.run
-            release-assets/LanVidSDK-v2.4.0-macOS.pkg
-            release-assets/LanVidSDK-v2.4.0-macOS.dmg
+            release-assets/LanVidSDK-v2.5.0-macOS.pkg
+            release-assets/LanVidSDK-v2.5.0-macOS.dmg
             release-assets/LanVid-Studio-macOS.zip
-            release-assets/LanVid-Android-v2.4.0.apk
+            release-assets/LanVid-Android-v2.5.0.apk
             release-assets/LanVid-Android.apk
-            release-assets/lanvid-sdk-2.4.0.aar
+            release-assets/lanvid-sdk-2.5.0.aar
             release-assets/LanVidSDK-Universal.zip

@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/installer/linux"
 BUILD="$ROOT/build-linux"
-VER="2.4.0"
+VER="2.5.0"
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \

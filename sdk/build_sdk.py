@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SDK_VERSION = "2.4.0"
+SDK_VERSION = "2.5.0"
 DIST_DIR = ROOT / "dist" / f"LanVidSDK-v{SDK_VERSION}"
 BUILD_SDK_DIR = ROOT / "build-sdk"
 
