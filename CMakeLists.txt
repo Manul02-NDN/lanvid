@@ -49,6 +49,11 @@ if(NOT Opus_FOUND)
   if(TARGET opus AND NOT TARGET Opus::opus)
     add_library(Opus::opus ALIAS opus)
   endif()
+  # libopus.a is linked into liblanvid_core.so / lanvid_core.dll (SDK shared library, Android .so):
+  # position-independent code is required on Linux (ld: "recompile with -fPIC").
+  if(TARGET opus)
+    set_target_properties(opus PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  endif()
 endif()
 
 # ---------------------------------------------------------------- build options

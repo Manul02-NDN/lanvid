@@ -16,7 +16,7 @@ android {
         applicationId = "com.lanvid.monitor"
         minSdk = 28            // AAudio usage / content type (API 28) + low-latency MMAP paths
         targetSdk = 35
-        versionCode = 250
+        versionCode = 260
         versionName = "2.6.0"
 
         ndk {
@@ -31,9 +31,24 @@ android {
         }
     }
 
+    // Release signing: mobile/android/lanvid-release.jks (CI creates an ephemeral key or decodes the
+    // ANDROID_KEYSTORE_BASE64 secret). Without the file the release APK is left unsigned.
+    val releaseKeystore = rootProject.file("lanvid-release.jks")
+    signingConfigs {
+        if (releaseKeystore.exists()) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("LANVID_KS_PASS") ?: "lanvid2026"
+                keyAlias = System.getenv("LANVID_KEY_ALIAS") ?: "lanvid"
+                keyPassword = System.getenv("LANVID_KEY_PASS") ?: "lanvid2026"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseKeystore.exists()) signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }

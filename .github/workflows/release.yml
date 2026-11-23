@@ -1,5 +1,9 @@
 name: Release Artifacts
 
+# Tag push `v*` (or manual run) builds every application and SDK, then - for tags - publishes a GitHub Release with
+# all files and the bilingual notes docs/RELEASE_NOTES_v<version>.md. The version is read from CMakeLists.txt
+# (project(lanvid VERSION x.y.z)) and must match the tag.
+
 on:
   push:
     tags:
@@ -9,10 +13,35 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    name: Resolve & verify version
+    runs-on: ubuntu-24.04
+    outputs:
+      v: ${{ steps.ver.outputs.v }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: |
+          V="$(sed -n 's/^project(lanvid VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -n 1)"
+          [ -n "$V" ] || { echo "Cannot read the project version from CMakeLists.txt" >&2; exit 1; }
+          echo "v=$V" >> "$GITHUB_OUTPUT"
+          echo "Project version: $V (ref: $GITHUB_REF)"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$V" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match the project version v$V" >&2
+            exit 1
+          fi
+
   release-windows:
     name: Release Windows (x64)
+    needs: version
     runs-on: windows-latest
+    env:
+      V: ${{ needs.version.outputs.v }}
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -28,19 +57,32 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
           .\build\lanvid_tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "lanvid_tests failed (exit=$LASTEXITCODE)" }
           python sdk/build_sdk.py --verify-client
           powershell -NoProfile -ExecutionPolicy Bypass -File installer/windows/build_windows_setup.ps1
+
+      - name: Verify installer version & package Windows SDK
+        shell: pwsh
+        run: |
+          $exe = "installer/windows/LanVid_Setup_v$env:V.exe"
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          $fv = (Get-Item $exe).VersionInfo.FileVersion
+          Write-Host "FileVersion of $exe = $fv"
+          if (-not $fv.StartsWith($env:V)) { throw "File version '$fv' does not match $env:V" }
+          Compress-Archive -Path "dist/LanVidSDK-v$env:V" -DestinationPath "dist/LanVidSDK-v$env:V-Windows.zip" -Force
 
       - uses: actions/upload-artifact@v4
         with:
           name: rel-windows
           path: |
-            installer/windows/LanVid_Setup.exe
-            dist/LanVidSDK-v2.5.0/
+            installer/windows/LanVid_Setup_v${{ needs.version.outputs.v }}.exe
+            dist/LanVidSDK-v${{ needs.version.outputs.v }}-Windows.zip
+            dist/LanVidSDK-v${{ needs.version.outputs.v }}/
           if-no-files-found: error
 
   release-linux:
     name: Release Linux (x86_64)
+    needs: version
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +95,7 @@ jobs:
             libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libpipewire-0.3-dev \
             libavcodec-dev libavutil-dev
 
-      - name: Build Core, Studio GUI, SDK & Linux Installer
+      - name: Build Core, Studio GUI, SDK & Linux packages (.run, .tar.gz, .deb)
         run: |
           chmod +x installer/linux/build_linux_packages.sh installer/linux/install_lanvid.sh
           ./installer/linux/build_linux_packages.sh
@@ -64,42 +106,79 @@ jobs:
           name: rel-linux
           path: |
             installer/linux/LanVid-Linux-x86_64.run
-            dist/LanVidSDK-v2.5.0/lib/
+            installer/linux/lanvid-v${{ needs.version.outputs.v }}-linux-x86_64.tar.gz
+            dist/LanVidSDK-v${{ needs.version.outputs.v }}/lib/
           if-no-files-found: error
 
-  release-macos-ios:
-    name: Release macOS & iOS (Universal)
+  release-macos:
+    name: Release macOS (Studio .dmg/.pkg + SDK)
+    needs: version
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tools & Build Universal .pkg, .dmg, LanVid Studio.app & XCFramework
+      - name: Install tools
+        run: brew install cmake ninja sdl2
+
+      - name: Build LanVid Studio .pkg / .dmg (CoreAudio HAL driver included)
         run: |
-          brew install cmake ninja sdl2
+          chmod +x installer/macos/build_studio_pkg.sh
+          ./installer/macos/build_studio_pkg.sh
+
+      - name: Build Studio .zip, SDK .pkg/.dmg & LanVidCore.xcframework
+        run: |
           chmod +x sdk/apple/build_xcframework.sh sdk/apple/build_macos_pkg.sh \
                    sdk/apple/installer/scripts/preinstall sdk/apple/installer/scripts/postinstall
           cmake -S . -B build-macos-app -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=OFF -DLANVID_BUILD_CLI=OFF
           cmake --build build-macos-app --target lanvid_app
           codesign --force --deep --sign - "build-macos-app/LanVid Studio.app"
-          mkdir -p dist/apple
           ditto -c -k --sequesterRsrc --keepParent "build-macos-app/LanVid Studio.app" dist/apple/LanVid-Studio-macOS.zip
           ./sdk/apple/build_macos_pkg.sh
-          cd sdk/apple && swift build
+          (cd sdk/apple && swift build)
 
       - uses: actions/upload-artifact@v4
         with:
           name: rel-apple
           path: |
-            dist/apple/LanVidSDK-v2.5.0-macOS.pkg
-            dist/apple/LanVidSDK-v2.5.0-macOS.dmg
+            dist/apple/LanVid-Studio-v${{ needs.version.outputs.v }}-macOS.pkg
+            dist/apple/LanVid-Studio-v${{ needs.version.outputs.v }}-macOS.dmg
+            dist/apple/LanVidSDK-v${{ needs.version.outputs.v }}-macOS.pkg
+            dist/apple/LanVidSDK-v${{ needs.version.outputs.v }}-macOS.dmg
             dist/apple/LanVid-Studio-macOS.zip
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
+  release-ios:
+    name: Release iOS (LanVid Monitor + LanVidCore)
+    needs: version
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install cmake ninja xcodegen
+
+      - name: Build LanVid Monitor (.xcarchive, unsigned .ipa) & LanVidCore.xcframework.zip
+        run: |
+          chmod +x mobile/ios/scripts/build_core.sh mobile/ios/scripts/package_ios.sh sdk/apple/build_xcframework.sh
+          ./mobile/ios/scripts/package_ios.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-ios
+          path: |
+            dist/ios/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS.zip
+            dist/ios/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS-unsigned.ipa
+            dist/ios/LanVidCore.xcframework.zip
+          if-no-files-found: error
+
   release-android:
-    name: Release Android (APK + AAR)
+    name: Release Android (Monitor APK + Camera APK + AAR)
+    needs: version
     runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.version.outputs.v }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -130,31 +209,42 @@ jobs:
               -alias lanvid -storepass lanvid2026 -keypass lanvid2026 \
               -dname "CN=LanVid Studio, OU=Release, O=LanVid, L=Kyiv, C=UA"
           fi
+          cp android/lanvid-release.jks mobile/android/lanvid-release.jks
 
-      - name: Build Android AAR & Universal APK
+      - name: Build Android AAR, Camera/Streaming APK & LanVid Monitor APK
         run: |
           (cd sdk/android && gradle --no-daemon exportAar)
           (cd android && gradle --no-daemon exportUniversalApk)
-          cp android/LanVid-Android-universal.apk dist/android/LanVid-Android-v2.5.0.apk
+          (cd mobile/android && gradle --no-daemon :app:assembleRelease)
+          mkdir -p dist/android
+          cp android/LanVid-Android-universal.apk "dist/android/LanVid-Android-v$V.apk"
           cp android/LanVid-Android-universal.apk dist/android/LanVid-Android.apk
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk "dist/android/LanVid-Monitor-v$V-android.apk"
+          APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -name apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --print-certs "dist/android/LanVid-Monitor-v$V-android.apk"
 
       - uses: actions/upload-artifact@v4
         with:
           name: rel-android
           path: |
-            dist/android/LanVid-Android-v2.5.0.apk
+            dist/android/LanVid-Monitor-v${{ needs.version.outputs.v }}-android.apk
+            dist/android/LanVid-Android-v${{ needs.version.outputs.v }}.apk
             dist/android/LanVid-Android.apk
-            dist/android/lanvid-sdk-2.5.0.aar
+            dist/android/lanvid-sdk-${{ needs.version.outputs.v }}.aar
           if-no-files-found: error
 
   publish-release:
     name: Assemble Universal SDK & Publish GitHub Release
     runs-on: ubuntu-24.04
     needs:
+      - version
       - release-windows
       - release-linux
-      - release-macos-ios
+      - release-macos
+      - release-ios
       - release-android
+    env:
+      V: ${{ needs.version.outputs.v }}
     steps:
       - uses: actions/checkout@v4
 
@@ -163,31 +253,53 @@ jobs:
         with:
           path: release-staging
 
-      - name: Assemble Final Release Assets & LanVidSDK-Universal.zip
+      - name: Assemble Final Release Assets, LanVidSDK-Universal.zip & checksums
         run: |
           mkdir -p release-assets sdk-universal/windows sdk-universal/linux sdk-universal/apple sdk-universal/android
+          S=release-staging
 
-          # Individual platform installers & libraries
-          cp release-staging/rel-windows/installer/windows/LanVid_Setup.exe release-assets/
-          cp release-staging/rel-linux/installer/linux/LanVid-Linux-x86_64.run release-assets/
-          cp release-staging/rel-apple/LanVidSDK-v2.5.0-macOS.pkg release-assets/
-          cp release-staging/rel-apple/LanVidSDK-v2.5.0-macOS.dmg release-assets/
-          cp release-staging/rel-apple/LanVid-Studio-macOS.zip release-assets/
-          cp release-staging/rel-android/LanVid-Android-v2.5.0.apk release-assets/
-          cp release-staging/rel-android/LanVid-Android.apk release-assets/
-          cp release-staging/rel-android/lanvid-sdk-2.5.0.aar release-assets/
+          # Windows
+          cp "$S/rel-windows/installer/windows/LanVid_Setup_v$V.exe" release-assets/
+          cp "$S/rel-windows/dist/LanVidSDK-v$V-Windows.zip" release-assets/
+          # Linux
+          cp "$S/rel-linux/installer/linux/lanvid-v$V-linux-x86_64.tar.gz" release-assets/
+          cp "$S/rel-linux/installer/linux/LanVid-Linux-x86_64.run" release-assets/
+          # macOS
+          cp "$S/rel-apple/LanVid-Studio-v$V-macOS.pkg" release-assets/
+          cp "$S/rel-apple/LanVid-Studio-v$V-macOS.dmg" release-assets/
+          cp "$S/rel-apple/LanVidSDK-v$V-macOS.pkg" release-assets/
+          cp "$S/rel-apple/LanVidSDK-v$V-macOS.dmg" release-assets/
+          cp "$S/rel-apple/LanVid-Studio-macOS.zip" release-assets/
+          # iOS
+          cp "$S/rel-ios/LanVid-Monitor-v$V-iOS.zip" release-assets/
+          cp "$S/rel-ios/LanVid-Monitor-v$V-iOS-unsigned.ipa" release-assets/
+          cp "$S/rel-ios/LanVidCore.xcframework.zip" release-assets/
+          # Android
+          cp "$S/rel-android/LanVid-Monitor-v$V-android.apk" release-assets/
+          cp "$S/rel-android/LanVid-Android-v$V.apk" release-assets/
+          cp "$S/rel-android/LanVid-Android.apk" release-assets/
+          cp "$S/rel-android/lanvid-sdk-$V.aar" release-assets/
 
-          # Combine unified cross-platform LanVidSDK-Universal.zip
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/* sdk-universal/
+          # Unified cross-platform SDK
+          cp -R "$S/rel-windows/dist/LanVidSDK-v$V/"* sdk-universal/
           mkdir -p sdk-universal/windows/bin sdk-universal/windows/lib
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/bin/* sdk-universal/windows/bin/
-          cp -R release-staging/rel-windows/dist/LanVidSDK-v2.5.0/lib/* sdk-universal/windows/lib/
-          cp -R release-staging/rel-linux/dist/LanVidSDK-v2.5.0/lib/* sdk-universal/linux/
-          cp -R release-staging/rel-apple/LanVidCore.xcframework sdk-universal/apple/
-          cp release-staging/rel-android/lanvid-sdk-2.5.0.aar sdk-universal/android/
-
+          cp -R "$S/rel-windows/dist/LanVidSDK-v$V/bin/"* sdk-universal/windows/bin/
+          cp -R "$S/rel-windows/dist/LanVidSDK-v$V/lib/"* sdk-universal/windows/lib/
+          cp -R "$S/rel-linux/dist/LanVidSDK-v$V/lib/"* sdk-universal/linux/
+          cp -R "$S/rel-apple/LanVidCore.xcframework" sdk-universal/apple/
+          cp "$S/rel-android/lanvid-sdk-$V.aar" sdk-universal/android/
           (cd sdk-universal && zip -r -q ../release-assets/LanVidSDK-Universal.zip .)
+
+          (cd release-assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
           ls -lh release-assets/
+
+      - name: Prepare release notes
+        run: |
+          if [ -f "docs/RELEASE_NOTES_v$V.md" ]; then
+            cp "docs/RELEASE_NOTES_v$V.md" release-notes.md
+          else
+            echo "LanVid v$V" > release-notes.md
+          fi
 
       - name: Upload Final Release Bundle Artifact
         uses: actions/upload-artifact@v4
@@ -200,14 +312,25 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: LanVid v${{ needs.version.outputs.v }}
+          body_path: release-notes.md
+          fail_on_unmatched_files: true
           files: |
-            release-assets/LanVid_Setup.exe
-            release-assets/LanVid-Linux-x86_64.run
-            release-assets/LanVidSDK-v2.5.0-macOS.pkg
-            release-assets/LanVidSDK-v2.5.0-macOS.dmg
+            release-assets/LanVid_Setup_v${{ needs.version.outputs.v }}.exe
+            release-assets/LanVidSDK-v${{ needs.version.outputs.v }}-Windows.zip
+            release-assets/LanVid-Studio-v${{ needs.version.outputs.v }}-macOS.dmg
+            release-assets/LanVid-Studio-v${{ needs.version.outputs.v }}-macOS.pkg
+            release-assets/LanVidSDK-v${{ needs.version.outputs.v }}-macOS.pkg
+            release-assets/LanVidSDK-v${{ needs.version.outputs.v }}-macOS.dmg
             release-assets/LanVid-Studio-macOS.zip
-            release-assets/LanVid-Android-v2.5.0.apk
+            release-assets/LanVid-Monitor-v${{ needs.version.outputs.v }}-android.apk
+            release-assets/LanVid-Android-v${{ needs.version.outputs.v }}.apk
             release-assets/LanVid-Android.apk
-            release-assets/lanvid-sdk-2.5.0.aar
+            release-assets/lanvid-sdk-${{ needs.version.outputs.v }}.aar
+            release-assets/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS.zip
+            release-assets/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS-unsigned.ipa
+            release-assets/LanVidCore.xcframework.zip
+            release-assets/lanvid-v${{ needs.version.outputs.v }}-linux-x86_64.tar.gz
+            release-assets/LanVid-Linux-x86_64.run
             release-assets/LanVidSDK-Universal.zip
+            release-assets/SHA256SUMS.txt

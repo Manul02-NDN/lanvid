@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/clock.hpp"
 #include "lanvid/lanvid_sdk.h"
 #include "net/mdns_advertiser.hpp"
 #if defined(__APPLE__)
@@ -82,15 +83,15 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
         const float* pp[kCh];
         for (int c = 0; c < kCh; ++c) pp[c] = pl[c].data();
         uint64_t n = 0;
-        auto next = std::chrono::steady_clock::now();
+        uint64_t next = lv::now_us();
         while (!stop.load()) {
             for (int c = 0; c < kCh; ++c)
                 for (uint32_t i = 0; i < kBlk; ++i)  // loud tones (-3 dBFS) so the compressor has work
                     pl[c][i] = 0.7f * float(std::sin(2.0 * 3.14159265358979 * (220.0 * (c + 1)) * double(n + i) / 48000.0));
             lv_monitor_server_push_audio_planar(srv, pp, kCh, kBlk);
             n += kBlk;
-            next += std::chrono::microseconds(5000);
-            std::this_thread::sleep_until(next);
+            next += 5000;
+            lv::sleep_until_us(next, [] {});
         }
     });
 
@@ -100,18 +101,24 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
     REQUIRE(lv_monitor_client_connect(cli, "127.0.0.1", port, "Pixel-Test", LV_MONITOR_BITRATE_LOSSLESS, 20) == LV_OK);
     std::atomic<uint64_t> nonsilent{0};
     std::thread phone([&] {  // network poll + meta at 20 Hz + keepalive 1 s + "audio callback" pops
-        std::vector<float> st(2 * 96);
-        auto t_meta = std::chrono::steady_clock::now(), t_keep = t_meta;
-        auto next = t_meta;
+        // The audio callback pulls exactly the frames that elapsed on a precise clock (a device clock does
+        // not care how coarse the OS sleep is; Windows sleeps in ~15 ms steps without a high-res timer).
+        std::vector<float> st(2 * 1024);
+        const uint64_t t0 = lv::now_us();
+        uint64_t t_meta = t0, t_keep = t0, popped = 0;
         while (!stop.load()) {
             lv_monitor_client_poll(cli);
-            const auto now = std::chrono::steady_clock::now();
-            if (now - t_meta > std::chrono::milliseconds(50)) { lv_monitor_client_request_meta(cli); t_meta = now; }
-            if (now - t_keep > std::chrono::seconds(1)) { lv_monitor_client_keepalive(cli); t_keep = now; }
-            lv_monitor_client_pop_stereo(cli, st.data(), 96);
-            for (float v : st) if (std::fabs(v) > 0.01f) { nonsilent.fetch_add(1); break; }
-            next += std::chrono::microseconds(2000);  // 96 frames @ 48 kHz
-            std::this_thread::sleep_until(next);
+            const uint64_t now = lv::now_us();
+            if (now - t_meta > 50'000) { lv_monitor_client_request_meta(cli); t_meta = now; }
+            if (now - t_keep > 1'000'000) { lv_monitor_client_keepalive(cli); t_keep = now; }
+            const uint64_t due = (now - t0) * 48000ull / 1000000ull;
+            while (popped + 96 <= due) {
+                lv_monitor_client_pop_stereo(cli, st.data(), 96);
+                popped += 96;
+                for (int i = 0; i < 192; ++i)
+                    if (std::fabs(st[size_t(i)]) > 0.01f) { nonsilent.fetch_add(1); break; }
+            }
+            lv::sleep_until_us(lv::now_us() + 1000, [] {});
         }
     });
 
@@ -150,7 +157,7 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
     // mDNS announcement (what Studio publishes when the monitor server is on).
     lv::MdnsAdvertiser adv;
     const std::string inst = "LanVid Studio (unit-" + std::to_string(port) + ")";
-    const bool adv_ok = adv.start(inst, port, {{"role", "monitor"}, {"ver", "2.5.0"}});
+    const bool adv_ok = adv.start(inst, port, {{"role", "monitor"}, {"ver", "2.6.0"}});
     bool mdns_found = false;
     uint16_t mdns_port = 0;
     std::string mdns_role;
@@ -204,7 +211,9 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
     CHECK(std::string(info[0].name) == "Pixel-Test");
     CHECK(tel2.audio_packets_rx > audio_before && audio_before > 50);  // stream continued across the change
     CHECK(tel2.meta_packets_rx > 5);
-    CHECK(tel2.buffer_ms > 12.0 && tel2.buffer_ms < 25.0);  // the 15 ms the musician chose (Fixed, no growth)
+    // The 15 ms the musician chose (Fixed, no growth to 50..200 ms). The reading also includes how much of the
+    // current pop cycle has elapsed (up to ~4 ms), hence the lower bound.
+    CHECK(tel2.buffer_ms > 8.0 && tel2.buffer_ms < 25.0);
     CHECK(nonsilent.load() > 100);
 #if defined(__APPLE__)
     CHECK(lv::MdnsAdvertiser::supported());

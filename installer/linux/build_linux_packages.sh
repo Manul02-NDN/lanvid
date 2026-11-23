@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/installer/linux"
 BUILD="$ROOT/build-linux"
-VER="2.6.0"
+VER="$(sed -n 's/^project(lanvid VERSION \([0-9.]*\).*/\1/p' "$ROOT/CMakeLists.txt" | head -n 1)"
+[ -n "$VER" ] || { echo "Cannot read the project version from CMakeLists.txt" >&2; exit 1; }
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -82,6 +83,9 @@ chmod +x "$STAGE/install_lanvid.sh"
 
 PAYLOAD="$BUILD/payload.tar.gz"
 tar -czf "$PAYLOAD" -C "$STAGE" .
+# Plain versioned archive (bin/, lib/, install_lanvid.sh, desktop entry) for manual installs / packaging.
+cp "$PAYLOAD" "$OUT/lanvid-v${VER}-linux-x86_64.tar.gz"
+echo "Built $OUT/lanvid-v${VER}-linux-x86_64.tar.gz"
 cat > "$OUT/LanVid-Linux-x86_64.run" <<'HEADER'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "audio/audio_rx.hpp"
@@ -194,11 +195,14 @@ TEST(audio_realtime_rate_integrity_48khz) {
     std::vector<std::vector<float>> rd(kCh, std::vector<float>(1024));
     float* rp[kCh] = {rd[0].data(), rd[1].data()};
     const uint64_t t_start = lv::now_us();
-    // Rate measurement on the mixer's own block boundaries: (time, frames) at the first block completed
-    // after warm-up and at the first one completed >= 1.0 s later -> frames per exactly 1.0 s.
-    uint64_t f_a = 0, t_a = 0, f_b = 0, t_b = 0, last_f = mx.frames_mixed();
+    // Rate measurement: every observed (time, frames_mixed) pair after warm-up goes into a least-squares fit.
+    // The observer wakes up late by a roughly constant amount (OS timer granularity: ~1 ms on Linux/macOS,
+    // up to a few ms on a loaded Windows runner), which shifts all timestamps alike and cancels in the slope;
+    // a two-point measurement would carry that jitter straight into the result.
+    std::vector<std::pair<double, double>> obs;  // (seconds, frames)
+    uint64_t last_f = mx.frames_mixed();
     int ch_mismatch = 0;
-    while (lv::now_us() - t_start < 4'000'000) {
+    while (lv::now_us() - t_start < 5'000'000) {
         const uint32_t got = mx.extract_slot_output(1, rp, kCh, 1024);
         const bool warm = lv::now_us() - t_start > 2'500'000;
         if (warm)
@@ -208,12 +212,10 @@ TEST(audio_realtime_rate_integrity_48khz) {
             }
         const uint64_t f = mx.frames_mixed();
         if (f != last_f) {
-            const uint64_t t = lv::now_us();
-            if (warm && t_a == 0) { t_a = t; f_a = f; }
-            else if (t_a && !t_b && t - t_a >= 1'000'000) { t_b = t; f_b = f; }
+            if (warm) obs.emplace_back(double(lv::now_us() - t_start) * 1e-6, double(f));
             last_f = f;
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        lv::sleep_until_us(lv::now_us() + 500, [] {});  // high-resolution wait (waitable timer on Windows)
     }
     mx.stop();
     stop.store(true);
@@ -223,8 +225,14 @@ TEST(audio_realtime_rate_integrity_48khz) {
     lv_sender_destroy(tx);
     lv_receiver_destroy(rx);
 
-    REQUIRE(t_b > t_a && t_a > 0);
-    const double frames_per_sec = double(f_b - f_a) * 1e6 / double(t_b - t_a);
+    REQUIRE(obs.size() > 100 && obs.back().first - obs.front().first > 1.5);
+    double mt = 0, mf = 0;
+    for (const auto& o : obs) { mt += o.first; mf += o.second; }
+    mt /= double(obs.size());
+    mf /= double(obs.size());
+    double sxy = 0, sxx = 0;
+    for (const auto& o : obs) { sxy += (o.first - mt) * (o.second - mf); sxx += (o.first - mt) * (o.first - mt); }
+    const double frames_per_sec = sxy / sxx;  // frames mixed per second of wall time
     // Only real audio: trim leading silence (before the 30 ms buffer filled).
     size_t first = 0;
     while (first < out.size() && std::fabs(out[first]) < 1e-4f) ++first;
