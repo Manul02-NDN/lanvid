@@ -395,3 +395,87 @@ TEST(audio_64ch_c_api_udp_loopback) {
     lv_sender_destroy(tx);
     lv_receiver_destroy(rx);
 }
+
+TEST(audio_64ch_wifi_jitter_phase_lock) {
+    using namespace lv;
+    constexpr uint32_t kCh = 64;
+    constexpr uint32_t kBlk = 240;         // 5 ms blocks
+    constexpr uint32_t kTotalBlocks = 400; // 2.0 s of virtual time
+
+    // 1. Verify PCM24 wire packing saves ~25% bandwidth vs Float32 across 64 channels
+    uint64_t bytes_f32 = 0, bytes_pcm24 = 0;
+    {
+        AudioTxEngine tx_f32(kRate, kDefaultMtu, [&](const uint8_t*, size_t len) { bytes_f32 += len; return true; });
+        AudioTxEngine tx_p24(kRate, kDefaultMtu, [&](const uint8_t*, size_t len) { bytes_pcm24 += len; return true; });
+        tx_f32.set_latency_ms(120);
+        tx_p24.set_latency_ms(120);
+        tx_p24.set_wire_pcm24(true);
+        std::vector<float> blk(kBlk, 0.25f);
+        for (uint32_t b = 0; b < 20; ++b) {
+            for (uint16_t c = 0; c < kCh; ++c) {
+                tx_f32.push_channel(c, blk.data(), kBlk, AudioFormat2::kFloat32, uint64_t(b) * kBlk, b * 5000);
+                tx_p24.push_channel(c, blk.data(), kBlk, AudioFormat2::kFloat32, uint64_t(b) * kBlk, b * 5000);
+            }
+        }
+        tx_f32.flush(100000);
+        tx_p24.flush(100000);
+    }
+    const double bw_ratio = double(bytes_pcm24) / double(std::max<uint64_t>(bytes_f32, 1));
+    CHECK(bw_ratio < 0.82);
+
+    // 2. 64ch Wi-Fi 6 simulation: 10..120 ms per-packet jitter + 5% packet loss + PCM24
+    Sim sim;
+    std::mt19937 jrng(0x64C4F1F1u);
+    std::uniform_int_distribution<uint64_t> jdist(10000, 120000);  // 10..120 ms Wi-Fi jitter
+    sim.loss_fwd = 0.05;
+    sim.delay_fwd = [&](uint16_t, uint64_t) { return jdist(jrng); };
+    sim.tx.set_latency_ms(150);
+    sim.tx.set_wire_pcm24(true);
+    sim.rx.set_latency_ms(150);
+    sim.mat.set_adaptive_jitter(true, 5, 200);
+    sim.mat.set_atomic_frame_lock(true);
+
+    std::vector<float> in_blk(kBlk);
+    std::vector<std::vector<float>> out_planes(kCh, std::vector<float>(kBlk, 0.0f));
+    float* out_ptrs[kCh];
+    for (uint32_t c = 0; c < kCh; ++c) out_ptrs[c] = out_planes[c].data();
+
+    uint64_t divergent_ch1_ch64 = 0;
+    uint64_t nonsilent_samples = 0;
+    double max_diff = 0.0;
+
+    for (uint32_t b = 0; b < kTotalBlocks; ++b) {
+        const uint64_t media_ts = uint64_t(sim.master_samples_now());
+        for (uint32_t i = 0; i < kBlk; ++i) {
+            in_blk[i] = 0.5f * std::sin(0.06f * float(media_ts + i));
+        }
+        for (uint16_t c = 0; c < kCh; ++c) {
+            sim.tx.push_channel(c, in_blk.data(), kBlk, AudioFormat2::kFloat32, media_ts, uint32_t(sim.now));
+        }
+        sim.now += 5000;  // advance 5 ms
+        sim.deliver();
+        sim.rx.service(sim.now);
+
+        sim.mat.pop_planar(sim.clk, sim.now, out_ptrs, kCh, kBlk);
+        if (b >= 80) {  // after initial 400 ms warmup
+            for (uint32_t i = 0; i < kBlk; ++i) {
+                const float ch1 = out_planes[0][i];
+                const float ch64 = out_planes[kCh - 1][i];
+                const double diff = std::fabs(double(ch1) - double(ch64));
+                if (diff > max_diff) max_diff = diff;
+                if (diff > 1e-4) ++divergent_ch1_ch64;
+                if (std::fabs(ch1) > 0.01f && std::fabs(ch64) > 0.01f) ++nonsilent_samples;
+            }
+        }
+    }
+
+    std::printf("    [64ch Wi-Fi 10-120ms jitter / 5%% loss / PCM24] bw_ratio=%.3f eff_lat=%ums resyncs=%llu "
+                "nonsilent=%llu max_diff_ch1_ch64=%.2e divergent=%llu (dropped=%llu/%llu)\n",
+                bw_ratio, sim.mat.effective_latency_ms(), (unsigned long long)sim.mat.resync_count(),
+                (unsigned long long)nonsilent_samples, max_diff, (unsigned long long)divergent_ch1_ch64,
+                (unsigned long long)sim.dropped_fwd, (unsigned long long)sim.sent_fwd);
+
+    CHECK(nonsilent_samples > 10000);
+    CHECK(divergent_ch1_ch64 == 0);  // Strictly 0-sample phase skew between Channel 1 and Channel 64!
+    CHECK(sim.mat.effective_latency_ms() >= 5 && sim.mat.effective_latency_ms() <= 200);
+}

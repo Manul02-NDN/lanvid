@@ -36,6 +36,9 @@ public:
 
     void set_latency_ms(uint32_t ms);
     uint32_t latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
+    // Transparent 24-bit packed PCM network compression (-25% bandwidth vs Float32, full 144 dB dynamic range).
+    void set_wire_pcm24(bool enabled) { wire_pcm24_.store(enabled, std::memory_order_release); }
+    bool wire_pcm24() const { return wire_pcm24_.load(std::memory_order_acquire); }
     AudioReliabilityProfile profile(AudioFormat2 fmt) const;
 
     // Pushes samples of ONE channel (contiguous in `fmt`). `media_ts` is the master-clock position of
@@ -67,6 +70,7 @@ private:
     size_t mtu_;
     SendFn send_;
     std::atomic<uint32_t> latency_ms_{20};
+    std::atomic<bool> wire_pcm24_{false};
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
     std::mutex create_mu_;
 

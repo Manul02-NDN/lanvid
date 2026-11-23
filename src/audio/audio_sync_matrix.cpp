@@ -8,7 +8,8 @@ namespace lv {
 
 namespace {
 constexpr uint32_t kCrossfadeSamples = 96;
-constexpr double kMaxRatioOffset = 100e-6;  // +/-100 ppm
+constexpr double kMaxRatioOffset = 100e-6;          // +/-100 ppm (standard LAN)
+constexpr double kAdaptiveMaxRatioOffset = 500e-6;  // +/-0.05% (+/-500 ppm for Wi-Fi jitter absorption)
 constexpr double kDeadbandSamples = 1.5;
 
 inline uint32_t pow2_at_least(uint64_t v) {
@@ -58,7 +59,78 @@ void AudioSyncMatrix::reset() {
 void AudioSyncMatrix::set_target_latency_ms(uint32_t ms) {
     ms = std::clamp(ms, kMinLatencyMs, kMaxLatencyMs);
     if (latency_ms_.exchange(ms, std::memory_order_acq_rel) != ms) {
+        effective_latency_ms_.store(ms, std::memory_order_release);
         latency_dirty_.store(true, std::memory_order_release);
+    }
+}
+
+void AudioSyncMatrix::set_adaptive_jitter(bool enabled, uint32_t min_ms, uint32_t max_ms) {
+    min_ms = std::clamp(min_ms, kMinLatencyMs, kMaxLatencyMs);
+    max_ms = std::clamp(max_ms, min_ms, kMaxLatencyMs);
+    jitter_min_ms_.store(min_ms, std::memory_order_relaxed);
+    jitter_max_ms_.store(max_ms, std::memory_order_relaxed);
+    adaptive_jitter_.store(enabled, std::memory_order_release);
+    if (!enabled) {
+        effective_latency_ms_.store(latency_ms_.load(std::memory_order_relaxed), std::memory_order_release);
+    }
+}
+
+void AudioSyncMatrix::observe_network_jitter_us(uint32_t jitter_us) {
+    // Fast attack, slow decay envelope on network jitter
+    uint32_t prev = observed_jitter_us_.load(std::memory_order_relaxed);
+    uint32_t next = (jitter_us > prev) ? jitter_us : uint32_t(double(prev) * 0.995 + double(jitter_us) * 0.005);
+    observed_jitter_us_.store(next, std::memory_order_relaxed);
+
+    if (adaptive_jitter_.load(std::memory_order_acquire)) {
+        const uint32_t base = latency_ms_.load(std::memory_order_relaxed);
+        const uint32_t lo = jitter_min_ms_.load(std::memory_order_relaxed);
+        const uint32_t hi = jitter_max_ms_.load(std::memory_order_relaxed);
+        // Reserve ~2.5x measured jitter margin inside [min_ms, max_ms] without triggering hard reanchor.
+        const uint32_t margin_ms = uint32_t((uint64_t(next) * 5 + 1999) / 2000);
+        const uint32_t want = std::clamp(std::max(base, lo + margin_ms), lo, hi);
+        const uint32_t cur = effective_latency_ms_.load(std::memory_order_relaxed);
+        if (want > cur) {
+            effective_latency_ms_.store(want, std::memory_order_release);
+        } else if (want < cur && cur > base) {
+            effective_latency_ms_.store(cur - 1, std::memory_order_release);
+        }
+    }
+}
+
+void AudioSyncMatrix::write_frame_atomic(uint64_t ts, const float* const* planes,
+                                         uint32_t num_channels, uint32_t frames) {
+    if (!planes || frames == 0) return;
+    const uint32_t nch = std::min(num_channels, kChannels);
+    // Ensure rings exist for all channels first
+    for (uint32_t chi = 0; chi < nch; ++chi) {
+        Chan& c = ch_[chi];
+        Ring* r = c.ring.load(std::memory_order_relaxed);
+        if (!r) {
+            r = new Ring();
+            r->data.assign(cap_, 0.0f);
+            r->tag.assign(cap_, 0);
+            c.ring.store(r, std::memory_order_release);
+        }
+        const float* src = planes[chi];
+        for (uint32_t i = 0; i < frames; ++i) {
+            const uint32_t idx = uint32_t(ts + i) & mask_;
+            r->data[idx] = src ? src[i] : 0.0f;
+        }
+    }
+    // Single release fence publishes all N channels for [ts, ts + frames) atomically
+    std::atomic_thread_fence(std::memory_order_release);
+    const uint64_t end = ts + frames;
+    for (uint32_t chi = 0; chi < nch; ++chi) {
+        Chan& c = ch_[chi];
+        Ring* r = c.ring.load(std::memory_order_relaxed);
+        for (uint32_t i = 0; i < frames; ++i) {
+            const uint64_t p = ts + i;
+            r->tag[uint32_t(p) & mask_] = uint16_t((p >> shift_) + 1);
+        }
+        const uint64_t first = c.first_ts.load(std::memory_order_relaxed);
+        if (ts < first) c.first_ts.store(ts, std::memory_order_relaxed);
+        if (end > c.head.load(std::memory_order_relaxed)) c.head.store(end, std::memory_order_release);
+        c.write_count.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -102,7 +174,10 @@ bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, float& v) const {
 }
 
 int64_t AudioSyncMatrix::desired_cursor(const MasterClock& clk, uint64_t local_now_us) const {
-    const int64_t lat = int64_t(latency_ms_.load(std::memory_order_relaxed)) * rate_ / 1000;
+    const uint32_t eff_ms = adaptive_jitter_.load(std::memory_order_acquire)
+                                ? effective_latency_ms_.load(std::memory_order_acquire)
+                                : latency_ms_.load(std::memory_order_relaxed);
+    const int64_t lat = int64_t(eff_ms) * rate_ / 1000;
     int64_t master;
     if (clk.synced()) {
         master = clk.master_samples(local_now_us, rate_);
@@ -117,6 +192,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     Plan p;
     const int64_t desired = desired_cursor(clk, local_now_us);
     const bool dirty = latency_dirty_.exchange(false, std::memory_order_acq_rel);
+    const bool adaptive = adaptive_jitter_.load(std::memory_order_acquire);
     if (!started_) {
         if (!clk.synced() && newest_media_ts() == 0) {  // nothing to align to yet
             p.cursor = cursor_ = double(std::max<int64_t>(desired, 0));
@@ -132,7 +208,9 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     }
 
     const double err = double(desired) - cursor_;
-    const double hard = double(rate_) * 0.040;  // > 40 ms off -> re-seek
+    // In adaptive Wi-Fi jitter mode, absorb spikes up to 250 ms via smooth +/-0.05% micro-resampling
+    // instead of triggering audible hard reanchors.
+    const double hard = double(rate_) * (adaptive ? 0.250 : 0.040);
     if (dirty || std::fabs(err) > hard) {
         p.seek = true;
         p.old_cursor = cursor_;
@@ -148,9 +226,10 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     const double alpha = std::min(1.0, double(frames) / (double(rate_) * 0.5));
     err_filt_ += (err - err_filt_) * alpha;
 
+    const double max_off = adaptive ? kAdaptiveMaxRatioOffset : kMaxRatioOffset;
     double off = 0.0;
     if (std::fabs(err_filt_) > kDeadbandSamples) {
-        off = std::clamp(err_filt_ / (double(rate_) * 4.0), -kMaxRatioOffset, kMaxRatioOffset);
+        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -max_off, max_off);
     }
     p.cursor = cursor_;
     p.ratio = 1.0 + off;
@@ -250,6 +329,28 @@ void AudioSyncMatrix::pop_planar(const MasterClock& clk, uint64_t local_now_us, 
             render_channel(uint16_t(c), p, frames, scratch.data(), 1);
         }
     }
+    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
+        // Strict atomic frame lock: if any active channel missed sample `pos` (unrecovered by FEC),
+        // zero all rendered channels for that exact sample index simultaneously -> 0-sample skew.
+        for (uint32_t i = 0; i < frames; ++i) {
+            const int64_t i0 = int64_t(std::floor(p.cursor + double(i) * p.ratio));
+            bool frame_incomplete = false;
+            for (uint32_t c = 0; c < num_channels; ++c) {
+                if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
+                const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
+                float dummy = 0.0f;
+                if (!r || !sample_at(*r, i0, dummy)) {
+                    frame_incomplete = true;
+                    break;
+                }
+            }
+            if (frame_incomplete) {
+                for (uint32_t c = 0; c < num_channels; ++c) {
+                    if (out[c]) out[c][i] = 0.0f;
+                }
+            }
+        }
+    }
     cursor_ = p.cursor + double(frames) * p.ratio;
     cursor_pub_.store(cursor_, std::memory_order_relaxed);
 }
@@ -266,6 +367,24 @@ void AudioSyncMatrix::pop_interleaved(const MasterClock& clk, uint64_t local_now
             static thread_local std::vector<float> scratch;
             if (scratch.size() < frames) scratch.resize(frames);
             render_channel(uint16_t(c), p, frames, scratch.data(), 1);
+        }
+    }
+    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
+        for (uint32_t i = 0; i < frames; ++i) {
+            const int64_t i0 = int64_t(std::floor(p.cursor + double(i) * p.ratio));
+            bool frame_incomplete = false;
+            for (uint32_t c = 0; c < num_channels; ++c) {
+                if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
+                const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
+                float dummy = 0.0f;
+                if (!r || !sample_at(*r, i0, dummy)) {
+                    frame_incomplete = true;
+                    break;
+                }
+            }
+            if (frame_incomplete) {
+                std::memset(out + size_t(i) * num_channels, 0, size_t(num_channels) * sizeof(float));
+            }
         }
     }
     cursor_ = p.cursor + double(frames) * p.ratio;

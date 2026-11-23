@@ -1,6 +1,7 @@
 #include "audio/audio_tx.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "common/clock.hpp"
@@ -200,6 +201,25 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
     Stream& s = *sp;
     std::lock_guard<std::mutex> lk(s.mu);
 
+    // Optional transparent Float32 -> 24-bit Packed PCM wire compression (-25% traffic, 144 dB range).
+    static thread_local std::vector<uint8_t> pcm24_buf;
+    const uint8_t* src = static_cast<const uint8_t*>(samples);
+    if (fmt == AudioFormat2::kFloat32 && wire_pcm24_.load(std::memory_order_acquire)) {
+        pcm24_buf.resize(size_t(num_samples) * 3);
+        const float* fp = static_cast<const float*>(samples);
+        for (uint32_t i = 0; i < num_samples; ++i) {
+            const float clamped = std::clamp(fp[i], -1.0f, 1.0f);
+            int32_t q = int32_t(std::lrint(double(clamped) * 8388607.0));
+            q = std::clamp<int32_t>(q, -8388608, 8388607);
+            const uint32_t u = uint32_t(q) & 0xFFFFFFu;
+            pcm24_buf[3 * i + 0] = uint8_t(u & 0xFFu);
+            pcm24_buf[3 * i + 1] = uint8_t((u >> 8) & 0xFFu);
+            pcm24_buf[3 * i + 2] = uint8_t((u >> 16) & 0xFFu);
+        }
+        src = pcm24_buf.data();
+        fmt = AudioFormat2::kPcm24Packed;
+    }
+
     // Format change or discontinuity closes the partial chunk first.
     if (s.stage_samples && (fmt != s.fmt || media_ts != s.next_ts)) flush_stream(s, channel, wallclock_us);
     const uint32_t lat = latency_ms_.load(std::memory_order_relaxed);
@@ -212,7 +232,6 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
     update_loss_estimate();
 
     const size_t bps = audio2_bytes_per_sample(fmt);
-    const uint8_t* src = static_cast<const uint8_t*>(samples);
     uint64_t ts = media_ts;
     uint32_t left = num_samples;
     while (left) {

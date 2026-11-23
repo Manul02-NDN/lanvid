@@ -238,7 +238,9 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
         if (s.has_transit) {
             const double dv = std::fabs(double(int32_t(transit - s.prev_transit)));
             s.jitter += (dv - s.jitter) / 16.0;
-            s.jitter_us.store(uint32_t(s.jitter), std::memory_order_relaxed);
+            const uint32_t j_us = uint32_t(s.jitter);
+            s.jitter_us.store(j_us, std::memory_order_relaxed);
+            matrix_.observe_network_jitter_us(j_us);
         }
         s.has_transit = true;
         s.prev_transit = transit;

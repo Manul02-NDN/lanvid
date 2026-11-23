@@ -43,10 +43,20 @@ public:
 
     // ---- Producer (single network thread) ----
     void write(uint16_t channel, uint64_t media_ts, const float* samples, uint32_t n);
+    // Atomic multi-channel frame block write: binds all `num_channels` to one monotonic `media_ts`.
+    void write_frame_atomic(uint64_t media_ts, const float* const* planes, uint32_t num_channels, uint32_t frames);
 
-    // ---- Latency control (any thread; applied seamlessly with a short crossfade) ----
+    // ---- Latency & Adaptive Wi-Fi Jitter Buffer control ----
     void set_target_latency_ms(uint32_t ms);
     uint32_t target_latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
+    uint32_t effective_latency_ms() const { return effective_latency_ms_.load(std::memory_order_relaxed); }
+    // Enables adaptive Wi-Fi jitter buffer (min_ms..max_ms, default 5..200 ms) with smooth +/-0.05% micro-resampling.
+    void set_adaptive_jitter(bool enabled, uint32_t min_ms = 5, uint32_t max_ms = 200);
+    void observe_network_jitter_us(uint32_t jitter_us);
+    // Strict inter-channel atomic frame lock: if any active channel is missing at sample `pos`,
+    // all active channels output 0 together so zero inter-track skew is mathematically guaranteed.
+    void set_atomic_frame_lock(bool enabled) { atomic_frame_lock_.store(enabled, std::memory_order_release); }
+    bool atomic_frame_lock() const { return atomic_frame_lock_.load(std::memory_order_acquire); }
 
     // ---- Consumer (audio thread) ----
     // Planar render: out[c] receives `frames` samples for c < num_channels (null entries skipped).
@@ -101,7 +111,13 @@ private:
     uint32_t shift_;
     uint32_t mask_;
     std::atomic<uint32_t> latency_ms_{50};
+    std::atomic<uint32_t> effective_latency_ms_{50};
     std::atomic<bool> latency_dirty_{true};
+    std::atomic<bool> adaptive_jitter_{false};
+    std::atomic<uint32_t> jitter_min_ms_{5};
+    std::atomic<uint32_t> jitter_max_ms_{200};
+    std::atomic<uint32_t> observed_jitter_us_{0};
+    std::atomic<bool> atomic_frame_lock_{false};
 
     Chan ch_[kChannels];
 

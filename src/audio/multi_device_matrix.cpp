@@ -55,12 +55,13 @@ float db_to_linear(float db) {
     return std::pow(10.0f, db / 20.0f);
 }
 
-// Lock-free SPSC planar float32 ring buffer (up to 64 channels x kRingCap frames).
+// Lock-free SPSC atomic multi-channel frame-block ring buffer (interleaved [frame][ch], up to 64 ch x kRingCap).
+// Guarantees whole multi-channel frames are published/consumed atomically so even/odd channels never skew on underrun.
 class LockFreePlanarRing {
 public:
     void configure(int channels) {
         channels_ = std::clamp(channels, 1, kMatrixMaxChannels);
-        data_.assign(size_t(channels_) * kRingCap, 0.0f);
+        data_.assign(size_t(kRingCap) * size_t(channels_), 0.0f);
         wr_.store(0, std::memory_order_relaxed);
         rd_.store(0, std::memory_order_relaxed);
         xruns_.store(0, std::memory_order_relaxed);
@@ -85,13 +86,13 @@ public:
             xruns_.fetch_add(1, std::memory_order_relaxed);
         }
         const int copy_ch = std::min(int(ch), channels_);
-        for (int c = 0; c < channels_; ++c) {
-            float* dst = data_.data() + size_t(c) * kRingCap;
-            const float* src = (c < copy_ch && planes && planes[c]) ? planes[c] : nullptr;
-            for (uint32_t i = 0; i < n; ++i) {
-                dst[(w + i) & (kRingCap - 1)] = src ? src[i] : 0.0f;
+        for (uint32_t i = 0; i < n; ++i) {
+            float* frame_dst = data_.data() + size_t((w + i) & (kRingCap - 1)) * size_t(channels_);
+            for (int c = 0; c < channels_; ++c) {
+                frame_dst[c] = (c < copy_ch && planes && planes[c]) ? planes[c][i] : 0.0f;
             }
         }
+        // Single atomic release publishes all `channels_` for all `n` frames together.
         wr_.store(w + n, std::memory_order_release);
         return n;
     }
@@ -106,19 +107,18 @@ public:
             xruns_.fetch_add(1, std::memory_order_relaxed);
         }
         const int out_ch = int(ch);
-        for (int c = 0; c < out_ch; ++c) {
-            float* dst = (planes && planes[c]) ? planes[c] : nullptr;
-            if (!dst) continue;
-            if (c < channels_) {
-                const float* src = data_.data() + size_t(c) * kRingCap;
-                for (uint32_t i = 0; i < n; ++i) dst[i] = src[(r + i) & (kRingCap - 1)];
-            } else {
-                std::memset(dst, 0, size_t(n) * sizeof(float));
-            }
-            if (zero_pad && n < frames) {
-                std::memset(dst + n, 0, size_t(frames - n) * sizeof(float));
+        for (uint32_t i = 0; i < n; ++i) {
+            const float* frame_src = data_.data() + size_t((r + i) & (kRingCap - 1)) * size_t(channels_);
+            for (int c = 0; c < out_ch; ++c) {
+                if (planes && planes[c]) planes[c][i] = (c < channels_) ? frame_src[c] : 0.0f;
             }
         }
+        if (zero_pad && n < frames) {
+            for (int c = 0; c < out_ch; ++c) {
+                if (planes && planes[c]) std::memset(planes[c] + n, 0, size_t(frames - n) * sizeof(float));
+            }
+        }
+        // Single atomic release advances all `channels_` together by `n` whole frames.
         rd_.store(r + n, std::memory_order_release);
         return n;
     }

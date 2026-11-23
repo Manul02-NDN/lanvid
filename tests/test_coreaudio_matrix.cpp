@@ -8,6 +8,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "audio/multi_device_matrix.hpp"
 #include "audio/stream_resampler.hpp"
 
