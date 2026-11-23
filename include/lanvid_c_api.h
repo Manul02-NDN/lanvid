@@ -114,6 +114,15 @@ typedef struct LvSenderConfig {
     int audio_bitrate_kbps;/* 0=Lossless (use audio_codec), or 256/192/128/96/64 kbps per channel */
 } LvSenderConfig;
 
+/* Why the sender's video source could not start (LvSenderStats.video_source_error). The sender keeps
+ * streaming audio (MasterClock, AoIP, MIDI) without video in every non-OK case. */
+typedef enum LvVideoSourceError {
+    LV_VIDEO_SOURCE_OK = 0,
+    LV_VIDEO_SOURCE_SCREEN_UNAVAILABLE = 1, /* no permission (macOS Screen Recording) or no capture backend */
+    LV_VIDEO_SOURCE_CAMERA_UNAVAILABLE = 2, /* no permission / device missing or busy */
+    LV_VIDEO_SOURCE_FILE_UNAVAILABLE = 3    /* file missing or unsupported */
+} LvVideoSourceError;
+
 typedef struct LvSenderStats {
     int running;
     int width;
@@ -133,6 +142,7 @@ typedef struct LvSenderStats {
     int codec_is_hardware;
     uint32_t target_bitrate_kbps;
     char codec_backend[64];
+    int video_source_error;        /* (appended) LvVideoSourceError */
 } LvSenderStats;
 
 typedef struct LvReceiverConfig {

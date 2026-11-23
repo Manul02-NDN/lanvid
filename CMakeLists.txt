@@ -343,6 +343,8 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
           OUTPUT_NAME "LanVid Studio"
           MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
         target_compile_definitions(lanvid_app PRIVATE GL_SILENCE_DEPRECATION=1)
+        # CGPreflightScreenCaptureAccess: tell the user about the Screen Recording permission (TCC).
+        target_link_libraries(lanvid_app PRIVATE "-framework CoreGraphics")
       endif()
     endif()
   endif()
@@ -428,6 +430,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_udp_e2e_audio_midi.cpp
     tests/test_latency_mode.cpp
     tests/test_rate_integrity.cpp
+    tests/test_audio_only_toggle.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

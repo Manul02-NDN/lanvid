@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <new>
 #include <sstream>
 #include <string>
@@ -103,8 +104,17 @@ std::atomic<int> g_init_refs{0};
 
 }  // namespace
 
+// Lifetime lock (see LV_LIVE_LOCK): the engine object is swapped out under an exclusive lock and destroyed
+// outside it; every entry point that other threads call (audio/MIDI pushes, pops, clock, live setters)
+// holds a shared lock while it uses the object. Stopping or restarting a handle (e.g. toggling Audio Only in
+// LanVid Studio) therefore waits for an in-flight push from the matrix mixer thread instead of freeing the
+// object under it (EXC_BAD_ACCESS in UdpSender::push_audio_channel). Callbacks the engine invokes must not
+// re-enter the C ABI on the same handle.
+#define LV_LIVE_LOCK(h) std::shared_lock<std::shared_mutex> lv_live_lock_((h)->life_mu)
+
 struct LvSenderHandle {
     std::mutex api_mu;
+    mutable std::shared_mutex life_mu;
     std::unique_ptr<lv::UdpSender> sender;
 #ifndef LANVID_SDK_CORE_ONLY
     std::unique_ptr<lv::AudioCapture> audio_cap;
@@ -114,6 +124,7 @@ struct LvSenderHandle {
     std::atomic<bool> stop{false};
     std::atomic<bool> running{false};
     std::atomic<int> state{LV_STATE_STOPPED};
+    std::atomic<int> video_source_error{0};  // LvVideoSourceError: why the video source could not start
 
     lv::CodecParams codec_params{};
     std::atomic<int> override_quality{0};  // 0 = use codec_params/AIMD, >0 = live override
@@ -199,8 +210,13 @@ struct LvSenderHandle {
         }
         if (cap_thread.joinable()) cap_thread.join();
 #endif
-        sender.reset();
         running.store(false, std::memory_order_release);
+        std::unique_ptr<lv::UdpSender> dead;
+        {
+            std::unique_lock<std::shared_mutex> lk(life_mu);  // waits for in-flight pushes
+            dead = std::move(sender);
+        }
+        dead.reset();  // joins engine threads without holding the lock
         state.store(LV_STATE_STOPPED, std::memory_order_release);
     }
 
@@ -209,6 +225,7 @@ struct LvSenderHandle {
 
 struct LvReceiverHandle {
     std::mutex api_mu;
+    mutable std::shared_mutex life_mu;
     std::unique_ptr<lv::UdpReceiver> receiver;
 #ifndef LANVID_SDK_CORE_ONLY
     std::unique_ptr<lv::AudioPlayback> audio_play;
@@ -479,7 +496,10 @@ struct LvReceiverHandle {
         }
         rx->audio_buffer().set_volume(volume.load(std::memory_order_relaxed));
         const uint16_t bound_port = rx->local_port();
-        receiver = std::move(rx);
+        {
+            std::unique_lock<std::shared_mutex> lk(life_mu);
+            receiver = std::move(rx);
+        }
 
         if (enable_discovery) {
             auto disc = std::make_unique<lv::DiscoveryResponder>();
@@ -534,8 +554,13 @@ struct LvReceiverHandle {
         }
 #endif
         audio_started.store(false, std::memory_order_release);
-        receiver.reset();
         running.store(false, std::memory_order_release);
+        std::unique_ptr<lv::UdpReceiver> dead;
+        {
+            std::unique_lock<std::shared_mutex> lk(life_mu);  // waits for in-flight pops
+            dead = std::move(receiver);
+        }
+        dead.reset();
         if (was_running) notify_state(LV_STATE_STOPPED, LV_OK, "Stopped");
     }
 
@@ -751,7 +776,10 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
                                cs.flags, cs.master_gain_cb, cs.audio_codec};
         f(&st, ud);
     });
-    handle->sender = std::move(s);
+    {
+        std::unique_lock<std::shared_mutex> lk(handle->life_mu);
+        handle->sender = std::move(s);
+    }
     handle->reset_stats(cfg->width, cfg->height);
     handle->ext_frame_id.store(0, std::memory_order_relaxed);
     handle->ext_audio_seq.store(0, std::memory_order_relaxed);
@@ -770,6 +798,7 @@ void lv_sender_stop(LvSenderHandle* handle) {
 int lv_sender_push_packed_frame(LvSenderHandle* handle, const uint8_t* data, int width, int height,
                                 int stride, int pixel_format, uint32_t timestamp_us) {
     if (!handle || !data || width <= 0 || height <= 0) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
     if (pixel_format != LV_PIXEL_FORMAT_BGRA8888 && pixel_format != LV_PIXEL_FORMAT_RGBA8888) {
         return LV_ERR_UNSUPPORTED;
@@ -816,6 +845,7 @@ int lv_sender_push_yuv_planes_ex(LvSenderHandle* handle, const LV_YuvPlanes* pla
                                  uint32_t timestamp_us) {
     if (!handle || !planes || !planes->plane_y || !planes->plane_u || width <= 0 || height <= 0) {
         return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     }
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
 
@@ -909,6 +939,7 @@ int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, int num
                                int sample_rate, int channels, int audio_format,
                                uint32_t timestamp_us) {
     if (!handle || !data || num_frames <= 0) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
     const auto fmt = (audio_format == LV_AUDIO_FORMAT_F32) ? lv::AudioSampleFormat::kFloat32
                                                            : lv::AudioSampleFormat::kPcm16;
@@ -958,6 +989,7 @@ int lv_sender_push_audio_channel(LvSenderHandle* handle, uint16_t channel_index,
                                  uint64_t media_timestamp_samples) {
     if (!handle || !samples || num_samples == 0 || channel_index >= LV_AUDIO_MAX_CHANNELS)
         return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     lv::AudioFormat2 f;
     if (!lv_map_format(format, f)) return LV_ERR_INVALID_ARG;
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
@@ -972,6 +1004,7 @@ int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void* data, 
                                       uint64_t media_timestamp_samples) {
     if (!handle || !data || num_samples == 0 || num_channels == 0 || num_channels > LV_AUDIO_MAX_CHANNELS)
         return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     lv::AudioFormat2 f;
     if (!lv_map_format(format, f)) return LV_ERR_INVALID_ARG;
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
@@ -1001,6 +1034,7 @@ int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void* data, 
 
 int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms) {
     if (!handle || latency_ms < 2 || latency_ms > 2000) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     handle->bus_cfg.latency_ms = latency_ms;
     if (handle->sender) handle->sender->set_audio_latency_ms(latency_ms);
     return LV_OK;
@@ -1008,6 +1042,7 @@ int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms) 
 
 int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec) {
     if (!handle || codec < 0 || codec > 8) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (handle->sender) {
         handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(codec));
     }
@@ -1016,6 +1051,7 @@ int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec) {
 
 int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch) {
     if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (handle->sender) {
         handle->sender->set_audio_bitrate_kbps(kbps_per_ch);
     }
@@ -1023,7 +1059,9 @@ int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch) {
 }
 
 uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle) {
-    if (!handle || !handle->sender) return 0;
+    if (!handle) return 0;
+    LV_LIVE_LOCK(handle);
+    if (!handle->sender) return 0;
     return handle->sender->master_samples_now();
 }
 
@@ -1037,6 +1075,7 @@ int lv_receiver_configure_audio_bus(LvReceiverHandle* handle, const LV_AudioBusC
 
 int lv_receiver_set_audio_latency_ms(LvReceiverHandle* handle, uint32_t latency_ms) {
     if (!handle || latency_ms < 2 || latency_ms > 2000) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     handle->bus_cfg.latency_ms = latency_ms;
     if (handle->receiver) handle->receiver->set_audio_latency_ms(latency_ms);
     return LV_OK;
@@ -1077,6 +1116,7 @@ int lv_receiver_pop_audio_multichannel(LvReceiverHandle* handle, float* out, uin
                                        uint32_t num_frames, LV_AudioLayout layout) {
     if (!handle || !out || num_channels == 0 || num_channels > LV_AUDIO_MAX_CHANNELS || num_frames == 0)
         return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) {
         std::memset(out, 0, size_t(num_channels) * num_frames * sizeof(float));
         return LV_ERR_NOT_RUNNING;
@@ -1094,6 +1134,7 @@ int lv_receiver_pop_audio_multichannel(LvReceiverHandle* handle, float* out, uin
 
 int lv_receiver_get_channel_stats(LvReceiverHandle* handle, uint16_t channel_index, LV_AudioChannelStats* out) {
     if (!handle || !out || channel_index >= LV_AUDIO_MAX_CHANNELS) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     std::memset(out, 0, sizeof(*out));
     out->level_dbfs = -120.0f;
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
@@ -1282,6 +1323,7 @@ int lv_receiver_get_latest_frame(LvReceiverHandle* handle, uint8_t* out_buf, siz
 
 int lv_receiver_pop_audio_pcm16(LvReceiverHandle* handle, int16_t* out_stereo, int num_frames) {
     if (!handle || !out_stereo || num_frames <= 0) return 0;
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) {
         std::memset(out_stereo, 0, size_t(num_frames) * 4);
         return 0;
@@ -1558,6 +1600,7 @@ void lv_duplex_stop(LvDuplexHandle* h) {
 int lv_sender_push_midi(LvSenderHandle* handle, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
                         uint64_t media_ts_us) {
     if (!handle || status < 0x80 || port >= lv::kMaxMidiPorts) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
     return handle->sender->push_midi(status, data1 & 0x7F, data2 & 0x7F, port, media_ts_us) ? LV_OK : LV_ERR_SOCKET;
 }
@@ -1572,6 +1615,7 @@ void lv_receiver_set_midi_callback(LvReceiverHandle* handle, LV_MidiEventCallbac
 int lv_receiver_get_stream_epoch_info(LvReceiverHandle* handle, uint64_t* epoch_resets, uint32_t* active_midi_notes,
                                       uint64_t* midi_events_rx) {
     if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
     if (epoch_resets) *epoch_resets = handle->receiver->stream_epoch_resets();
     if (active_midi_notes) *active_midi_notes = handle->receiver->active_midi_notes();
@@ -1612,6 +1656,7 @@ static lv::ControlSyncPayload to_wire_cs(const LV_ControlSyncState& s) {
 
 int lv_sender_send_control_sync(LvSenderHandle* handle, const LV_ControlSyncState* state) {
     if (!handle || !state) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_ERR_NOT_RUNNING;
     return handle->sender->send_control_sync(to_wire_cs(*state)) ? LV_OK : LV_ERR_SOCKET;
 }
@@ -1643,6 +1688,7 @@ void lv_sender_set_control_sync_callback(LvSenderHandle* handle, LV_ControlSyncC
 
 int lv_receiver_send_control_sync(LvReceiverHandle* handle, const LV_ControlSyncState* state) {
     if (!handle || !state) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
     return handle->receiver->send_control_sync(to_wire_cs(*state)) ? LV_OK : LV_ERR_SOCKET;
 }
@@ -1924,14 +1970,20 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
         }
     }
 
+    handle->video_source_error.store(LV_VIDEO_SOURCE_OK, std::memory_order_release);
+    // Control loop without video: answers MasterClock pings / NACKs / control sync and keeps AoIP alive.
+    // Used for audio-only mode AND as the fallback when a video source cannot be opened, so turning video
+    // on never takes the audio stream down with it.
+    static const auto audio_only_loop = [](LvSenderHandle* h) {
+        while (!h->stop.load(std::memory_order_relaxed)) {
+            h->sender->service_control_try();
+            lv::sleep_until_us(lv::now_us() + 2000, [] {});
+        }
+    };
     if (cfg->audio_only) {
-        // Audio-only mode (identical to CLI --audio-only): no video capture/encoder/packets;
-        // run a lightweight control loop to answer MasterClock pings and keep AoIP alive.
+        // Audio-only mode (identical to CLI --audio-only): no video capture/encoder/packets.
         handle->cap_thread = std::thread([handle]() {
-            while (!handle->stop.load(std::memory_order_relaxed)) {
-                handle->sender->service_control_try();
-                lv::sleep_until_us(lv::now_us() + 2000, [] {});
-            }
+            audio_only_loop(handle);
             handle->running.store(false, std::memory_order_release);
         });
         return 1;
@@ -1955,6 +2007,10 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
                                 : (cap_cfg.capture_backend == LV_CAP_GDI ? lv::CaptureBackend::kGdi
                                                                          : lv::CaptureBackend::kAuto);
             if (!screen.open(cap_cfg.monitor_index, be)) {
+                // Screen Recording not granted (macOS TCC), no capture backend on this platform, device
+                // busy / missing: report it and keep the audio stream running without video.
+                handle->video_source_error.store(LV_VIDEO_SOURCE_SCREEN_UNAVAILABLE, std::memory_order_release);
+                audio_only_loop(handle);
                 handle->running.store(false, std::memory_order_release);
                 return;
             }
@@ -1963,6 +2019,10 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
             frame.allocate(cp.width, cp.height, lv::PixelOrder::kBGRA);
         } else if (cap_cfg.source_type == LV_SOURCE_CAMERA) {
             if (!camera.open(cap_cfg.camera_index, cap_cfg.width, cap_cfg.height, int(fps))) {
+                // Screen Recording not granted (macOS TCC), no capture backend on this platform, device
+                // busy / missing: report it and keep the audio stream running without video.
+                handle->video_source_error.store(LV_VIDEO_SOURCE_CAMERA_UNAVAILABLE, std::memory_order_release);
+                audio_only_loop(handle);
                 handle->running.store(false, std::memory_order_release);
                 return;
             }
@@ -1971,6 +2031,10 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
             frame.allocate(cp.width, cp.height, lv::PixelOrder::kBGRA);
         } else if (cap_cfg.source_type == LV_SOURCE_FILE) {
             if (!fsrc.open(cap_cfg.file_path, cap_cfg.width, cap_cfg.height, cap_cfg.file_is_rgba != 0)) {
+                // Screen Recording not granted (macOS TCC), no capture backend on this platform, device
+                // busy / missing: report it and keep the audio stream running without video.
+                handle->video_source_error.store(LV_VIDEO_SOURCE_FILE_UNAVAILABLE, std::memory_order_release);
+                audio_only_loop(handle);
                 handle->running.store(false, std::memory_order_release);
                 return;
             }
@@ -2081,6 +2145,7 @@ int lv_sender_get_stats(LvSenderHandle* handle, LvSenderStats* out) {
     lv_sender_get_stream_stats(handle, &st);
     std::memset(out, 0, sizeof(*out));
     out->running = handle->running.load(std::memory_order_acquire) ? 1 : 0;
+    out->video_source_error = handle->video_source_error.load(std::memory_order_acquire);
     out->width = st.width;
     out->height = st.height;
     out->tx_fps = st.fps;

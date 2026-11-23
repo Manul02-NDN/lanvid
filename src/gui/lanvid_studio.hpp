@@ -105,6 +105,9 @@ private:
     void draw_settings_tab();
     void draw_add_device_popups();
     void draw_studio_config_panel();
+    // Non-null while the sender runs with video but its video source could not start (audio keeps going).
+    const char* video_source_warning() const;
+    int last_video_error_ = 0;
     // Jitter-buffer latency mode (Fixed (Ethernet) / Adaptive (Wi-Fi)) + live "ACTUAL BUFFER" telemetry.
     void draw_latency_mode_controls(const char* id, float combo_width);
     void draw_audio_bitrate_pills(const char* id);

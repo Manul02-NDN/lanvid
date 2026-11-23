@@ -1,4 +1,10 @@
 #include "gui/lanvid_studio.hpp"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <CoreGraphics/CoreGraphics.h>  // CGPreflightScreenCaptureAccess (Screen Recording / TCC)
+#endif
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -1671,6 +1677,26 @@ void LanVidStudioApp::draw_audio_bitrate_pills(const char* id) {
     ImGui::PopID();
 }
 
+const char* LanVidStudioApp::video_source_warning() const {
+    if (!sender_running_ || cfg_.audio_only) return nullptr;
+    switch (tx_stats_.video_source_error) {
+        case LV_VIDEO_SOURCE_SCREEN_UNAVAILABLE:
+#if defined(__APPLE__) && TARGET_OS_OSX
+            if (!CGPreflightScreenCaptureAccess())
+                return "Надайте дозвіл на запис екрана в Системних параметрах macOS (Конфіденційність і безпека -> "
+                       "Запис екрана -> LanVid Studio). Звук передається далі без відео.";
+#endif
+            return "Захоплення екрана недоступне на цьому Mac / платформі. Звук передається далі без відео - "
+                   "оберіть джерело «Тестовий патерн» або «Файл».";
+        case LV_VIDEO_SOURCE_CAMERA_UNAVAILABLE:
+            return "Камера недоступна (немає дозволу або пристрій зайнятий). Звук передається далі без відео.";
+        case LV_VIDEO_SOURCE_FILE_UNAVAILABLE:
+            return "Не вдалося відкрити відеофайл. Звук передається далі без відео.";
+        default:
+            return nullptr;
+    }
+}
+
 void LanVidStudioApp::draw_studio_config_panel() {
     begin_glass_card("##StudioConfig", ImVec2(0, 0));
 
@@ -2574,7 +2600,9 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
             rc = lv_sender_get_preview_frame(sender_, sender_frame_buf_.data(), sender_frame_buf_.size(),
                                              &w, &h, &last_tx_preview_fid_, want_rgba);
         }
-        if (rc == 1 && w > 0 && h > 0) {
+        // Only a complete, sane frame reaches the GL texture (and the aspect-ratio math).
+        if (rc == 1 && w > 0 && h > 0 && w <= 16384 && h <= 16384 &&
+            sender_frame_buf_.size() >= size_t(w) * size_t(h) * 4) {
             sender_tex_->update(sender_frame_buf_.data(), w, h);
         }
     }
@@ -2592,7 +2620,9 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
                                               receiver_frame_buf_.size(), &w, &h, &last_rx_fid_,
                                               want_rgba);
         }
-        if (rc == 1 && w > 0 && h > 0) {
+        // Only a complete, sane frame reaches the GL texture (and the aspect-ratio math).
+        if (rc == 1 && w > 0 && h > 0 && w <= 16384 && h <= 16384 &&
+            receiver_frame_buf_.size() >= size_t(w) * size_t(h) * 4) {
             receiver_tex_->update(receiver_frame_buf_.data(), w, h);
         }
     }
@@ -2605,6 +2635,13 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
         if (sender_) {
             lv_sender_get_stats(sender_, &tx_stats_);
             sender_running_ = (tx_stats_.running != 0);
+            if (tx_stats_.video_source_error != last_video_error_) {
+                last_video_error_ = tx_stats_.video_source_error;
+                if (const char* w = video_source_warning()) {
+                    toast_msg_ = w;
+                    toast_until_us_ = now + 6000000ull;
+                }
+            }
             if (sender_running_) {
                 push_hist(tx_mbps_hist_, kHistLen, float(tx_stats_.tx_mbps));
                 push_hist(tx_loss_hist_, kHistLen, float(tx_stats_.rx_loss_pct));
@@ -2993,8 +3030,10 @@ void LanVidStudioApp::draw_sender_tab() {
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float prev_h = std::max(180.0f, avail.y - 215.0f);
-    draw_aspect_image((sender_running_ && !cfg_.audio_only) ? sender_tex_ : nullptr, ImVec2(avail.x, prev_h),
+    const char* vwarn = video_source_warning();
+    draw_aspect_image((sender_running_ && !cfg_.audio_only && !vwarn) ? sender_tex_ : nullptr, ImVec2(avail.x, prev_h),
                       cfg_.audio_only ? "Режим Audio Only (відео вимкнено) — активна AoIP шина"
+                      : vwarn         ? vwarn
                                       : "Натисніть «СТАРТ ПЕРЕДАЧІ» для живого прев'ю");
 
     ImGui::Spacing();
