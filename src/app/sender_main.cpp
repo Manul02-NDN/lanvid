@@ -46,7 +46,7 @@ void print_usage(const char* prog) {
         "  --device <idx>           Camera index for --source camera (default: 0)\n"
         "  --audio <mode>           none | loopback | mic | tone (default: none)\n"
         "                           tone = N-channel test bus (see --audio-channels)\n"
-        "  --audio-channels <1..64> Channels of the 64-ch AoIP bus for --audio tone (default: 2)\n"
+        "  --audio-channels <1..64> AoIP bus channels (default: 64 for --audio-device virtual, 2 for tone)\n"
         "  --audio-latency <2..2000> Latency budget in ms: picks chunk size / FEC / NACK profile (default: 20)\n"
         "  --audio-rate <48000|96000> Sample rate of the AoIP bus (default: 48000)\n"
         "  --audio-device <dev>     default | test | virtual | <idx>  (default: default)\n"
@@ -81,6 +81,8 @@ void print_usage(const char* prog) {
         "  --pace <mbps>            Optional token-bucket pacing in Mbps (default: 0=off)\n"
         "  --frames <n>             Stop after N frames (default: 0=infinite)\n"
         "  --duration <sec>         Stop after S seconds (default: 0=infinite)\n"
+        "  --audio-only, --no-video Send no video at all: only AUDIO2 packets + MasterClock sync\n"
+        "                           (use with --audio-device virtual|test or --audio tone)\n"
         "  --duplex ...             Full-duplex 64x64 AoIP node (see: sender --duplex --help)\n"
         "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
@@ -147,6 +149,8 @@ int main(int argc, char** argv) {
     double audio_chunk_ms = 5.0;
     bool audio_tone = false;
     bool audio_virtual = false;
+    bool audio_only = false;
+    bool audio_channels_explicit = false;
     int audio_channels = 2;
     int audio_latency_ms = 20;
     int audio_rate = 48000;
@@ -210,6 +214,7 @@ int main(int argc, char** argv) {
         else if (arg == "--duration") max_duration_s = std::atof(need_val("--duration"));
         else if (arg == "--monitor") monitor_idx = std::atoi(need_val("--monitor"));
         else if (arg == "--device") camera_idx = std::atoi(need_val("--device"));
+        else if (arg == "--audio-only" || arg == "--no-video") audio_only = true;
         else if (arg == "--audio-device") {
             const std::string d = need_val("--audio-device");
             if (d == "virtual") audio_virtual = true;
@@ -220,7 +225,7 @@ int main(int argc, char** argv) {
         else if (arg == "--audio-ms") audio_chunk_ms = std::atof(need_val("--audio-ms"));
         else if (arg == "--input") { input_path = need_val("--input"); src_kind = SourceKind::kFile; }
         else if (arg == "--input-fmt") input_rgba = (std::string(need_val("--input-fmt")) == "rgba");
-        else if (arg == "--audio-channels") audio_channels = std::atoi(need_val("--audio-channels"));
+        else if (arg == "--audio-channels") { audio_channels = std::atoi(need_val("--audio-channels")); audio_channels_explicit = true; }
         else if (arg == "--audio-latency") audio_latency_ms = std::atoi(need_val("--audio-latency"));
         else if (arg == "--audio-rate") audio_rate = std::atoi(need_val("--audio-rate"));
         else if (arg == "--audio") {
@@ -274,7 +279,9 @@ int main(int argc, char** argv) {
     std::string source_desc = "pattern";
     lv::PixelOrder pixel_order = lv::PixelOrder::kRGBA;
 
-    if (src_kind == SourceKind::kScreen) {
+    if (audio_only) {
+        source_desc = "off (--audio-only)";
+    } else if (src_kind == SourceKind::kScreen) {
         if (!screen.open(monitor_idx, cap_backend)) {
             std::fprintf(stderr, "Failed to open screen capture on monitor %d. Run --list-devices.\n",
                          monitor_idx);
@@ -318,6 +325,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (audio_virtual && !audio_channels_explicit) audio_channels = 64;  // the virtual device is 64 x 64
     if (audio_channels < 1 || audio_channels > 64 || audio_latency_ms < 2 || audio_latency_ms > 2000 ||
         (audio_rate != 48000 && audio_rate != 96000)) {
         std::fprintf(stderr, "Invalid audio bus options: --audio-channels 1..64, --audio-latency 2..2000, --audio-rate 48000|96000\n");
@@ -340,7 +348,7 @@ int main(int argc, char** argv) {
                      unsigned(scfg.dest_port));
         return 1;
     }
-    if (scfg.codec != lv::VideoCodecId::kLanVidDct) {
+    if (!audio_only && scfg.codec != lv::VideoCodecId::kLanVidDct) {
         if (!sender.prepare_encoder(cp.width, cp.height)) {
             std::fprintf(stderr, "Failed to initialize %s video encoder for %dx%d\n",
                          lv::video_codec_name(scfg.codec), cp.width, cp.height);
@@ -427,7 +435,13 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
 #endif
 
-    if (scfg.codec == lv::VideoCodecId::kLanVidDct) {
+    if (audio_only) {
+        std::printf("LVSP Sender (audio-only) -> %s:%u | video=off | audio=%s | mtu=%zu\n", scfg.dest_ip.c_str(),
+                    unsigned(scfg.dest_port), audio_desc.c_str(), scfg.mtu);
+        if (!audio_tone && !audio_virtual && audio_mode == lv::AudioCaptureMode::kNone)
+            std::fprintf(stderr, "Warning: --audio-only without an audio source (--audio-device virtual|test, "
+                                 "--audio tone|loopback|mic): only clock-sync answers will be sent.\n");
+    } else if (scfg.codec == lv::VideoCodecId::kLanVidDct) {
         std::printf(
             "LVSP Sender -> %s:%u | src=%s | codec=DCT | audio=%s | %dx%d @ %.1f fps | Q=%d%s | slices=%d mtu=%zu fec=%u | kernel=%s | loss=%.1f%%\n",
             scfg.dest_ip.c_str(), unsigned(scfg.dest_port), source_desc.c_str(), audio_desc.c_str(),
@@ -445,7 +459,7 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     lv::Image frame;
-    frame.allocate(cp.width, cp.height, pixel_order);
+    if (!audio_only) frame.allocate(cp.width, cp.height, pixel_order);
 
     const uint64_t t_start = lv::now_us();
     uint64_t t_last_report = t_start;
@@ -459,7 +473,40 @@ int main(int argc, char** argv) {
     const double frame_interval_us = 1e6 / fps;
     const bool live_capture = (src_kind == SourceKind::kScreen || src_kind == SourceKind::kCamera);
 
-    while (!g_stop.load(std::memory_order_relaxed)) {
+    // ---- audio-only loop: no capture / encode / video packets; keep answering clock-sync pings ----
+    uint64_t prev_a2_bytes = 0, prev_a2_pkts = 0;
+    while (audio_only && !g_stop.load(std::memory_order_relaxed)) {
+        const uint64_t now = lv::now_us();
+        if (max_duration_s > 0.0 && double(now - t_start) / 1e6 >= max_duration_s) break;
+        sender.service_control_try();
+        lv::sleep_until_us(now + 2000, [] {});
+        if (now - t_last_report >= 1000000) {
+            const double dt = double(now - t_last_report) / 1e6;
+            const auto a2 = sender.audio2_stats();
+            const auto st = sender.stats();
+            std::printf("[%5.1fs] AUDIO-ONLY | %7.1f kbps | %6.0f pkt/s | video pkts:%llu | nacks:%llu retx:%llu dup:%llu | "
+                        "pongs:%llu | err:%llu\n",
+                        double(now - t_start) / 1e6, double(a2.bytes_sent - prev_a2_bytes) * 8.0 / (dt * 1000.0),
+                        double(a2.packets_sent - prev_a2_pkts) / dt, (unsigned long long)st.packets_sent,
+                        (unsigned long long)a2.nacks_received, (unsigned long long)a2.retransmits,
+                        (unsigned long long)a2.duplicates, (unsigned long long)st.pongs_sent,
+                        (unsigned long long)st.send_errors);
+            if (audio_virtual) {
+                const auto vs = vhost.status();
+                std::printf("[VDEV  ] DAW %s%s%s | %u Hz buf=%u | tx_fill=%u | sent=%llu frames | overruns=%llu reanchors=%llu\n",
+                            vs.driver_connected ? "connected" : "not connected",
+                            vs.driver_name.empty() ? "" : " via ", vs.driver_name.c_str(), vs.sample_rate,
+                            vs.buffer_size, vs.tx_fill, (unsigned long long)vs.tx_frames,
+                            (unsigned long long)vs.tx_overruns, (unsigned long long)vs.reanchors);
+            }
+            std::fflush(stdout);
+            prev_a2_bytes = a2.bytes_sent;
+            prev_a2_pkts = a2.packets_sent;
+            t_last_report = now;
+        }
+    }
+
+    while (!audio_only && !g_stop.load(std::memory_order_relaxed)) {
         if (max_frames > 0 && frame_id >= max_frames) break;
         const uint64_t now = lv::now_us();
         const double elapsed_s = double(now - t_start) / 1e6;

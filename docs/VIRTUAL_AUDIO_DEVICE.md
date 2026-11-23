@@ -18,11 +18,11 @@ shared-memory bus with atomics and `memcpy` — no locks, allocations or system 
 | | |
 |---|---|
 | Name | `Local\LanVidAudioBus_v1` (Windows `CreateFileMapping`), `/LanVidAudioBus_v1` (`shm_open` + `mmap`) |
-| TX ring | DAW outputs → network. SPSC: producer = driver, consumer = host. 64 × 4096 float32 frames |
-| RX ring | network → DAW inputs. SPSC: producer = host, consumer = driver. 64 × 4096 float32 frames |
+| TX ring | DAW outputs → network. SPSC: producer = driver, consumer = host. 64 × 16384 float32 frames (~341 ms @ 48 kHz) |
+| RX ring | network → DAW inputs. SPSC: producer = host, consumer = driver. 64 × 16384 float32 frames |
 | Cursors | 64-bit monotonic `write_pos` / `read_pos` per ring (+ overrun / underrun counters) |
 | Header | `sample_rate`, `buffer_size`, `active_channels`, `driver_running`, driver & host `heartbeat_ms`, `target_latency_ms`, MasterClock `clock_synced` / `clock_skew_ppb`, `driver_name` |
-| Size | ≈ 2 MB (layout versioned by `magic` = `LVAB`, `version` = 1) |
+| Size | ≈ 8 MB (layout versioned by `magic` = `LVAB`, `version` = 2; v1 used 4096-frame rings). An idle older segment is replaced on open; a v1 segment still in use is refused — reinstall the driver (`LanVidAudio.driver` / `LanVidASIO.dll` / `lanvid-audio-bridge`) together with the apps. |
 
 A DAW counts as connected while `driver_running = 1` and its heartbeat is younger than 500 ms.
 `LANVID_AUDIO_BUS_NAME` overrides the bus name (tests, several instances on one machine).
@@ -61,12 +61,17 @@ A DAW counts as connected while `driver_running = 1` and its heartbeat is younge
 Receiver tab → *Вихід шини* = `Virtual Audio Device (DAW inputs)`. The panel shows whether a DAW
 is attached, its sample rate, buffer size and ring fill.
 
-**Headless CLI:**
+**Headless CLI** (`--audio-only` / `--no-video`: no capture, encoding or video packets on the sender;
+no preview window and video packets dropped before decoding on the receiver):
 
 ```bash
-./build/sender   --host 192.168.1.50 --audio-device virtual --audio-channels 64 --audio-latency 20
-./build/receiver --audio-device virtual --audio-latency 20
+./build/sender   --audio-only --audio-device virtual --host 192.168.1.50 --audio-latency 20
+./build/receiver --audio-only --audio-device virtual --audio-latency 20
 ```
+
+`--audio-device virtual` defaults to 64 channels. Bandwidth note: 64 × 48 kHz float32 is ≈ 98 Mbit/s
+of raw audio (+ FEC parity and headers: ≈ 160 Mbit/s measured at 20 ms on loopback) — use wired
+Ethernet for full 64-channel float32, or fewer channels (`--audio-channels`) on Wi-Fi.
 
 ## Full-duplex 64×64 node, patchbay and AoIP discovery
 

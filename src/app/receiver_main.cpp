@@ -52,6 +52,8 @@ void print_usage(const char* prog) {
         "  --dump-every <n>         Dump every N-th received frame (default: 60)\n"
         "  --max-frames <n>         Exit after receiving N frames (default: 0=infinite)\n"
         "  --duration <sec>         Exit after S seconds (default: 0=infinite)\n"
+        "  --audio-only, --no-video Headless AoIP bridge: no preview window, video packets are dropped\n"
+        "                           before reassembly/decoding (implies --audio-channels 64)\n"
         "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
         prog);
@@ -66,6 +68,7 @@ int main(int argc, char** argv) {
     bool enable_audio = true;
     int aoip_channels = 0;
     bool audio_virtual = false;
+    bool audio_only = false;
     int win_w = 1280, win_h = 720;
     std::string dump_prefix;
     uint64_t dump_every = 60;
@@ -98,6 +101,7 @@ int main(int argc, char** argv) {
         else if (arg == "--no-simd") lv::set_simd_disabled(true);
         else if (arg == "--no-sync") rcfg.enable_clock_sync = false;
         else if (arg == "--no-audio") enable_audio = false;
+        else if (arg == "--audio-only" || arg == "--no-video") audio_only = true;
         else if (arg == "--audio-device") {
             const std::string d = need_val("--audio-device");
             if (d == "virtual") audio_virtual = true;
@@ -136,6 +140,15 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Unknown option: %s\n", arg.c_str());
             return 2;
         }
+    }
+
+    if (audio_only) {
+        if (enable_preview) std::fprintf(stderr, "Note: --preview ignored in --audio-only mode.\n");
+        enable_preview = false;
+        dump_prefix.clear();
+        rcfg.audio_only = true;
+        rcfg.decode_threads = 1;  // the decoder pool stays idle
+        if (aoip_channels <= 0) aoip_channels = 64;
     }
 
     // Decode directly to BGRA when previewing -> zero swizzle before D3D11 / GDI / SDL2 upload!
@@ -230,7 +243,11 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
 #endif
 
-    std::printf(
+    if (audio_only) {
+        std::printf("LVSP Receiver (audio-only AoIP bridge) on %s:%u | video=off (packets dropped) | bus=%d ch, %u ms @ %u Hz%s\n",
+                    rcfg.bind_ip.c_str(), unsigned(receiver.local_port()), aoip_channels, rcfg.audio_latency_ms,
+                    rcfg.audio_sample_rate, audio_virtual ? " -> virtual device" : "");
+    } else std::printf(
         "LVSP Receiver listening on %s:%u | timeout=%.1f ms | conceal=%s | preview=%s | audio=%s | kernel=%s\n",
         rcfg.bind_ip.c_str(), unsigned(receiver.local_port()),
         double(rcfg.assembler.frame_timeout_us) / 1000.0,
@@ -364,7 +381,19 @@ int main(int argc, char** argv) {
                                                  receiver.seq_tracker(), cs.synced, cs.min_rtt_us, &ast);
         std::printf("%s\n", lv::ReceiverStatsTracker::format_line(tot, "TOTAL ").c_str());
     } else {
-        std::printf("No frames received.\n");
+        if (audio_only) {
+            uint64_t pk = 0, lost = 0;
+            for (int c = 0; c < std::min(aoip_channels, 64); ++c) {
+                const auto st = receiver.audio_channel_rx_stats(uint16_t(c));
+                pk += st.packets_rx;
+                lost += st.packets_lost;
+            }
+            std::printf("[TOTAL ] audio-only: AUDIO2 packets=%llu lost=%llu | video packets ignored=%llu\n",
+                        (unsigned long long)pk, (unsigned long long)lost,
+                        (unsigned long long)receiver.video_packets_ignored());
+        } else {
+            std::printf("No frames received.\n");
+        }
     }
     return 0;
 }

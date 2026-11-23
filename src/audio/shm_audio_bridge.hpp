@@ -6,7 +6,9 @@
 //   TX ring: driver (DAW output) -> host -> network   (SPSC: producer = driver, consumer = host)
 //   RX ring: network -> host -> driver (DAW input)    (SPSC: producer = host,   consumer = driver)
 //
-// Each ring: 64 planar float32 channels x 4096 frames, monotonic 64-bit frame cursors.
+// Each ring: 64 planar float32 channels x 16384 frames (~341 ms @ 48 kHz, 8 MB for both rings),
+// monotonic 64-bit frame cursors. Layout version 2; a v1 (4096-frame) segment is replaced on open
+// when nobody is using it (macOS cannot grow an existing POSIX shm object).
 // RT-safe: the data path uses only atomics and memcpy (no locks, allocation or syscalls).
 // Self-contained (no lanvid_core dependency) so drivers can compile it directly.
 
@@ -17,9 +19,9 @@
 namespace lv {
 
 constexpr uint32_t kShmBusMagic = 0x4241564Cu;  // "LVAB"
-constexpr uint32_t kShmBusVersion = 1;
+constexpr uint32_t kShmBusVersion = 2;  // v2: 16384-frame rings (v1: 4096)
 constexpr uint32_t kShmBusChannels = 64;
-constexpr uint32_t kShmBusFrames = 4096;  // per channel, power of two
+constexpr uint32_t kShmBusFrames = 16384;  // per channel, power of two (~341 ms @ 48 kHz)
 constexpr const char* kShmBusName = "LanVidAudioBus_v1";
 
 struct alignas(64) ShmRing {
