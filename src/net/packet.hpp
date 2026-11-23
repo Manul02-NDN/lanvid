@@ -26,6 +26,7 @@ enum class PacketType : uint8_t {
     kAudio2 = 0x6,     // AudioHeader v2: independent per-channel stream (up to 64), media-clock timestamps
     kAudioNack = 0x7,  // Receiver -> Sender selective retransmission request (bitmask of missing seq)
     kMidiFrame = 0x8,  // MIDI2: sample-accurate MIDI batch synced to MasterClock + 16-event redundancy ring
+    kControlSync = 0x9,// Real-time bidirectional control/config sync (revision-guarded, 3x Wi-Fi redundant)
 };
 
 enum class VideoCodecId : uint8_t {
@@ -298,5 +299,33 @@ bool parse_feedback(const uint8_t* in, size_t len, FeedbackPayload& fb);
 inline int32_t frame_diff(uint32_t a, uint32_t b) { return int32_t(a - b); }
 inline bool frame_newer(uint32_t a, uint32_t b) { return frame_diff(a, b) > 0; }
 inline int16_t seq_diff(uint16_t a, uint16_t b) { return int16_t(a - b); }
+
+// ---------------------------------------------------------------------------------------------
+// Real-Time Bidirectional Control Sync (PacketType::kControlSync, 32-byte payload).
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kControlSyncSize = 32;
+
+enum ControlSyncFlags : uint8_t {
+    kControlSyncMuteAll    = 0x01,  // PANIC / Mute All
+    kControlSyncMatrix     = 0x02,  // Also sync matrix preset / routing
+    kControlSyncAck        = 0x04,  // Reserved ACK flag
+};
+
+struct ControlSyncPayload {
+    uint64_t revision = 0;           // monotonic revision (dedup + anti-loop)
+    uint32_t origin_id = 0;          // random per-instance origin ID (echo guard)
+    uint16_t audio_channels = 8;     // 2 / 8 / 16 / 32 / 64
+    uint16_t audio_bitrate_kbps = 0; // 0=Lossless, 256 / 192 / 128 / 96 / 64
+    uint16_t target_buffer_ms = 20;  // 2..2000 ms
+    uint8_t  latency_mode = 1;       // 0=Fixed (Ethernet), 1=Adaptive (Wi-Fi)
+    uint8_t  audio_only = 0;         // 0=AV, 1=Audio Only
+    int8_t   active_preset_id = -1;  // -1=custom, 0/1/2/3=preset
+    uint8_t  flags = 0;              // ControlSyncFlags
+    int16_t  master_gain_cb = 0;     // 0.01 dB (-6000..+1200)
+    uint8_t  audio_codec = 0;        // 0..8
+};
+
+void write_control_sync(uint8_t* out, const ControlSyncPayload& cs);
+bool parse_control_sync(const uint8_t* in, size_t len, ControlSyncPayload& cs);
 
 }  // namespace lv

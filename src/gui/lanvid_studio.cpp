@@ -649,6 +649,10 @@ void LanVidStudioApp::shutdown() {
 //   peer -> receiver / duplex -> matrix "Network MIDI RX" slot -> crosspoints -> CoreMIDI / WinMM outputs
 //   (e.g. "LanVid Virtual MIDI Out" into the DAW)
 void LanVidStudioApp::wire_network_midi() {
+    if (sync_origin_id_ == 0) {
+        sync_origin_id_ = uint32_t((now_us() ^ 0x5A3C9E17ull) & 0xFFFFFFFFull);
+        if (sync_origin_id_ == 0) sync_origin_id_ = 1;
+    }
     audio_matrix_.set_midi_sink([this](int dst_slot, uint8_t st, uint8_t d1, uint8_t d2, uint8_t port, uint64_t) {
         bool to_net = false;
         for (const auto& s : audio_matrix_.midi_slots())
@@ -657,8 +661,110 @@ void LanVidStudioApp::wire_network_midi() {
         if (duplex_running_ && duplex_) lv_duplex_send_midi(duplex_, st, d1, d2, port, 0);
         else if (sender_running_ && sender_) lv_sender_push_midi(sender_, st, d1, d2, port, 0);
     });
-    if (receiver_) lv_receiver_set_midi_callback(receiver_, &LanVidStudioApp::on_network_midi, this);
-    if (duplex_) lv_duplex_set_midi_callback(duplex_, &LanVidStudioApp::on_network_midi, this);
+    if (sender_) lv_sender_set_control_sync_callback(sender_, &LanVidStudioApp::on_remote_control_sync, this);
+    if (receiver_) {
+        lv_receiver_set_midi_callback(receiver_, &LanVidStudioApp::on_network_midi, this);
+        lv_receiver_set_control_sync_callback(receiver_, &LanVidStudioApp::on_remote_control_sync, this);
+    }
+    if (duplex_) {
+        lv_duplex_set_midi_callback(duplex_, &LanVidStudioApp::on_network_midi, this);
+        lv_duplex_set_control_sync_callback(duplex_, &LanVidStudioApp::on_remote_control_sync, this);
+    }
+}
+
+void LanVidStudioApp::on_remote_control_sync(const LV_ControlSyncState* state, void* user_data) {
+    auto* self = static_cast<LanVidStudioApp*>(user_data);
+    if (!self || !state) return;
+    if (state->origin_id == self->sync_origin_id_) return;  // echo guard
+    std::lock_guard<std::mutex> lk(self->remote_sync_mu_);
+    if (state->revision <= self->last_applied_remote_revision_) return;  // anti-loop / dedup
+    self->pending_remote_sync_ = *state;
+    self->has_pending_remote_sync_ = true;
+}
+
+void LanVidStudioApp::broadcast_control_sync(bool mute_all_panic) {
+    if (!cfg_.sync_settings || applying_remote_sync_) return;
+    if (!sender_running_ && !receiver_running_ && !duplex_running_) return;
+    local_sync_revision_ = std::max(local_sync_revision_, last_applied_remote_revision_) + 1;
+    LV_ControlSyncState st{};
+    st.revision = local_sync_revision_;
+    st.origin_id = sync_origin_id_;
+    st.audio_channels = uint16_t(std::clamp(cfg_.aoip_channels, 1, 64));
+    st.audio_bitrate_kbps = uint16_t(std::max(0, cfg_.audio_bitrate_kbps));
+    st.target_buffer_ms = uint16_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
+    st.latency_mode = uint8_t(cfg_.adaptive_jitter ? 1 : 0);
+    st.audio_only = uint8_t(cfg_.audio_only ? 1 : 0);
+    st.active_preset_id = int8_t(cfg_.sync_matrix_routing ? matrix_active_preset_ : -1);
+    st.flags = uint8_t((mute_all_panic ? 0x01u : 0u) | (cfg_.sync_matrix_routing ? 0x02u : 0u));
+    st.master_gain_cb = int16_t(std::clamp(int(std::lrint(matrix_new_gain_db_ * 100.0f)), -6000, 1200));
+    st.audio_codec = uint8_t(std::clamp(cfg_.audio_codec, 0, 8));
+
+    bool sent = false;
+    if (duplex_running_ && duplex_) sent |= (lv_duplex_send_control_sync(duplex_, &st) == LV_OK);
+    if (sender_running_ && sender_) sent |= (lv_sender_send_control_sync(sender_, &st) == LV_OK);
+    if (receiver_running_ && receiver_) sent |= (lv_receiver_send_control_sync(receiver_, &st) == LV_OK);
+    if (sent) last_synced_us_ = now_us();
+}
+
+void LanVidStudioApp::apply_pending_remote_sync() {
+    LV_ControlSyncState st{};
+    {
+        std::lock_guard<std::mutex> lk(remote_sync_mu_);
+        if (!has_pending_remote_sync_) return;
+        has_pending_remote_sync_ = false;
+        st = pending_remote_sync_;
+    }
+    if (!cfg_.sync_settings) return;
+    if (st.revision <= last_applied_remote_revision_) return;
+
+    applying_remote_sync_ = true;
+    last_applied_remote_revision_ = st.revision;
+    local_sync_revision_ = std::max(local_sync_revision_, st.revision);
+
+    cfg_.aoip_channels = std::clamp<int>(st.audio_channels, 1, 64);
+    tone_channels_.store(cfg_.aoip_channels);
+    cfg_.audio_bitrate_kbps = int(st.audio_bitrate_kbps);
+    cfg_.audio_codec = std::clamp<int>(st.audio_codec, 0, 8);
+    cfg_.aoip_latency_ms = std::clamp<int>(st.target_buffer_ms, 2, 2000);
+    cfg_.adaptive_jitter = st.latency_mode ? 1 : 0;
+    cfg_.audio_only = (st.audio_only != 0);
+    matrix_new_gain_db_ = std::clamp(float(st.master_gain_cb) / 100.0f, -24.0f, 6.0f);
+
+    // Apply live to audio engines without triggering a bounce-back sync packet
+    if (sender_) {
+        if (cfg_.audio_bitrate_kbps > 0) lv_sender_set_audio_bitrate(sender_, cfg_.audio_bitrate_kbps);
+        else lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+        lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
+    }
+    if (receiver_) {
+        apply_receiver_bus();
+        lv_receiver_set_audio_latency_ms(receiver_, uint32_t(cfg_.aoip_latency_ms));
+        lv_receiver_set_adaptive_jitter(receiver_, cfg_.adaptive_jitter);
+    }
+    if (duplex_running_ && duplex_) {
+        if (cfg_.audio_bitrate_kbps > 0) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
+        else lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+        lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
+        lv_duplex_set_adaptive_jitter(duplex_, cfg_.adaptive_jitter);
+    }
+
+    if ((st.flags & 0x01u) != 0) {
+        audio_matrix_.send_midi_panic(-1);
+    }
+    if (cfg_.sync_matrix_routing && (st.flags & 0x02u) != 0 && st.active_preset_id >= 0 && st.active_preset_id <= 2) {
+        int net_id = -1, daw_id = -1, mon_id = -1;
+        for (const auto& s : audio_matrix_.slots()) {
+            if (s.type == MatrixSlotType::kNetworkAoip) net_id = s.id;
+            else if (s.type == MatrixSlotType::kVirtualBus) daw_id = s.id;
+            else if (s.type == MatrixSlotType::kSystemAudio && s.role == MatrixSlotRole::kOutput && mon_id < 0) mon_id = s.id;
+        }
+        matrix_active_preset_ = st.active_preset_id;
+        audio_matrix_.apply_preset(st.active_preset_id, net_id, daw_id, mon_id);
+    }
+
+    last_synced_us_ = now_us();
+    config_dirty_ = true;
+    applying_remote_sync_ = false;
 }
 
 void LanVidStudioApp::on_network_midi(const LV_MidiEvent* ev, void* user_data) {
@@ -779,6 +885,7 @@ void LanVidStudioApp::start_sender() {
         sender_running_ = true;
         if (cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
         if (cfg_.aoip_source == 1) start_vdev_tx();
+        broadcast_control_sync();  // Automatic handshake on start
         toast_msg_ = std::string(cfg_.audio_only ? "Передача [Audio Only] -> " : "Передача запущена -> ") +
                      cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
         toast_until_us_ = now_us() + 3000000ull;
@@ -971,6 +1078,7 @@ void LanVidStudioApp::start_duplex() {
         if (cfg_.audio_bitrate_kbps > 0) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
         lv_audio_set_tx_routing(duplex_, route_[0]);
         lv_audio_set_rx_routing(duplex_, route_[1]);
+        broadcast_control_sync();  // Automatic handshake on start
         toast_msg_ = "Duplex 64x64: DAW -> " + std::string(dpx_peer_buf_) + ":" + std::to_string(dc.peer_port) +
                      " | :" + std::to_string(dc.listen_port) + " -> DAW";
     } else {
@@ -1523,6 +1631,7 @@ void LanVidStudioApp::draw_audio_bitrate_pills(const char* id) {
                 if (duplex_running_) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
             }
             config_dirty_ = true;
+            broadcast_control_sync();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", opts[i].tip);
         row_x += bw + 6.0f;
@@ -2405,6 +2514,7 @@ void LanVidStudioApp::stop_receiver() {
 
 void LanVidStudioApp::poll_telemetry_and_frames() {
     const uint64_t now = now_us();
+    apply_pending_remote_sync();
     enforce_audio_ownership(now);
 
     // Fetch latest GPU preview frame from Sender
@@ -2571,15 +2681,41 @@ void LanVidStudioApp::draw_top_bar() {
                         local_lan_ip_.c_str(), cfg_.audio_only ? "Лише звук" : "Звук + Відео");
     ImGui::EndGroup();
 
-    // Live status pill on right side
+    // Live status pill + real-time "Synced" badge on right side
     const char* badge = any_live ? "● Активно" : "● Готово";
     const ImVec2 tsz = ImGui::CalcTextSize(badge);
     const float pill_w = tsz.x + 24.0f;
     const float pill_h = 28.0f;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetWindowWidth() - pill_w - 16.0f));
+
+    const bool show_synced = cfg_.sync_settings && any_live && last_synced_us_ > 0;
+    char sync_lbl[64] = {};
+    float sync_w = 0.0f;
+    if (show_synced) {
+        if (cfg_.audio_bitrate_kbps > 0) {
+            std::snprintf(sync_lbl, sizeof(sync_lbl), "Synced · %d kbps / %d ch", cfg_.audio_bitrate_kbps, cfg_.aoip_channels);
+        } else {
+            std::snprintf(sync_lbl, sizeof(sync_lbl), "Synced · Lossless / %d ch", cfg_.aoip_channels);
+        }
+        sync_w = ImGui::CalcTextSize(sync_lbl).x + 22.0f;
+    }
+
+    const float right_block_w = pill_w + (show_synced ? (sync_w + 8.0f) : 0.0f);
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetWindowWidth() - right_block_w - 16.0f));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (show_synced) {
+        const ImVec2 sp0 = ImGui::GetCursorScreenPos();
+        const ImVec2 sp1(sp0.x + sync_w, sp0.y + pill_h);
+        dl->AddRectFilled(sp0, sp1, IM_COL32(16, 185, 129, 28), pill_h * 0.5f);
+        dl->AddRect(sp0, sp1, IM_COL32(16, 185, 129, 135), pill_h * 0.5f, 0, 1.0f);
+        const ImVec2 ssz = ImGui::CalcTextSize(sync_lbl);
+        dl->AddText(ImVec2(sp0.x + 11.0f, sp0.y + (pill_h - ssz.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(kColGreen), sync_lbl);
+        ImGui::Dummy(ImVec2(sync_w, pill_h));
+        ImGui::SameLine(0.0f, 8.0f);
+    }
+
     const ImVec2 pp0 = ImGui::GetCursorScreenPos();
     const ImVec2 pp1(pp0.x + pill_w, pp0.y + pill_h);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
     if (any_live) {
         dl->AddRectFilled(pp0, pp1, IM_COL32(16, 185, 129, 32), pill_h * 0.5f);
         dl->AddRect(pp0, pp1, IM_COL32(16, 185, 129, 140), pill_h * 0.5f, 0, 1.0f);
@@ -3543,6 +3679,7 @@ void LanVidStudioApp::draw_devices_tab() {
     ImGui::SameLine();
     if (gradient_pill_button("PANIC (Скинути всі ноти)", ImVec2(-1, 32), kColPink, kColRed)) {
         audio_matrix_.send_midi_panic(-1);
+        broadcast_control_sync(true);
         toast_msg_ = "MIDI PANIC: надіслано All Notes Off на всі 16 каналів";
         toast_until_us_ = now_us() + 2500000ull;
     }
@@ -3679,6 +3816,7 @@ void LanVidStudioApp::draw_settings_tab() {
             tone_channels_.store(cfg_.aoip_channels);
             if (receiver_) apply_receiver_bus();
             config_dirty_ = true;
+            broadcast_control_sync();
         }
     }
     ImGui::EndGroup();
@@ -3704,6 +3842,7 @@ void LanVidStudioApp::draw_settings_tab() {
         cfg_.adaptive_jitter = 1;
         apply_latency_mode();
         config_dirty_ = true;
+        broadcast_control_sync();
     }
     if (selectable_choice_card("##LatFixed", "Фіксована для кабелю (Для живої гри)",
                                "Жорстко тримає вибрані 5 / 10 / 20 мс без змін",
@@ -3711,6 +3850,7 @@ void LanVidStudioApp::draw_settings_tab() {
         cfg_.adaptive_jitter = 0;
         apply_latency_mode();
         config_dirty_ = true;
+        broadcast_control_sync();
     }
 
     ImGui::Spacing();
@@ -3725,6 +3865,7 @@ void LanVidStudioApp::draw_settings_tab() {
             if (receiver_) lv_receiver_set_audio_latency_ms(receiver_, uint32_t(cfg_.aoip_latency_ms));
             if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
             config_dirty_ = true;
+            broadcast_control_sync();
         }
     }
     ImGui::SetNextItemWidth(right_w);
@@ -3760,6 +3901,21 @@ void LanVidStudioApp::draw_settings_tab() {
     ImGui::SameLine();
     ImGui::TextColored(kColTextMain, "Захист від петлі зворотного зв'язку");
     ImGui::TextDisabled("Блокує випадкове замикання виходу пристрою на власний вхід");
+
+    ImGui::Spacing();
+    if (studio_toggle("##SetSyncPeer", &cfg_.sync_settings, kColGreen)) {
+        config_dirty_ = true;
+        if (cfg_.sync_settings) broadcast_control_sync();
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(kColTextMain, "Синхронізувати налаштування між пристроями");
+    ImGui::TextDisabled("Миттєво вирівнює бітрейт, канали, затримку та PANIC між Mac і ПК");
+    ImGui::BeginDisabled(!cfg_.sync_settings);
+    if (ImGui::Checkbox("Також синхронізувати маршрути матриці", &cfg_.sync_matrix_routing)) {
+        config_dirty_ = true;
+        if (cfg_.sync_matrix_routing) broadcast_control_sync();
+    }
+    ImGui::EndDisabled();
 
     ImGui::Spacing();
     ImGui::TextDisabled("Розмір буфера аудіоматриці:");

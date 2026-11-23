@@ -295,6 +295,8 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "connect_role", cfg.connect_role);
     read_bool(j, "dark_theme", cfg.dark_theme);
     read_bool(j, "matrix_stereo_pairs", cfg.matrix_stereo_pairs);
+    read_bool(j, "sync_settings", cfg.sync_settings);
+    read_bool(j, "sync_matrix_routing", cfg.sync_matrix_routing);
     read_int(j, "matrix_buffer_size", cfg.matrix_buffer_size);
     read_bool(j, "matrix_feedback_guard", cfg.matrix_feedback_guard);
     {
@@ -388,6 +390,8 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"connect_role\": " << cfg.connect_role << ",\n"
         << "  \"dark_theme\": " << (cfg.dark_theme ? "true" : "false") << ",\n"
         << "  \"matrix_stereo_pairs\": " << (cfg.matrix_stereo_pairs ? "true" : "false") << ",\n"
+        << "  \"sync_settings\": " << (cfg.sync_settings ? "true" : "false") << ",\n"
+        << "  \"sync_matrix_routing\": " << (cfg.sync_matrix_routing ? "true" : "false") << ",\n"
         << "  \"matrix_buffer_size\": " << cfg.matrix_buffer_size << ",\n"
         << "  \"matrix_feedback_guard\": " << (cfg.matrix_feedback_guard ? "true" : "false") << ",\n"
         << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"

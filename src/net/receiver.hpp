@@ -100,6 +100,16 @@ public:
     MidiRxStats midi_stats() const { return midi_rx_.stats(); }
     uint32_t active_midi_notes() const;
 
+    // ---- Real-Time Control Sync (kControlSync, bidirectional, 3x Wi-Fi redundant) ----
+    using ControlSyncCallback = std::function<void(const ControlSyncPayload&)>;
+    void set_control_sync_callback(ControlSyncCallback cb) {
+        std::lock_guard<std::mutex> lk(cs_mu_);
+        cs_cb_ = std::move(cb);
+    }
+    bool send_control_sync(const ControlSyncPayload& cs);
+    uint64_t control_sync_tx_count() const { return cs_tx_count_.load(std::memory_order_relaxed); }
+    uint64_t control_sync_rx_count() const { return cs_rx_count_.load(std::memory_order_relaxed); }
+
     // ---- Stream epoch (sender restart) ----
     uint16_t stream_epoch() const { return cur_epoch_.load(std::memory_order_relaxed); }
     uint64_t stream_epoch_resets() const { return epoch_resets_.load(std::memory_order_relaxed); }
@@ -171,6 +181,11 @@ private:
     std::atomic<uint16_t> cur_epoch_{0};
     uint16_t prev_epoch_ = 0;
     std::atomic<uint64_t> epoch_resets_{0};
+    mutable std::mutex cs_mu_;
+    ControlSyncCallback cs_cb_;
+    uint64_t cs_last_rx_rev_ = 0;
+    std::atomic<uint64_t> cs_tx_count_{0};
+    std::atomic<uint64_t> cs_rx_count_{0};
 
     uint8_t recv_batch_buf_[kRecvBatchSize][kRecvSlotCap];
 };

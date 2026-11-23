@@ -129,6 +129,16 @@ public:
     bool push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port = 0, uint64_t media_ts_us = 0);
     MidiTxStats midi_stats() const { return midi_tx_ ? midi_tx_->stats() : MidiTxStats{}; }
 
+    // ---- Real-Time Bidirectional Control Sync (kControlSync, 3x Wi-Fi redundant) ----
+    using ControlSyncCallback = std::function<void(const ControlSyncPayload&)>;
+    bool send_control_sync(const ControlSyncPayload& cs);
+    void set_control_sync_callback(ControlSyncCallback cb) {
+        std::lock_guard<std::mutex> lk(cs_mu_);
+        cs_cb_ = std::move(cb);
+    }
+    uint64_t control_sync_tx_count() const { return cs_tx_count_.load(std::memory_order_relaxed); }
+    uint64_t control_sync_rx_count() const { return cs_rx_count_.load(std::memory_order_relaxed); }
+
     // Session epoch (random, non-zero) carried by every AUDIO2 / MIDI2 packet. A receiver resets its
     // transport state and MasterClock when it changes (sender restart).
     uint16_t stream_epoch() const { return stream_epoch_; }
@@ -176,6 +186,11 @@ private:
     std::unique_ptr<MidiTxEngine> midi_tx_;
     std::atomic<uint64_t> last_midi_us_{0};
     std::atomic<uint64_t> last_midi_hb_us_{0};
+    mutable std::mutex cs_mu_;
+    ControlSyncCallback cs_cb_;
+    uint64_t cs_last_rx_rev_ = 0;
+    std::atomic<uint64_t> cs_tx_count_{0};
+    std::atomic<uint64_t> cs_rx_count_{0};
     std::mutex ctl_mu_;
     std::unique_ptr<AudioTxEngine> atx_;
     AudioCodecProfile audio_codec_ = AudioCodecProfile::kPcm32F;

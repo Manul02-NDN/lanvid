@@ -379,6 +379,25 @@ bool UdpSender::push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port, 
     return midi_tx_->flush(ts, now_us32());
 }
 
+bool UdpSender::send_control_sync(const ControlSyncPayload& cs) {
+    uint8_t body[kControlSyncSize];
+    write_control_sync(body, cs);
+    PacketHeader h;
+    h.type = PacketType::kControlSync;
+    h.flags = kFlagHasCrc;
+    h.frame_id = uint32_t(cs.revision & 0xFFFFFFFFu);
+    h.timestamp_us = now_us32();
+    uint8_t out[128];
+    const size_t n = write_packet(out, sizeof(out), h, body, sizeof(body));
+    if (!n) return false;
+    int ok = 0;
+    for (int rep = 0; rep < 3; ++rep) {
+        if (sock_.send_to(out, n, dst_) == int(n)) ++ok;
+    }
+    if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
+    return ok > 0;
+}
+
 void UdpSender::service_control() {
     // MIDI2 heartbeat: re-send recent events every 100 ms for 2 s after the last one (stuck-note guard).
     if (midi_tx_) {
@@ -425,6 +444,18 @@ void UdpSender::service_control() {
             }
         } else if (h.type == PacketType::kAudioNack) {
             if (atx_) atx_->on_nack(payload, h.payload_size);
+        } else if (h.type == PacketType::kControlSync) {
+            ControlSyncPayload cs{};
+            if (!parse_control_sync(payload, h.payload_size, cs)) continue;
+            ControlSyncCallback cb;
+            {
+                std::lock_guard<std::mutex> clk(cs_mu_);
+                if (cs.revision <= cs_last_rx_rev_) continue;  // dedup / anti-loop
+                cs_last_rx_rev_ = cs.revision;
+                cb = cs_cb_;
+            }
+            cs_rx_count_.fetch_add(1, std::memory_order_relaxed);
+            if (cb) cb(cs);
         } else if (h.type == PacketType::kFeedback) {
             FeedbackPayload fb;
             if (!parse_feedback(payload, h.payload_size, fb)) continue;

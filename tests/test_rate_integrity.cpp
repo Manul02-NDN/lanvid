@@ -536,3 +536,164 @@ TEST(audio2_bitrate_profiles_256_to_64_kbps) {
         }
     }
 }
+
+TEST(udp_realtime_config_sync_bidirectional_no_loop) {
+    // Verifies bidirectional Real-Time Control Sync (Node A <-> Node B) over real UDP:
+    //  1) Node A changes bitrate (256 -> 64 kbps), channels (16 -> 32), and latency mode (Adaptive -> Fixed)
+    //     -> Node B applies immediately without echoing back.
+    //  2) Node B changes bitrate (128 kbps), channels (8), and latency mode (Adaptive)
+    //     -> Node A applies immediately; revision stabilizes after exactly 1 exchange (zero loops).
+    constexpr uint16_t kPort = 56925;
+    constexpr uint32_t kOriginA = 0x1111AAAAu;
+    constexpr uint32_t kOriginB = 0x2222BBBBu;
+
+    LvReceiverHandle* nodeB = lv_receiver_create();
+    LvSenderHandle* nodeA = lv_sender_create();
+    CHECK(nodeA != nullptr && nodeB != nullptr);
+
+    struct PeerSyncState {
+        std::mutex mu;
+        LV_ControlSyncState last{};
+        uint64_t rx_updates = 0;
+        uint64_t last_applied_rev = 0;
+        uint32_t origin_id = 0;
+    };
+    PeerSyncState stA{}, stB{};
+    stA.origin_id = kOriginA;
+    stB.origin_id = kOriginB;
+
+    auto cb = [](const LV_ControlSyncState* cs, void* ud) {
+        auto* ps = static_cast<PeerSyncState*>(ud);
+        if (!ps || !cs || cs->origin_id == ps->origin_id) return;
+        std::lock_guard<std::mutex> lk(ps->mu);
+        if (cs->revision <= ps->last_applied_rev) return;
+        ps->last_applied_rev = cs->revision;
+        ps->last = *cs;
+        ++ps->rx_updates;
+    };
+
+    lv_sender_set_control_sync_callback(nodeA, cb, &stA);
+    lv_receiver_set_control_sync_callback(nodeB, cb, &stB);
+
+    LvReceiverConfig rcfg{};
+    lv_receiver_config_default(&rcfg);
+    rcfg.bind_port = kPort;
+    rcfg.enable_audio = 0;
+    rcfg.enable_discovery = 0;
+    rcfg.audio_only = 1;
+    CHECK(lv_receiver_start(nodeB, &rcfg) == 1);
+
+    LvSenderConfig scfg{};
+    lv_sender_config_default(&scfg);
+    std::snprintf(scfg.dest_ip, sizeof(scfg.dest_ip), "127.0.0.1");
+    scfg.dest_port = kPort;
+    scfg.audio_only = 1;
+    CHECK(lv_sender_start(nodeA, &scfg) == 1);
+
+    // 1) Node A -> Node B: revision 1 (256 kbps, 16 ch, Adaptive 20 ms)
+    LV_ControlSyncState cs1{};
+    cs1.revision = 1;
+    cs1.origin_id = kOriginA;
+    cs1.audio_channels = 16;
+    cs1.audio_bitrate_kbps = 256;
+    cs1.target_buffer_ms = 20;
+    cs1.latency_mode = 1;
+    cs1.audio_only = 1;
+    cs1.active_preset_id = -1;
+    CHECK(lv_sender_send_control_sync(nodeA, &cs1) == LV_OK);
+
+    // Wait briefly (< 100 ms) for Node B to receive revision 1
+    for (int i = 0; i < 40; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(stB.mu);
+            if (stB.last_applied_rev >= 1) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::lock_guard<std::mutex> lk(stB.mu);
+        CHECK(stB.last_applied_rev == 1);
+        CHECK(stB.last.audio_bitrate_kbps == 256);
+        CHECK(stB.last.audio_channels == 16);
+        CHECK(stB.last.latency_mode == 1);
+    }
+
+    // 2) Node A -> Node B: revision 2 (64 kbps, 32 ch, Fixed 10 ms)
+    LV_ControlSyncState cs2 = cs1;
+    cs2.revision = 2;
+    cs2.audio_bitrate_kbps = 64;
+    cs2.audio_channels = 32;
+    cs2.latency_mode = 0;
+    cs2.target_buffer_ms = 10;
+    CHECK(lv_sender_send_control_sync(nodeA, &cs2) == LV_OK);
+
+    for (int i = 0; i < 40; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(stB.mu);
+            if (stB.last_applied_rev >= 2) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::lock_guard<std::mutex> lk(stB.mu);
+        CHECK(stB.last_applied_rev == 2);
+        CHECK(stB.last.audio_bitrate_kbps == 64);
+        CHECK(stB.last.audio_channels == 32);
+        CHECK(stB.last.latency_mode == 0);
+        CHECK(stB.last.target_buffer_ms == 10);
+        CHECK(stB.rx_updates == 2);  // 3x redundancy deduped to exact 2 unique revisions!
+    }
+
+    // 3) Reverse direction: Node B -> Node A (revision 3: 128 kbps, 8 ch, Adaptive 15 ms)
+    LV_ControlSyncState cs3{};
+    cs3.revision = 3;
+    cs3.origin_id = kOriginB;
+    cs3.audio_channels = 8;
+    cs3.audio_bitrate_kbps = 128;
+    cs3.target_buffer_ms = 15;
+    cs3.latency_mode = 1;
+    cs3.audio_only = 1;
+    cs3.active_preset_id = -1;
+    CHECK(lv_receiver_send_control_sync(nodeB, &cs3) == LV_OK);
+
+    LvSenderStats dummy_st{};
+    for (int i = 0; i < 40; ++i) {
+        lv_sender_get_stats(nodeA, &dummy_st);  // services incoming UDP control packets on Node A
+        {
+            std::lock_guard<std::mutex> lk(stA.mu);
+            if (stA.last_applied_rev >= 3) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    // Wait another 50 ms to verify zero echo / infinite loop!
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    lv_sender_get_stats(nodeA, &dummy_st);
+
+    uint64_t a_rx = 0, b_rx = 0, a_rev = 0, b_rev = 0;
+    {
+        std::lock_guard<std::mutex> lk(stA.mu);
+        a_rx = stA.rx_updates;
+        a_rev = stA.last_applied_rev;
+        CHECK(stA.last_applied_rev == 3);
+        CHECK(stA.last.audio_bitrate_kbps == 128);
+        CHECK(stA.last.audio_channels == 8);
+        CHECK(stA.last.latency_mode == 1);
+        CHECK(stA.last.target_buffer_ms == 15);
+        CHECK(stA.rx_updates == 1);  // exact 1 exchange, no loop!
+    }
+    {
+        std::lock_guard<std::mutex> lk(stB.mu);
+        b_rx = stB.rx_updates;
+        b_rev = stB.last_applied_rev;
+        CHECK(stB.rx_updates == 2);  // still exact 2, zero echo!
+    }
+
+    std::printf("    [control-sync] A->B: rev=%llu (rx=%llu, 256->64 kbps, 32ch, Fixed) | B->A: rev=%llu (rx=%llu, 128 kbps, 8ch, Adaptive) | loops=0\n",
+                (unsigned long long)b_rev, (unsigned long long)b_rx,
+                (unsigned long long)a_rev, (unsigned long long)a_rx);
+
+    lv_sender_stop(nodeA);
+    lv_receiver_stop(nodeB);
+    lv_sender_destroy(nodeA);
+    lv_receiver_destroy(nodeB);
+}

@@ -285,4 +285,37 @@ bool parse_feedback(const uint8_t* in, size_t len, FeedbackPayload& fb) {
     return true;
 }
 
+void write_control_sync(uint8_t* out, const ControlSyncPayload& cs) {
+    std::memset(out, 0, kControlSyncSize);
+    store_le64(out + 0, cs.revision);
+    store_le32(out + 8, cs.origin_id);
+    store_le16(out + 12, cs.audio_channels);
+    store_le16(out + 14, cs.audio_bitrate_kbps);
+    store_le16(out + 16, cs.target_buffer_ms);
+    out[18] = cs.latency_mode;
+    out[19] = cs.audio_only;
+    out[20] = uint8_t(cs.active_preset_id);
+    out[21] = cs.flags;
+    store_le16(out + 22, uint16_t(cs.master_gain_cb));
+    out[24] = cs.audio_codec;
+}
+
+bool parse_control_sync(const uint8_t* in, size_t len, ControlSyncPayload& cs) {
+    if (len < kControlSyncSize) return false;
+    cs.revision = load_le64(in + 0);
+    cs.origin_id = load_le32(in + 8);
+    cs.audio_channels = load_le16(in + 12);
+    cs.audio_bitrate_kbps = load_le16(in + 14);
+    cs.target_buffer_ms = load_le16(in + 16);
+    cs.latency_mode = in[18];
+    cs.audio_only = in[19];
+    cs.active_preset_id = int8_t(in[20]);
+    cs.flags = in[21];
+    cs.master_gain_cb = int16_t(load_le16(in + 22));
+    cs.audio_codec = in[24];
+    if (cs.audio_channels == 0 || cs.audio_channels > kMaxAudioChannels) return false;
+    if (cs.target_buffer_ms < 2 || cs.target_buffer_ms > 2000) return false;
+    return true;
+}
+
 }  // namespace lv

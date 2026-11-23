@@ -214,6 +214,30 @@ LV_API int lv_duplex_send_midi(LvDuplexHandle* handle, uint8_t status, uint8_t d
                                uint64_t media_ts_us);
 LV_API void lv_duplex_set_midi_callback(LvDuplexHandle* handle, LV_MidiEventCallback cb, void* user_data);
 
+/* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
+typedef struct LV_ControlSyncState {
+    uint64_t revision;           /* monotonic version (anti-loop / dedup) */
+    uint32_t origin_id;          /* per-instance origin ID (echo guard) */
+    uint16_t audio_channels;     /* 2 / 8 / 16 / 32 / 64 */
+    uint16_t audio_bitrate_kbps; /* 0 = Lossless, 256 / 192 / 128 / 96 / 64 */
+    uint16_t target_buffer_ms;   /* 2..2000 ms */
+    uint8_t  latency_mode;       /* 0 = Fixed (Ethernet), 1 = Adaptive (Wi-Fi) */
+    uint8_t  audio_only;         /* 0 = AV, 1 = Audio Only */
+    int8_t   active_preset_id;   /* -1 = custom, 0/1/2/3 = preset */
+    uint8_t  flags;              /* bit0 = mute_all/PANIC, bit1 = sync_matrix */
+    int16_t  master_gain_cb;     /* 0.01 dB (-6000..+1200) */
+    uint8_t  audio_codec;        /* 0..8 */
+} LV_ControlSyncState;
+
+typedef void (*LV_ControlSyncCallback)(const LV_ControlSyncState* state, void* user_data);
+
+LV_API int lv_sender_send_control_sync(LvSenderHandle* handle, const LV_ControlSyncState* state);
+LV_API void lv_sender_set_control_sync_callback(LvSenderHandle* handle, LV_ControlSyncCallback cb, void* user_data);
+LV_API int lv_receiver_send_control_sync(LvReceiverHandle* handle, const LV_ControlSyncState* state);
+LV_API void lv_receiver_set_control_sync_callback(LvReceiverHandle* handle, LV_ControlSyncCallback cb, void* user_data);
+LV_API int lv_duplex_send_control_sync(LvDuplexHandle* handle, const LV_ControlSyncState* state);
+LV_API void lv_duplex_set_control_sync_callback(LvDuplexHandle* handle, LV_ControlSyncCallback cb, void* user_data);
+
 /* ---- Jitter-buffer latency mode (live, no stream restart; additive) ----
  * enabled = 0: Fixed  - playout delay held exactly at the bus latency (wired Ethernet, live monitoring).
  * enabled = 1: Adaptive Wi-Fi (default) - grows within [latency .. 200 ms] on jitter bursts (<= 0.5 %

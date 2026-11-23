@@ -75,6 +75,9 @@ private:
     void apply_receiver_bus();
     void wire_network_midi();
     static void on_network_midi(const LV_MidiEvent* ev, void* user_data);
+    static void on_remote_control_sync(const LV_ControlSyncState* state, void* user_data);
+    void broadcast_control_sync(bool mute_all_panic = false);
+    void apply_pending_remote_sync();
     void start_vdev_tx();
     void stop_vdev_tx();
     void apply_receiver_output();
@@ -222,6 +225,16 @@ private:
     bool req_open_add_midi_popup_ = false;
     bool req_open_clear_all_popup_ = false;
     uint64_t last_dev_refresh_us_ = 0;
+
+    // Real-time bidirectional settings sync (anti-loop / echo guard)
+    uint32_t sync_origin_id_ = 0;
+    uint64_t local_sync_revision_ = 0;
+    uint64_t last_applied_remote_revision_ = 0;
+    bool applying_remote_sync_ = false;
+    uint64_t last_synced_us_ = 0;
+    std::mutex remote_sync_mu_;
+    bool has_pending_remote_sync_ = false;
+    LV_ControlSyncState pending_remote_sync_{};
 };
 
 }  // namespace lv::gui

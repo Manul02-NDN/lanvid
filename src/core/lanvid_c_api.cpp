@@ -141,6 +141,10 @@ struct LvSenderHandle {
     double cached_mbps = 0.0;
     double cached_enc_ms = 0.0;
     double cached_audio_kbps = 0.0;
+
+    std::mutex cs_cb_mu;
+    LV_ControlSyncCallback cs_cb = nullptr;
+    void* cs_ud = nullptr;
     int cur_w = 0;
     int cur_h = 0;
 
@@ -228,6 +232,8 @@ struct LvReceiverHandle {
     LV_StateChangedCallback state_cb = nullptr;
     LV_MidiEventCallback midi_cb = nullptr;
     void* midi_ud = nullptr;
+    LV_ControlSyncCallback cs_cb = nullptr;
+    void* cs_ud = nullptr;
     void* state_ud = nullptr;
 
     // 64-channel bus
@@ -428,6 +434,20 @@ struct LvReceiverHandle {
             e.data2 = ev.data2;
             e.port = ev.port_index;
             cb(&e, ud);
+        });
+        rx->set_control_sync_callback([this](const lv::ControlSyncPayload& cs) {
+            LV_ControlSyncCallback cb = nullptr;
+            void* ud = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(cb_mu);
+                cb = cs_cb;
+                ud = cs_ud;
+            }
+            if (!cb) return;
+            LV_ControlSyncState st{cs.revision, cs.origin_id, cs.audio_channels, cs.audio_bitrate_kbps,
+                                   cs.target_buffer_ms, cs.latency_mode, cs.audio_only, cs.active_preset_id,
+                                   cs.flags, cs.master_gain_cb, cs.audio_codec};
+            cb(&st, ud);
         });
         rx->set_audio_callback([this](uint32_t seq_id, uint32_t ts_us, const lv::AudioHeader& ah,
                                       const uint8_t* pcm_data) {
@@ -717,6 +737,20 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
         handle->state.store(LV_STATE_ERROR, std::memory_order_release);
         return LV_ERR_SOCKET;
     }
+    s->set_control_sync_callback([handle](const lv::ControlSyncPayload& cs) {
+        LV_ControlSyncCallback f = nullptr;
+        void* ud = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
+            f = handle->cs_cb;
+            ud = handle->cs_ud;
+        }
+        if (!f) return;
+        LV_ControlSyncState st{cs.revision, cs.origin_id, cs.audio_channels, cs.audio_bitrate_kbps,
+                               cs.target_buffer_ms, cs.latency_mode, cs.audio_only, cs.active_preset_id,
+                               cs.flags, cs.master_gain_cb, cs.audio_codec};
+        f(&st, ud);
+    });
     handle->sender = std::move(s);
     handle->reset_stats(cfg->width, cfg->height);
     handle->ext_frame_id.store(0, std::memory_order_relaxed);
@@ -1128,6 +1162,7 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     if (!handle->sender) return LV_OK;
 
     const lv::SenderStats st = handle->sender->stats();
+    handle->sender->service_control_try();  // deliver incoming ControlSync/PING even in Audio-Only idle
     const lv::AudioTxStats a2 = handle->sender->audio2_stats();
     const uint64_t total_audio_bytes = st.audio_bytes_sent + a2.bytes_sent;
     const uint64_t total_audio_pkts = st.audio_packets_sent + a2.packets_sent;
@@ -1378,6 +1413,8 @@ struct LvDuplexHandle {
     LV_DuplexConfig cfg{};
     LV_MidiEventCallback midi_cb = nullptr;
     void* midi_ud = nullptr;
+    LV_ControlSyncCallback cs_cb = nullptr;
+    void* cs_ud = nullptr;
     std::atomic<bool> running{false};
 
     void stop_internal() {
@@ -1440,6 +1477,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
     // RX direction: our receiver (own socket, own MasterClock/RTT towards the peer's sender).
     h->rx = lv_receiver_create();
     lv_receiver_set_midi_callback(h->rx, h->midi_cb, h->midi_ud);
+    lv_receiver_set_control_sync_callback(h->rx, h->cs_cb, h->cs_ud);
     lv_receiver_configure_audio_bus(h->rx, &bus);
     lv_receiver_set_adaptive_jitter(h->rx, cfg->adaptive_jitter);
     LV_ReceiverConfig rc;
@@ -1554,6 +1592,81 @@ void lv_duplex_set_midi_callback(LvDuplexHandle* h, LV_MidiEventCallback cb, voi
     h->midi_cb = cb;
     h->midi_ud = user_data;
     if (h->rx) lv_receiver_set_midi_callback(h->rx, cb, user_data);
+}
+
+static lv::ControlSyncPayload to_wire_cs(const LV_ControlSyncState& s) {
+    lv::ControlSyncPayload cs{};
+    cs.revision = s.revision;
+    cs.origin_id = s.origin_id;
+    cs.audio_channels = s.audio_channels;
+    cs.audio_bitrate_kbps = s.audio_bitrate_kbps;
+    cs.target_buffer_ms = s.target_buffer_ms;
+    cs.latency_mode = s.latency_mode;
+    cs.audio_only = s.audio_only;
+    cs.active_preset_id = s.active_preset_id;
+    cs.flags = s.flags;
+    cs.master_gain_cb = s.master_gain_cb;
+    cs.audio_codec = s.audio_codec;
+    return cs;
+}
+
+int lv_sender_send_control_sync(LvSenderHandle* handle, const LV_ControlSyncState* state) {
+    if (!handle || !state) return LV_ERR_INVALID_ARG;
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    return handle->sender->send_control_sync(to_wire_cs(*state)) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_sender_set_control_sync_callback(LvSenderHandle* handle, LV_ControlSyncCallback cb, void* user_data) {
+    if (!handle) return;
+    {
+        std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
+        handle->cs_cb = cb;
+        handle->cs_ud = user_data;
+    }
+    if (handle->sender) {
+        handle->sender->set_control_sync_callback([handle](const lv::ControlSyncPayload& cs) {
+            LV_ControlSyncCallback f = nullptr;
+            void* ud = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
+                f = handle->cs_cb;
+                ud = handle->cs_ud;
+            }
+            if (!f) return;
+            LV_ControlSyncState st{cs.revision, cs.origin_id, cs.audio_channels, cs.audio_bitrate_kbps,
+                                   cs.target_buffer_ms, cs.latency_mode, cs.audio_only, cs.active_preset_id,
+                                   cs.flags, cs.master_gain_cb, cs.audio_codec};
+            f(&st, ud);
+        });
+    }
+}
+
+int lv_receiver_send_control_sync(LvReceiverHandle* handle, const LV_ControlSyncState* state) {
+    if (!handle || !state) return LV_ERR_INVALID_ARG;
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    return handle->receiver->send_control_sync(to_wire_cs(*state)) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_receiver_set_control_sync_callback(LvReceiverHandle* handle, LV_ControlSyncCallback cb, void* user_data) {
+    if (!handle) return;
+    std::lock_guard<std::mutex> lk(handle->cb_mu);
+    handle->cs_cb = cb;
+    handle->cs_ud = user_data;
+}
+
+int lv_duplex_send_control_sync(LvDuplexHandle* h, const LV_ControlSyncState* state) {
+    if (!h || !state) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    if (!h->tx) return LV_ERR_NOT_RUNNING;
+    return lv_sender_send_control_sync(h->tx, state);
+}
+
+void lv_duplex_set_control_sync_callback(LvDuplexHandle* h, LV_ControlSyncCallback cb, void* user_data) {
+    if (!h) return;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->cs_cb = cb;
+    h->cs_ud = user_data;
+    if (h->rx) lv_receiver_set_control_sync_callback(h->rx, cb, user_data);
 }
 
 int lv_duplex_set_latency_ms(LvDuplexHandle* h, uint32_t ms) {

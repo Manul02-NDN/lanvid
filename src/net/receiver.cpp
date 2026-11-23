@@ -230,6 +230,22 @@ void UdpReceiver::step_once() {
                     has_sender_ = true;
                 }
                 midi_rx_.on_packet(h, payload, h.payload_size);
+            } else if (h.type == PacketType::kControlSync) {
+                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
+                    sender_ep_ = batch[i].src;
+                    has_sender_ = true;
+                }
+                ControlSyncPayload cs{};
+                if (!parse_control_sync(payload, h.payload_size, cs)) continue;
+                ControlSyncCallback cb;
+                {
+                    std::lock_guard<std::mutex> clk(cs_mu_);
+                    if (cs.revision <= cs_last_rx_rev_) continue;  // dedup / anti-loop
+                    cs_last_rx_rev_ = cs.revision;
+                    cb = cs_cb_;
+                }
+                cs_rx_count_.fetch_add(1, std::memory_order_relaxed);
+                if (cb) cb(cs);
             } else if (h.type == PacketType::kAudio) {
                 if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
                     sender_ep_ = batch[i].src;
@@ -377,6 +393,26 @@ double UdpReceiver::estimate_latency_ms(uint64_t recv_complete_us, uint32_t send
     const int64_t raw = int64_t(diff_us32(uint32_t(recv_complete_us), sender_ts_us));
     const int64_t adj = sync_.synced ? (raw + sync_.offset_us) : raw;
     return double(adj) / 1000.0;
+}
+
+bool UdpReceiver::send_control_sync(const ControlSyncPayload& cs) {
+    if (!has_sender_) return false;
+    uint8_t body[kControlSyncSize];
+    write_control_sync(body, cs);
+    PacketHeader h;
+    h.type = PacketType::kControlSync;
+    h.flags = kFlagHasCrc;
+    h.frame_id = uint32_t(cs.revision & 0xFFFFFFFFu);
+    h.timestamp_us = now_us32();
+    uint8_t out[128];
+    const size_t n = write_packet(out, sizeof(out), h, body, sizeof(body));
+    if (!n) return false;
+    int ok = 0;
+    for (int rep = 0; rep < 3; ++rep) {
+        if (sock_.send_to(out, n, sender_ep_) == int(n)) ++ok;
+    }
+    if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
+    return ok > 0;
 }
 
 }  // namespace lv

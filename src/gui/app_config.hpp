@@ -62,6 +62,8 @@ struct AppConfig {
     int connect_role = 0;      // 0=Send, 1=Receive, 2=Duplex (Both directions)
     bool dark_theme = false;   // false=Soft Pastel Lavender, true=Dark Studio
     bool matrix_stereo_pairs = true;  // true=Stereo pairs (1-2, 3-4...), false=Per-channel
+    bool sync_settings = true;        // real-time bidirectional settings sync across connected peers
+    bool sync_matrix_routing = false; // also sync matrix routing presets across peers
 
     // Multi-Device Audio Matrix persistence
     int matrix_buffer_size = 256;
