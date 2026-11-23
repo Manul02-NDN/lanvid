@@ -27,6 +27,7 @@
 #include "common/image.hpp"
 #include "net/discovery.hpp"
 #include "audio/channel_patchbay.hpp"
+#include "audio/intercom_engine.hpp"
 #include "audio/personal_monitor_bus.hpp"
 #ifdef LV_HAVE_SHM_BUS
 #include "audio/shm_audio_host.hpp"
@@ -1860,6 +1861,146 @@ int lv_monitor_client_keepalive(LvMonitorClientHandle* cli) {
 
 void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames) {
     if (cli && cli->cli) cli->cli->pop_stereo(out_interleaved, frames);
+}
+
+// ---- Tally & Duplex Intercom C ABI ----
+
+struct LvTallyIntercomHandle {
+    std::unique_ptr<lv::TallyIntercomEngine> eng;
+};
+
+namespace {
+std::mutex g_studio_ti_mu;
+lv::TallyIntercomEngine* g_active_studio_ti = nullptr;
+}  // namespace
+
+LvTallyIntercomHandle* lv_tally_intercom_create_studio(uint16_t bind_port) {
+    auto* h = new LvTallyIntercomHandle();
+    h->eng = std::make_unique<lv::TallyIntercomEngine>();
+    if (!h->eng->start_studio(bind_port)) {
+        delete h;
+        return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_studio_ti_mu);
+        g_active_studio_ti = h->eng.get();
+    }
+    return h;
+}
+
+LvTallyIntercomHandle* lv_tally_intercom_create_camera(const char* studio_ip, uint16_t studio_port,
+                                                       uint32_t camera_id, const char* camera_label) {
+    if (!studio_ip) return nullptr;
+    auto* h = new LvTallyIntercomHandle();
+    h->eng = std::make_unique<lv::TallyIntercomEngine>();
+    if (!h->eng->start_camera(studio_ip, studio_port, camera_id, camera_label ? camera_label : "CAM 1")) {
+        delete h;
+        return nullptr;
+    }
+    return h;
+}
+
+void lv_tally_intercom_destroy(LvTallyIntercomHandle* handle) {
+    if (!handle) return;
+    {
+        std::lock_guard<std::mutex> lk(g_studio_ti_mu);
+        if (g_active_studio_ti == handle->eng.get()) g_active_studio_ti = nullptr;
+    }
+    if (handle->eng) handle->eng->stop();
+    delete handle;
+}
+
+uint16_t lv_tally_intercom_port(LvTallyIntercomHandle* handle) {
+    return (handle && handle->eng) ? handle->eng->bound_port() : 0;
+}
+
+void lv_tally_intercom_poll(LvTallyIntercomHandle* handle) {
+    if (handle && handle->eng) handle->eng->poll();
+}
+
+int lv_tally_intercom_set_camera_tally(LvTallyIntercomHandle* studio, uint32_t stream_id,
+                                       uint8_t tally_state, const char* camera_label, int rec_trigger) {
+    if (!studio || !studio->eng) return LV_ERR_INVALID_ARG;
+    return studio->eng->studio_set_camera_tally(stream_id, tally_state, camera_label ? camera_label : "",
+                                                rec_trigger != 0)
+               ? LV_OK
+               : LV_ERR_INVALID_ARG;
+}
+
+int lv_studio_set_camera_tally(uint32_t stream_id, uint8_t tally_state, const char* camera_label,
+                               int rec_trigger) {
+    std::lock_guard<std::mutex> lk(g_studio_ti_mu);
+    if (!g_active_studio_ti) return LV_ERR_NOT_RUNNING;
+    return g_active_studio_ti->studio_set_camera_tally(stream_id, tally_state, camera_label ? camera_label : "",
+                                                       rec_trigger != 0)
+               ? LV_OK
+               : LV_ERR_INVALID_ARG;
+}
+
+void lv_camera_set_tally_callback(LvTallyIntercomHandle* handle, LV_TallyCallback cb, void* user_data) {
+    if (!handle || !handle->eng) return;
+    if (!cb) {
+        handle->eng->camera_set_tally_callback(nullptr);
+        return;
+    }
+    handle->eng->camera_set_tally_callback([cb, user_data](const lv::TallyStatePayload& tp) {
+        LV_TallyState out{};
+        out.camera_id = tp.camera_id;
+        out.tally_state = tp.tally_state;
+        out.flags = tp.flags;
+        out.battery_pct = tp.battery_pct;
+        out.temp_c = tp.temp_c;
+        out.revision = tp.revision;
+        std::memcpy(out.camera_label, tp.camera_label, sizeof(out.camera_label));
+        out.camera_label[sizeof(out.camera_label) - 1] = '\0';
+        cb(&out, user_data);
+    });
+}
+
+void lv_tally_intercom_update_camera_telemetry(LvTallyIntercomHandle* handle, uint8_t battery_pct,
+                                               int8_t temp_c) {
+    if (handle && handle->eng) handle->eng->camera_update_telemetry(battery_pct, temp_c);
+}
+
+int lv_intercom_push_mic_pcm(LvTallyIntercomHandle* handle, const float* samples, int frames) {
+    if (!handle || !handle->eng || !samples || frames <= 0) return LV_ERR_INVALID_ARG;
+    handle->eng->push_mic_pcm(samples, frames);
+    return LV_OK;
+}
+
+int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames) {
+    if (!handle || !handle->eng || !out_samples || frames <= 0) return 0;
+    return handle->eng->pull_rx_pcm(out_samples, frames);
+}
+
+void lv_intercom_set_state(LvTallyIntercomHandle* handle, int talk_active, int listen_muted,
+                           float rx_gain, float sidetone_gain) {
+    if (handle && handle->eng) {
+        handle->eng->set_intercom_state(talk_active != 0, listen_muted != 0, rx_gain, sidetone_gain);
+    }
+}
+
+int lv_tally_intercom_set_camera_intercom(LvTallyIntercomHandle* studio, uint32_t camera_id,
+                                          int talk_to_cam, int listen_from_cam, int all_call) {
+    if (!studio || !studio->eng) return LV_ERR_INVALID_ARG;
+    studio->eng->studio_set_camera_intercom(camera_id, talk_to_cam != 0, listen_from_cam != 0, all_call != 0);
+    return LV_OK;
+}
+
+int lv_studio_set_camera_intercom(uint32_t camera_id, int talk_to_cam, int listen_from_cam, int all_call) {
+    std::lock_guard<std::mutex> lk(g_studio_ti_mu);
+    if (!g_active_studio_ti) return LV_ERR_NOT_RUNNING;
+    g_active_studio_ti->studio_set_camera_intercom(camera_id, talk_to_cam != 0, listen_from_cam != 0,
+                                                   all_call != 0);
+    return LV_OK;
+}
+
+int lv_tally_intercom_is_director_speaking(LvTallyIntercomHandle* handle) {
+    return (handle && handle->eng && handle->eng->is_director_speaking()) ? 1 : 0;
+}
+
+float lv_tally_intercom_ducking_gain(LvTallyIntercomHandle* handle) {
+    return (handle && handle->eng) ? handle->eng->ducking_gain() : 1.0f;
 }
 
 static lv::ControlSyncPayload to_wire_cs(const LV_ControlSyncState& s) {

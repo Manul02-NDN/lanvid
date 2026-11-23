@@ -15,7 +15,9 @@
 #include "audio/audio_rx.hpp"
 #include "audio/audio_sync_matrix.hpp"
 #include "audio/audio_tx.hpp"
+#include "audio/intercom_engine.hpp"
 #include "audio/master_clock.hpp"
+#include "lanvid/lanvid_sdk.h"
 #include "audio/multi_device_matrix.hpp"
 #include "audio/personal_monitor_bus.hpp"
 #include "gui/app_config.hpp"
@@ -707,4 +709,162 @@ TEST(personal_monitor_bus_64ch_to_stereo_dsp_and_remote_control) {
 
     cli.disconnect();
     srv.stop();
+}
+
+TEST(tally_and_duplex_intercom_e2e_udp) {
+    using namespace lv;
+
+    // 1. Packet serialization round-trip for kTallyState and kIntercomAudio
+    {
+        TallyStatePayload in{};
+        in.camera_id = 3;
+        in.tally_state = kTallyProgram;
+        in.flags = kTallyFlagRecTrigger | kTallyFlagHighBright;
+        in.revision = 42;
+        in.battery_pct = 87;
+        in.temp_c = 38;
+        std::snprintf(in.camera_label, sizeof(in.camera_label), "CAM 3 A-ROLL");
+
+        std::vector<uint8_t> buf(kTallyStateSize);
+        write_tally_state(buf.data(), in);
+        TallyStatePayload out{};
+        CHECK(parse_tally_state(buf.data(), buf.size(), out));
+        CHECK(out.camera_id == 3);
+        CHECK(out.tally_state == kTallyProgram);
+        CHECK((out.flags & kTallyFlagRecTrigger) != 0);
+        CHECK(out.revision == 42);
+        CHECK(std::string(out.camera_label) == "CAM 3 A-ROLL");
+
+        IntercomAudioHeader ih{};
+        ih.camera_id = 3;
+        ih.codec = 1;
+        ih.flags = kIntercomFlagStudioToCam | kIntercomFlagPttActive | kIntercomFlagDuckProgram;
+        ih.num_samples = 480;
+        ih.seq = 77;
+        ih.sample_rate = 48000;
+        std::vector<uint8_t> ibuf(kIntercomHeaderSize);
+        write_intercom_header(ibuf.data(), ih);
+        IntercomAudioHeader ih_out{};
+        CHECK(parse_intercom_header(ibuf.data(), ibuf.size(), ih_out));
+        CHECK(ih_out.camera_id == 3 && ih_out.seq == 77 && ih_out.num_samples == 480 && ih_out.sample_rate == 48000);
+    }
+
+    // 2. Live UDP Studio <-> Camera Tally transitions + Duplex Intercom E2E
+    TallyIntercomEngine studio;
+    TallyIntercomEngine camera;
+    CHECK(studio.start_studio(0));
+    const uint16_t studio_port = studio.bound_port();
+    CHECK(studio_port != 0);
+
+    std::atomic<int> tally_events{0};
+    std::atomic<uint8_t> last_tally{kTallyStandby};
+    std::atomic<bool> last_rec{false};
+    camera.camera_set_tally_callback([&](const TallyStatePayload& t) {
+        if (t.camera_id == 1) {
+            last_tally.store(t.tally_state);
+            last_rec.store((t.flags & kTallyFlagRecTrigger) != 0);
+            tally_events.fetch_add(1);
+        }
+    });
+    camera.camera_update_telemetry(92, 36);
+    CHECK(camera.start_camera("127.0.0.1", studio_port, 1, "CAM 1 MAIN"));
+
+    // Wait for Camera hello -> Studio registration
+    for (int i = 0; i < 40; ++i) {
+        camera.poll();
+        studio.poll();
+        if (!studio.studio_cameras().empty()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const auto cams = studio.studio_cameras();
+    CHECK(cams.size() == 1);
+    CHECK(cams[0].camera_id == 1);
+    CHECK(cams[0].battery_pct == 92);
+
+    // Standby -> Preview -> Program + Remote REC
+    CHECK(studio.studio_set_camera_tally(1, kTallyPreview, "CAM 1 PVW", false));
+    for (int i = 0; i < 20 && last_tally.load() != kTallyPreview; ++i) {
+        studio.poll();
+        camera.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(last_tally.load() == kTallyPreview);
+    CHECK(!last_rec.load());
+
+    CHECK(studio.studio_set_camera_tally(1, kTallyProgram, "CAM 1 ON AIR", true));
+    for (int i = 0; i < 20 && (last_tally.load() != kTallyProgram || !last_rec.load()); ++i) {
+        studio.poll();
+        camera.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(last_tally.load() == kTallyProgram);
+    CHECK(last_rec.load());
+    CHECK(tally_events.load() >= 2);
+
+    // 3. Duplex Intercom: Director -> Camera IFB (with ducking) + Camera PTT -> Studio
+    studio.set_intercom_state(/*talk_active=*/true, /*listen_muted=*/false, /*rx_gain=*/1.0f, /*sidetone=*/0.0f);
+    studio.studio_set_camera_intercom(1, /*talk_to_cam=*/true, /*listen=*/true, /*all_call=*/false);
+    camera.set_intercom_state(/*talk_active=*/true, /*listen_muted=*/false, /*rx_gain=*/1.0f, /*sidetone=*/0.0f);
+
+    std::vector<float> dir_tone(480), op_tone(480);
+    for (size_t i = 0; i < 480; ++i) {
+        dir_tone[i] = float(0.45 * std::sin(2.0 * 3.1415926535 * 600.0 * double(i) / 48000.0));
+        op_tone[i] = float(0.40 * std::sin(2.0 * 3.1415926535 * 950.0 * double(i) / 48000.0));
+    }
+
+    const auto t_start = std::chrono::steady_clock::now();
+    std::vector<float> cam_rx(480, 0.0f), studio_rx(480, 0.0f);
+    int cam_got = 0, studio_got = 0;
+    double cam_rms = 0.0, studio_rms = 0.0;
+
+    for (int step = 0; step < 15; ++step) {
+        studio.push_mic_pcm(dir_tone.data(), int(dir_tone.size()));
+        camera.push_mic_pcm(op_tone.data(), int(op_tone.size()));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        camera.poll();
+        studio.poll();
+        if (cam_rms < 0.05) {
+            const int n = camera.pull_rx_pcm(cam_rx.data(), int(cam_rx.size()));
+            if (n > 0) {
+                cam_got = n;
+                double e = 0.0;
+                for (int k = 0; k < n; ++k) e += double(cam_rx[k]) * double(cam_rx[k]);
+                cam_rms = std::sqrt(e / double(n));
+            }
+        }
+        if (studio_rms < 0.05) {
+            const int n = studio.pull_rx_pcm(studio_rx.data(), int(studio_rx.size()));
+            if (n > 0) {
+                studio_got = n;
+                double e = 0.0;
+                for (int k = 0; k < n; ++k) e += double(studio_rx[k]) * double(studio_rx[k]);
+                studio_rms = std::sqrt(e / double(n));
+            }
+        }
+        if (cam_got > 0 && studio_got > 0 && cam_rms > 0.05 && studio_rms > 0.05) break;
+    }
+    const double e2e_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_start).count();
+
+    CHECK(cam_got > 0);
+    CHECK(studio_got > 0);
+    CHECK(cam_rms > 0.05);
+    CHECK(studio_rms > 0.05);
+    CHECK(camera.is_director_speaking());
+    CHECK(camera.ducking_gain() < 0.9f);
+    CHECK(e2e_ms < 50.0);
+
+    // 4. C ABI smoke test
+    LvTallyIntercomHandle* h = lv_tally_intercom_create_studio(0);
+    CHECK(h != nullptr);
+    CHECK(lv_tally_intercom_port(h) != 0);
+    CHECK(lv_tally_intercom_set_camera_tally(h, 2, kTallyProgram, "CAM 2", 1) == 1 ||
+          lv_tally_intercom_set_camera_tally(h, 2, kTallyProgram, "CAM 2", 1) == 0);
+    lv_tally_intercom_destroy(h);
+
+    std::printf("    [Tally+Intercom E2E] tally_events=%d cam_ifb_rms=%.3f studio_rx_rms=%.3f duck=%.2f e2e=%.1f ms\n",
+                tally_events.load(), cam_rms, studio_rms, camera.ducking_gain(), e2e_ms);
+
+    camera.stop();
+    studio.stop();
 }

@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio/intercom_engine.hpp"
 #include "audio/multi_device_matrix.hpp"
 #include "audio/personal_monitor_bus.hpp"
 #include "net/mdns_advertiser.hpp"
@@ -116,6 +117,7 @@ private:
     void draw_stream_mode_selector(const char* id);
     void apply_stream_mode();
     void draw_mobile_monitor_section();
+    void draw_cameras_tally_intercom_section();
     void draw_actual_buffer_line();
     void apply_latency_mode();
     void poll_latency_telemetry(uint64_t now);
@@ -213,6 +215,12 @@ private:
     // Multi-Device Audio Matrix (64x64 across up to 8 slots)
     MultiDeviceAudioMatrix audio_matrix_;
     PersonalMonitorServer monitor_server_{48000};
+    TallyIntercomEngine tally_intercom_;
+    bool intercom_all_call_ = false;
+    bool intercom_listen_muted_ = false;
+    float intercom_ifb_gain_ = 1.0f;
+    int intercom_mic_dev_idx_ = 0;
+    int intercom_out_dev_idx_ = 0;
     MdnsAdvertiser monitor_mdns_;  // "_lanvid._udp" so LanVid Monitor phones find this studio in one tap
     std::atomic<bool> matrix_has_net_tx_routes_{false};
     double dpx_tx_mbps_ = 0.0;

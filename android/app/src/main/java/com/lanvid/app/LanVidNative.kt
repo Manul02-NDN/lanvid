@@ -111,6 +111,14 @@ object LanVidNative {
     @JvmStatic external fun nativeSetVolume(vol: Float)
     @JvmStatic external fun nativeGetReceiverStatsJson(): String
 
+    // Tally (Standby / Preview / Program) & Full-Duplex Intercom (Director <-> Camera)
+    @JvmStatic external fun nativeTallyConnect(studioIp: String, studioPort: Int, cameraId: Int, label: String): Boolean
+    @JvmStatic external fun nativeTallyDisconnect()
+    @JvmStatic external fun nativeTallyPollJson(batteryPct: Int, tempC: Int): String
+    @JvmStatic external fun nativeIntercomSetState(talk: Boolean, listenMuted: Boolean, rxGain: Float, sidetone: Float)
+    @JvmStatic external fun nativeIntercomPushMic(samples: FloatArray, frames: Int)
+    @JvmStatic external fun nativeIntercomPullRx(outSamples: FloatArray, frames: Int): Int
+
     fun scanLanPeers(timeoutMs: Int = 450): List<LanPeer> {
         val raw = nativeScanLan(timeoutMs)
         val arr = JSONArray(raw)

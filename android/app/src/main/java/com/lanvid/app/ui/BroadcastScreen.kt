@@ -39,6 +39,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 private enum class TallyVisual(val badgeLabel: String) {
     OFF("STBY"),
@@ -91,8 +92,42 @@ fun BroadcastScreen(
     var rxStats by remember { mutableStateOf(ReceiverStats()) }
     var traffic by remember { mutableStateOf(TrafficState()) }
     var battery by remember { mutableIntStateOf(-1) }
+    var proState by remember { mutableStateOf(ProCameraState()) }
 
     var cameraPreviewSurface by remember { mutableStateOf<Surface?>(null) }
+
+    // Studio Tally & Duplex Intercom connection + 10 Hz status poll
+    LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
+        if (ui.mode == BroadcastMode.SENDER && ui.senderActive && ui.destIp.isNotBlank()) {
+            LanVidNative.nativeTallyConnect(ui.destIp, 5022, 1, proState.cameraLabel)
+            LanVidNative.nativeIntercomSetState(proState.pttActive, proState.latchActive, proState.ifbEnabled, proState.ifbGain)
+            while (true) {
+                delay(100)
+                val raw = LanVidNative.nativeTallyPollJson(battery.coerceAtLeast(0), 34, ui.senderActive)
+                if (raw.isNotEmpty()) {
+                    runCatching {
+                        val obj = JSONObject(raw)
+                        val tVal = obj.optInt("tally", 0)
+                        val tState = when (tVal) {
+                            2 -> TallyState.PROGRAM
+                            1 -> TallyState.PREVIEW
+                            else -> TallyState.STANDBY
+                        }
+                        proState = proState.copy(
+                            tally = tState,
+                            remoteRec = obj.optBoolean("remoteRec", false),
+                            directorSpeaking = obj.optBoolean("directorSpeaking", false),
+                            duckingGain = obj.optDouble("ducking", 1.0).toFloat(),
+                            cameraLabel = obj.optString("label", proState.cameraLabel).ifBlank { proState.cameraLabel }
+                        )
+                    }
+                }
+            }
+        } else {
+            LanVidNative.nativeTallyDisconnect()
+            proState = proState.copy(tally = TallyState.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
+        }
+    }
 
     // Restart live Camera2 viewfinder whenever lens, resolution, surface, or mode changes
     LaunchedEffect(
@@ -218,6 +253,7 @@ fun BroadcastScreen(
         }
         LanVidNative.nativeStopSender()
         LanVidNative.nativeStopReceiver()
+        LanVidNative.nativeTallyDisconnect()
         ui = ui.copy(senderActive = false, receiverActive = false)
     }
 
@@ -275,7 +311,11 @@ fun BroadcastScreen(
     }
 
     val tally = when {
-        ui.senderActive -> TallyVisual.PROGRAM
+        ui.mode == BroadcastMode.SENDER && ui.senderActive -> when (proState.tally) {
+            TallyState.PROGRAM -> TallyVisual.PROGRAM
+            TallyState.PREVIEW -> TallyVisual.PREVIEW
+            TallyState.STANDBY -> TallyVisual.OFF
+        }
         ui.receiverActive -> TallyVisual.PREVIEW
         else -> TallyVisual.OFF
     }
@@ -348,8 +388,21 @@ fun BroadcastScreen(
             Box(Modifier.fillMaxSize().clickableNoRipple { selectedTool = null })
         }
 
-        // 3. Broadcast Tally outer border
+        // 3. Broadcast Tally outer border + Pro Cine Manual Camera & Duplex Intercom HUD
         TallyBorder(tally)
+        if (ui.mode == BroadcastMode.SENDER && !hudHidden) {
+            ProCameraHudOverlay(
+                state = proState,
+                onStateChange = { proState = it },
+                onIntercomChanged = { ptt, latch, ifb, gain ->
+                    LanVidNative.nativeIntercomSetState(ptt, latch, ifb, gain)
+                },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(top = 56.dp, bottom = 78.dp)
+            )
+        }
 
         // 4. HUD Overlay (Hidden vs Full Broadcast HUD)
         if (hudHidden) {

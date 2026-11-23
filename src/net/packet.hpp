@@ -28,6 +28,8 @@ enum class PacketType : uint8_t {
     kMidiFrame = 0x8,      // MIDI2: sample-accurate MIDI batch synced to MasterClock + 16-event redundancy ring
     kControlSync = 0x9,    // Real-time bidirectional control/config sync (revision-guarded, 3x Wi-Fi redundant)
     kMonitorControl = 0xA, // Personal smartphone monitor mixer remote control & channel metadata/VU sync
+    kTallyState = 0xB,     // Studio <-> Camera Tally (Standby / Preview / Program ON AIR) + REC trigger
+    kIntercomAudio = 0xC,  // Isolated full-duplex Director <-> Camera Operator voice talkback / IFB
 };
 
 enum class VideoCodecId : uint8_t {
@@ -400,5 +402,60 @@ size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t 
 bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint8_t& num_channels,
                         MonitorMetaChannel* out_channels, uint8_t max_channels,
                         MonitorBusTelemetry* bus = nullptr);
+
+// ---------------------------------------------------------------------------------------------
+// Tally State (PacketType::kTallyState = 0xB, 40-byte payload, 3x redundant + 250 ms heartbeat).
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kTallyStateSize = 40;
+
+enum TallyStateValue : uint8_t {
+    kTallyStandby = 0,  // Neutral / off-air
+    kTallyPreview = 1,  // Green (PVW — cued by director)
+    kTallyProgram = 2,  // Red (PGM / ON AIR)
+};
+
+enum TallyFlags : uint8_t {
+    kTallyFlagRecTrigger  = 0x01,  // Remote start/stop local recording on smartphone
+    kTallyFlagHighBright  = 0x02,  // High-brightness tally border
+    kTallyFlagFromCamera  = 0x04,  // Camera -> Studio heartbeat / battery / temp telemetry
+};
+
+struct TallyStatePayload {
+    uint32_t camera_id = 0;       // unique camera / stream ID
+    uint8_t tally_state = 0;      // TallyStateValue (0=Standby, 1=Preview, 2=Program)
+    uint8_t flags = 0;            // TallyFlags
+    uint8_t battery_pct = 100;    // 0..100% (camera telemetry)
+    int8_t temp_c = 30;           // Celsius (camera telemetry)
+    uint32_t revision = 0;        // monotonic revision
+    uint32_t reserved = 0;
+    char camera_label[24] = {};   // e.g. "CAM 1 - Wide"
+};
+
+void write_tally_state(uint8_t* out, const TallyStatePayload& t);
+bool parse_tally_state(const uint8_t* in, size_t len, TallyStatePayload& t);
+
+// ---------------------------------------------------------------------------------------------
+// Duplex Intercom Voice (PacketType::kIntercomAudio = 0xC, 16-byte header + Opus/PCM16 payload).
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kIntercomHeaderSize = 16;
+
+enum IntercomFlags : uint8_t {
+    kIntercomFlagStudioToCam = 0x01,  // Downlink: Director -> Camera IFB
+    kIntercomFlagAllCall     = 0x02,  // Partyline broadcast to all cameras
+    kIntercomFlagPttActive   = 0x04,  // Speaker actively talking
+    kIntercomFlagDuckProgram = 0x08,  // Request smooth program ducking in operator headphones
+};
+
+struct IntercomAudioHeader {
+    uint32_t camera_id = 0;       // 0 = All Call, or specific camera_id
+    uint32_t seq = 0;             // monotonic sequence
+    uint16_t num_samples = 480;   // 480 = 10 ms @ 48 kHz mono (or 240 = 5 ms)
+    uint8_t codec = 1;            // 0 = PCM16, 1 = Opus 48 kHz mono
+    uint8_t flags = 0;            // IntercomFlags
+    uint32_t sample_rate = 48000; // 48000 / 16000
+};
+
+void write_intercom_header(uint8_t* out, const IntercomAudioHeader& ih);
+bool parse_intercom_header(const uint8_t* in, size_t len, IntercomAudioHeader& ih);
 
 }  // namespace lv

@@ -293,6 +293,48 @@ LV_API int lv_monitor_client_set_dsp(LvMonitorClientHandle* cli, const LV_Monito
 LV_API void lv_monitor_client_poll(LvMonitorClientHandle* cli);
 LV_API void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames);
 
+/* ---- Tally (Standby / Preview / Program ON AIR) & Full-Duplex Intercom (Director <-> Camera) ---- */
+typedef struct LvTallyIntercomHandle LvTallyIntercomHandle;
+
+typedef struct LV_TallyState {
+    uint32_t camera_id;
+    uint8_t tally_state;     /* 0 = Standby, 1 = Preview (Green), 2 = Program / ON AIR (Red) */
+    uint8_t flags;           /* bit0 = rec_trigger, bit1 = high_bright */
+    uint8_t battery_pct;
+    int8_t temp_c;
+    uint32_t revision;
+    char camera_label[24];
+} LV_TallyState;
+
+typedef void (*LV_TallyCallback)(const LV_TallyState* state, void* user_data);
+
+LV_API LvTallyIntercomHandle* lv_tally_intercom_create_studio(uint16_t bind_port);
+LV_API LvTallyIntercomHandle* lv_tally_intercom_create_camera(const char* studio_ip, uint16_t studio_port,
+                                                              uint32_t camera_id, const char* camera_label);
+LV_API void lv_tally_intercom_destroy(LvTallyIntercomHandle* handle);
+LV_API uint16_t lv_tally_intercom_port(LvTallyIntercomHandle* handle);
+LV_API void lv_tally_intercom_poll(LvTallyIntercomHandle* handle);
+
+/* Tally control & callback */
+LV_API int lv_studio_set_camera_tally(uint32_t stream_id, uint8_t tally_state, const char* camera_label,
+                                      int rec_trigger);
+LV_API int lv_tally_intercom_set_camera_tally(LvTallyIntercomHandle* studio, uint32_t stream_id,
+                                              uint8_t tally_state, const char* camera_label, int rec_trigger);
+LV_API void lv_camera_set_tally_callback(LvTallyIntercomHandle* handle, LV_TallyCallback cb, void* user_data);
+LV_API void lv_tally_intercom_update_camera_telemetry(LvTallyIntercomHandle* handle, uint8_t battery_pct,
+                                                      int8_t temp_c);
+
+/* Duplex Intercom voice I/O (48 kHz mono float32, isolated from program audio) */
+LV_API int lv_intercom_push_mic_pcm(LvTallyIntercomHandle* handle, const float* samples, int frames);
+LV_API int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames);
+LV_API void lv_intercom_set_state(LvTallyIntercomHandle* handle, int talk_active, int listen_muted,
+                                  float rx_gain, float sidetone_gain);
+LV_API int lv_studio_set_camera_intercom(uint32_t camera_id, int talk_to_cam, int listen_from_cam, int all_call);
+LV_API int lv_tally_intercom_set_camera_intercom(LvTallyIntercomHandle* studio, uint32_t camera_id,
+                                                 int talk_to_cam, int listen_from_cam, int all_call);
+LV_API int lv_tally_intercom_is_director_speaking(LvTallyIntercomHandle* handle);
+LV_API float lv_tally_intercom_ducking_gain(LvTallyIntercomHandle* handle);
+
 /* ---- Mobile monitor app helpers (additive) ---- */
 /* bitrate_kbps for connect / set_stream: total stereo kbps (128..512 = 64..256 per channel, ADPCM) or: */
 #define LV_MONITOR_BITRATE_LOSSLESS 0xFFFF /* 24-bit PCM, ~2.3 Mbps stereo */

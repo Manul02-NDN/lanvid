@@ -328,4 +328,98 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetReceiverStat
     return env->NewStringUTF(buf);
 }
 
+// ---- Tally & Duplex Intercom JNI (Director <-> Camera Operator) ----
+namespace {
+std::mutex g_ti_mu;
+LvTallyIntercomHandle* g_ti = nullptr;
+LV_TallyState g_last_tally{};
+}  // namespace
+
+static void on_android_tally(const LV_TallyState* st, void*) {
+    if (!st) return;
+    std::lock_guard<std::mutex> lk(g_ti_mu);
+    g_last_tally = *st;
+}
+
+JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyConnect(
+    JNIEnv* env, jclass, jstring studio_ip, jint studio_port, jint camera_id, jstring label) {
+    std::lock_guard<std::mutex> lk(g_ti_mu);
+    if (g_ti) {
+        lv_tally_intercom_destroy(g_ti);
+        g_ti = nullptr;
+    }
+    const std::string ip = jstr_to_std(env, studio_ip);
+    const std::string lbl = jstr_to_std(env, label);
+    g_ti = lv_tally_intercom_create_camera(ip.c_str(), uint16_t(studio_port),
+                                           uint32_t(camera_id > 0 ? camera_id : 1),
+                                           lbl.empty() ? "CAM 1" : lbl.c_str());
+    if (!g_ti) return JNI_FALSE;
+    lv_camera_set_tally_callback(g_ti, on_android_tally, nullptr);
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyDisconnect(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lk(g_ti_mu);
+    if (g_ti) {
+        lv_tally_intercom_destroy(g_ti);
+        g_ti = nullptr;
+    }
+    g_last_tally = {};
+}
+
+JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
+    JNIEnv* env, jclass, jint battery_pct, jint temp_c) {
+    LV_TallyState st{};
+    int dir_speaking = 0;
+    float duck = 1.0f;
+    {
+        std::lock_guard<std::mutex> lk(g_ti_mu);
+        if (g_ti) {
+            lv_tally_intercom_update_camera_telemetry(g_ti, uint8_t(battery_pct), int8_t(temp_c));
+            lv_tally_intercom_poll(g_ti);
+            st = g_last_tally;
+            dir_speaking = lv_tally_intercom_is_director_speaking(g_ti);
+            duck = lv_tally_intercom_ducking_gain(g_ti);
+        }
+    }
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"state\":%u,\"rec\":%d,\"director_speaking\":%d,\"duck\":%.2f,\"label\":\"%s\"}",
+                  unsigned(st.tally_state), (st.flags & 1u) ? 1 : 0, dir_speaking, duck,
+                  st.camera_label[0] ? st.camera_label : "CAM 1");
+    return env->NewStringUTF(buf);
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomSetState(
+    JNIEnv*, jclass, jboolean talk, jboolean listen_muted, jfloat rx_gain, jfloat sidetone) {
+    std::lock_guard<std::mutex> lk(g_ti_mu);
+    if (g_ti) lv_intercom_set_state(g_ti, talk ? 1 : 0, listen_muted ? 1 : 0, rx_gain, sidetone);
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomPushMic(
+    JNIEnv* env, jclass, jfloatArray samples, jint frames) {
+    if (!samples || frames <= 0) return;
+    jfloat* ptr = env->GetFloatArrayElements(samples, nullptr);
+    if (!ptr) return;
+    {
+        std::lock_guard<std::mutex> lk(g_ti_mu);
+        if (g_ti) lv_intercom_push_mic_pcm(g_ti, ptr, frames);
+    }
+    env->ReleaseFloatArrayElements(samples, ptr, JNI_ABORT);
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomPullRx(
+    JNIEnv* env, jclass, jfloatArray out_samples, jint frames) {
+    if (!out_samples || frames <= 0) return 0;
+    jfloat* ptr = env->GetFloatArrayElements(out_samples, nullptr);
+    if (!ptr) return 0;
+    int got = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_ti_mu);
+        if (g_ti) got = lv_intercom_pull_rx_pcm(g_ti, ptr, frames);
+    }
+    env->ReleaseFloatArrayElements(out_samples, ptr, 0);
+    return got;
+}
+
 }  // extern "C"

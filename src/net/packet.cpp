@@ -447,4 +447,54 @@ bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint
     return true;
 }
 
+void write_tally_state(uint8_t* out, const TallyStatePayload& t) {
+    std::memset(out, 0, kTallyStateSize);
+    store_le32(out + 0, t.camera_id);
+    out[4] = t.tally_state;
+    out[5] = t.flags;
+    out[6] = t.battery_pct;
+    out[7] = uint8_t(t.temp_c);
+    store_le32(out + 8, t.revision);
+    store_le32(out + 12, t.reserved);
+    std::memcpy(out + 16, t.camera_label, 24);
+    out[39] = '\0';
+}
+
+bool parse_tally_state(const uint8_t* in, size_t len, TallyStatePayload& t) {
+    if (len < kTallyStateSize) return false;
+    t = TallyStatePayload{};
+    t.camera_id = load_le32(in + 0);
+    t.tally_state = in[4] <= 2 ? in[4] : 0;
+    t.flags = in[5];
+    t.battery_pct = in[6];
+    t.temp_c = int8_t(in[7]);
+    t.revision = load_le32(in + 8);
+    t.reserved = load_le32(in + 12);
+    std::memcpy(t.camera_label, in + 16, 24);
+    t.camera_label[23] = '\0';
+    return true;
+}
+
+void write_intercom_header(uint8_t* out, const IntercomAudioHeader& ih) {
+    store_le32(out + 0, ih.camera_id);
+    store_le32(out + 4, ih.seq);
+    store_le16(out + 8, ih.num_samples);
+    out[10] = ih.codec;
+    out[11] = ih.flags;
+    store_le32(out + 12, ih.sample_rate);
+}
+
+bool parse_intercom_header(const uint8_t* in, size_t len, IntercomAudioHeader& ih) {
+    if (len < kIntercomHeaderSize) return false;
+    ih.camera_id = load_le32(in + 0);
+    ih.seq = load_le32(in + 4);
+    ih.num_samples = load_le16(in + 8);
+    ih.codec = in[10];
+    ih.flags = in[11];
+    ih.sample_rate = load_le32(in + 12);
+    if (ih.num_samples == 0 || ih.num_samples > 1920) return false;
+    if (ih.sample_rate < 8000 || ih.sample_rate > 96000) return false;
+    return true;
+}
+
 }  // namespace lv

@@ -1825,6 +1825,115 @@ void LanVidStudioApp::draw_mobile_monitor_section() {
     }
 }
 
+void LanVidStudioApp::draw_cameras_tally_intercom_section() {
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(kColAccentPurp, "STUDIO CAMERAS · TALLY & INTERCOM");
+
+    bool ti_on = tally_intercom_.is_running();
+    if (studio_toggle("##TallyIcToggle", &ti_on, kColGreen)) {
+        if (ti_on) {
+            if (tally_intercom_.start_studio(kDefaultTallyIntercomPort)) {
+                toast_msg_ = "Tally & Duplex Intercom запущено на UDP :" +
+                             std::to_string(tally_intercom_.bound_port());
+            } else {
+                toast_msg_ = "Не вдалося запустити Tally & Intercom сервер";
+            }
+            toast_until_us_ = now_us() + 2800000ull;
+        } else {
+            tally_intercom_.stop();
+        }
+    }
+    ImGui::SameLine();
+    if (tally_intercom_.is_running()) {
+        ImGui::TextColored(kColGreen, "Активний (UDP :%u)", unsigned(tally_intercom_.bound_port()));
+    } else {
+        ImGui::TextDisabled("Вимкнено (Tally STBY/PVW/PGM + Talkback IFB)");
+        return;
+    }
+
+    tally_intercom_.poll();
+
+    // Hotkeys: F1..F8 = Direct Call Talkback to CAM 1..8; Space = Momentary All Call (when not typing)
+    if (!ImGui::GetIO().WantTextInput) {
+        const bool space_held = ImGui::IsKeyDown(ImGuiKey_Space);
+        if (space_held != intercom_all_call_ && space_held) {
+            tally_intercom_.studio_set_camera_intercom(0, true, true, true);
+        }
+        for (int k = 0; k < 8; ++k) {
+            const ImGuiKey fkey = static_cast<ImGuiKey>(ImGuiKey_F1 + k);
+            if (ImGui::IsKeyPressed(fkey, false)) {
+                tally_intercom_.studio_set_camera_intercom(uint32_t(k + 1), true, true, intercom_all_call_);
+            } else if (ImGui::IsKeyReleased(fkey)) {
+                tally_intercom_.studio_set_camera_intercom(uint32_t(k + 1), false, true, intercom_all_call_);
+            }
+        }
+    }
+
+    // Director Intercom controls (ALL CALL + IFB Gain + Mic/Out selection)
+    if (status_pill_button(intercom_all_call_ ? "ALL CALL (ON)" : "ALL CALL (Усім)", intercom_all_call_,
+                           ImVec2(0, 26))) {
+        intercom_all_call_ = !intercom_all_call_;
+        tally_intercom_.studio_set_camera_intercom(0, intercom_all_call_, true, intercom_all_call_);
+        tally_intercom_.set_intercom_state(intercom_all_call_, intercom_listen_muted_, intercom_ifb_gain_, 0.0f);
+    }
+    ImGui::SameLine();
+    if (status_pill_button(intercom_listen_muted_ ? "IFB MUTE" : "IFB ON", !intercom_listen_muted_, ImVec2(0, 26))) {
+        intercom_listen_muted_ = !intercom_listen_muted_;
+        tally_intercom_.set_intercom_state(intercom_all_call_, intercom_listen_muted_, intercom_ifb_gain_, 0.0f);
+    }
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::SliderFloat("##IfbGain", &intercom_ifb_gain_, 0.0f, 1.5f, "IFB Гучність: %.0f%%")) {
+        tally_intercom_.set_intercom_state(intercom_all_call_, intercom_listen_muted_, intercom_ifb_gain_, 0.0f);
+    }
+    ImGui::TextDisabled("Mic/Out: System Default · Гарячі клавіші: F1..F8 (Talk), Space (All Call)");
+
+    // Connected cameras list with 1-click Tally (STBY / PVW / PGM), REC, TALK, LISTEN
+    const auto cams = tally_intercom_.studio_cameras();
+    if (cams.empty()) {
+        ImGui::TextDisabled("  Очікування LanVid Camera (%s:%u)...",
+                            local_lan_ip_.c_str(), unsigned(tally_intercom_.bound_port()));
+    } else {
+        for (const auto& cam : cams) {
+            ImGui::PushID(int(9500 + cam.camera_id));
+            const ImVec4 tcol = (cam.tally_state == kTallyProgram)
+                                    ? kColRed
+                                    : (cam.tally_state == kTallyPreview ? kColGreen : kColTextMuted);
+            ImGui::TextColored(tcol, "●");
+            ImGui::SameLine(0.0f, 5.0f);
+            ImGui::TextColored(kColTextMain, "%s", cam.label.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("%u%% · %d°C", unsigned(cam.battery_pct), int(cam.temp_c));
+            if (cam.operator_speaking) {
+                ImGui::SameLine();
+                ImGui::TextColored(kColGreen, "[VOICE]");
+            }
+
+            if (status_pill_button("STBY", cam.tally_state == kTallyStandby, ImVec2(0, 22))) {
+                tally_intercom_.studio_set_camera_tally(cam.camera_id, kTallyStandby, cam.label, cam.rec_trigger);
+            }
+            ImGui::SameLine(0.0f, 4.0f);
+            if (status_pill_button("PVW", cam.tally_state == kTallyPreview, ImVec2(0, 22))) {
+                tally_intercom_.studio_set_camera_tally(cam.camera_id, kTallyPreview, cam.label, cam.rec_trigger);
+            }
+            ImGui::SameLine(0.0f, 4.0f);
+            if (status_pill_button("PGM", cam.tally_state == kTallyProgram, ImVec2(0, 22))) {
+                tally_intercom_.studio_set_camera_tally(cam.camera_id, kTallyProgram, cam.label, cam.rec_trigger);
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            if (status_pill_button(cam.rec_trigger ? "REC ●" : "REC", cam.rec_trigger, ImVec2(0, 22))) {
+                tally_intercom_.studio_set_camera_tally(cam.camera_id, cam.tally_state, cam.label, !cam.rec_trigger);
+            }
+            ImGui::SameLine(0.0f, 6.0f);
+            if (status_pill_button("TALK", cam.talk_to_cam, ImVec2(0, 22))) {
+                tally_intercom_.studio_set_camera_intercom(cam.camera_id, !cam.talk_to_cam, cam.listen_from_cam,
+                                                           intercom_all_call_);
+            }
+            ImGui::PopID();
+        }
+    }
+}
+
 void LanVidStudioApp::draw_studio_config_panel() {
     begin_glass_card("##StudioConfig", ImVec2(0, 0));
 
@@ -1962,6 +2071,9 @@ void LanVidStudioApp::draw_studio_config_panel() {
 
     // ---- PERSONAL MOBILE MONITOR SERVER ----
     draw_mobile_monitor_section();
+
+    // ---- STUDIO CAMERAS: TALLY & DUPLEX INTERCOM ----
+    draw_cameras_tally_intercom_section();
 
     ImGui::Spacing();
     ImGui::Separator();
