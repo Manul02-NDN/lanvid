@@ -30,6 +30,7 @@ struct AppConfig {
 
     // 64-channel AoIP bus
     bool audio_only = false;   // true=disable video capture/encode/decode (same as CLI --audio-only)
+    bool midi_only = false;    // true=MIDI Only ultra-low latency (~1.5 ms, 0 audio/video packets)
     int audio_codec = 0;       // 0=PCM32F, 1=PCM24, 2=PCM16, 3=192k, 4=256k, 5=192k, 6=128k, 7=96k, 8=64k
     int audio_bitrate_kbps = 0;// 0=Lossless (PCM), or 256 / 192 / 128 / 96 / 64 kbps per channel
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64

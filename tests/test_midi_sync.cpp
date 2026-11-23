@@ -17,12 +17,15 @@
 #include "audio/audio_tx.hpp"
 #include "audio/master_clock.hpp"
 #include "audio/multi_device_matrix.hpp"
+#include "audio/personal_monitor_bus.hpp"
 #include "gui/app_config.hpp"
 #include "midi/midi_dejitter_queue.hpp"
 #include "midi/midi_device_manager.hpp"
 #include "midi/midi_sync_engine.hpp"
 #include "midi/virtual_midi.hpp"
 #include "net/packet.hpp"
+#include "net/receiver.hpp"
+#include "net/sender.hpp"
 
 TEST(midi_over_ip_audio_sync_and_matrix_routing) {
     using namespace lv;
@@ -489,4 +492,219 @@ TEST(midi_static_playout_delay_absorbs_wifi_jitter) {
 
     CHECK(audio_imp_us > 0 && midi_imp_us > 0);
     CHECK(av_delta_us <= 1000);  // 0 ms skew (within 1 ms block quantization)
+}
+
+TEST(midi_only_mode_ultra_low_latency_no_audio_traffic) {
+    using namespace lv;
+
+    // 1. Start real UDP loopback Receiver + Sender in MIDI Only mode
+    ReceiverConfig rcfg{};
+    rcfg.bind_ip = "127.0.0.1";
+    rcfg.bind_port = 0;  // ephemeral port
+    rcfg.audio_latency_ms = 25;
+    rcfg.audio_adaptive_jitter = false;
+    rcfg.recv_timeout_ms = 1;
+    UdpReceiver rx(rcfg, nullptr);
+    CHECK(rx.init());
+    rx.set_midi_only(true);
+    CHECK(rx.midi_only());
+
+    const auto dj_st = rx.midi_dejitter_stats();
+    CHECK(dj_st.midi_only_mode);
+    CHECK(dj_st.playout_delay_ms <= 2.0);  // Ultra-Low Latency (<= 2.0 ms instead of 25 ms audio buffer!)
+
+    std::atomic<int> midi_rx_count{0};
+    std::atomic<uint64_t> first_rx_us{0};
+    rx.set_midi_callback([&](const TimedMidiEvent& ev, int32_t) {
+        if (ev.status == 0x90 && ev.data1 == 64) {
+            if (first_rx_us.load() == 0) first_rx_us.store(now_us());
+            midi_rx_count.fetch_add(1);
+        }
+    });
+
+    SenderConfig scfg{};
+    scfg.dest_ip = "127.0.0.1";
+    scfg.dest_port = rx.socket().local_port();
+    scfg.audio_latency_ms = 25;
+    UdpSender tx(scfg);
+    CHECK(tx.init());
+    tx.set_midi_only(true);
+    CHECK(tx.midi_only());
+
+    // Attempt to push audio while in MIDI Only mode -> MUST send 0 audio packets!
+    std::vector<float> dummy_audio(256, 0.5f);
+    for (int i = 0; i < 10; ++i) {
+        tx.push_audio_channel(0, dummy_audio.data(), 256, AudioFormat2::kFloat32, UdpSender::kAutoMediaTs);
+        tx.send_audio_raw(uint32_t(i + 1), now_us32(), dummy_audio.data(), 128, 48000, 2,
+                          AudioSampleFormat::kFloat32);
+    }
+    CHECK(tx.audio2_stats().packets_sent == 0);
+    CHECK(tx.stats().audio_packets_sent == 0);
+
+    // Send MIDI Note On and verify ultra-low latency delivery (<= 2 ms playout delay + tiny loopback RTT)
+    const uint64_t t_send = now_us();
+    CHECK(tx.push_midi(0x90, 64, 110, 0, 0));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (midi_rx_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        rx.step_once();
+    }
+    CHECK(midi_rx_count.load() == 1);
+    CHECK(rx.audio2_packets_rx() == 0);
+
+    const double measured_ms = double(first_rx_us.load() - t_send) / 1000.0;
+    std::printf("    [MIDI Only Ultra-Low Latency] playout_cfg=%.1f ms | measured=%.2f ms | "
+                "audio2_tx=%llu audio2_rx=%llu\n",
+                dj_st.playout_delay_ms, measured_ms,
+                static_cast<unsigned long long>(tx.audio2_stats().packets_sent),
+                static_cast<unsigned long long>(rx.audio2_packets_rx()));
+    CHECK(measured_ms <= 25.0);  // well below the 25 ms audio buffer on any OS scheduler
+}
+
+TEST(personal_monitor_bus_64ch_to_stereo_dsp_and_remote_control) {
+    using namespace lv;
+    constexpr uint32_t kRate = 48000;
+    constexpr uint32_t kFrames = 256;
+
+    // ------------------------------------------------------------------
+    // Part 1: Direct 64ch -> Stereo DSP verification (Pan, HPF, 3-band EQ, Comp, -0.5 dBFS Limiter)
+    // ------------------------------------------------------------------
+    PersonalMonitorBus bus(kRate);
+    // Mute all channels except Ch 0 (1 kHz sine, panned hard Left) and Ch 63 (200 Hz sine, panned hard Right)
+    for (int c = 0; c < kMonitorMaxInputChannels; ++c) {
+        bus.set_channel_mix(c, {0.0f, 0.0f, true, false});
+    }
+    bus.set_channel_mix(0, {0.0f, -1.0f, false, false});   // Ch 0 -> Left only
+    bus.set_channel_mix(63, {0.0f, +1.0f, false, false});  // Ch 63 -> Right only
+
+    std::vector<std::vector<float>> planes(kMonitorMaxInputChannels, std::vector<float>(kFrames, 0.0f));
+    std::vector<const float*> ptrs(kMonitorMaxInputChannels);
+    for (int c = 0; c < kMonitorMaxInputChannels; ++c) ptrs[c] = planes[c].data();
+
+    std::vector<float> out_l(kFrames, 0.0f), out_r(kFrames, 0.0f);
+    double phase0 = 0.0, phase63 = 0.0;
+    auto fill_tones = [&](float amp0, float amp63) {
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            planes[0][i] = amp0 * float(std::sin(phase0));
+            planes[63][i] = amp63 * float(std::sin(phase63));
+            phase0 += 2.0 * 3.141592653589793 * 1000.0 / double(kRate);
+            phase63 += 2.0 * 3.141592653589793 * 200.0 / double(kRate);
+        }
+    };
+
+    // Settle 5 ms smoother
+    for (int b = 0; b < 4; ++b) {
+        fill_tones(0.4f, 0.2f);
+        bus.process_block(ptrs.data(), kMonitorMaxInputChannels, out_l.data(), out_r.data(), kFrames);
+    }
+    auto rms_of = [](const std::vector<float>& v) {
+        double s = 0.0;
+        for (float x : v) s += double(x) * double(x);
+        return std::sqrt(s / double(v.size()));
+    };
+    const double base_rms_l = rms_of(out_l);
+    const double base_rms_r = rms_of(out_r);
+    CHECK(base_rms_l > 0.20);
+    CHECK(base_rms_r > 0.10);
+
+    // Enable 3-band EQ (+12 dB Mid @ 1000 Hz) + HPF (250 Hz) -> 1 kHz Left boosts, 200 Hz Right attenuates!
+    PersonalMonitorDspParams dsp{};
+    dsp.hpf_enabled = true;
+    dsp.hpf_hz = 250.0f;
+    dsp.eq_enabled = true;
+    dsp.eq_mid_hz = 1000.0f;
+    dsp.eq_mid_db = 12.0f;
+    bus.set_dsp(dsp);
+    for (int b = 0; b < 6; ++b) {
+        fill_tones(0.2f, 0.2f);
+        bus.process_block(ptrs.data(), kMonitorMaxInputChannels, out_l.data(), out_r.data(), kFrames);
+    }
+    const double eq_rms_l = rms_of(out_l);
+    const double eq_rms_r = rms_of(out_r);
+    CHECK(eq_rms_l > eq_rms_r * 2.0);  // +12 dB 1 kHz boost on L vs 250 Hz HPF cut on 200 Hz R!
+
+    // Enable Compressor (-24 dB threshold, 6:1 ratio) + verify -0.5 dBFS Brickwall Limiter ceiling!
+    dsp.comp_enabled = true;
+    dsp.comp_thresh_db = -24.0f;
+    dsp.comp_ratio = 6.0f;
+    dsp.comp_attack_ms = 2.0f;
+    dsp.comp_release_ms = 50.0f;
+    dsp.master_volume_db = 12.0f;  // drive hard into brickwall limiter
+    bus.set_dsp(dsp);
+    float max_peak = 0.0f;
+    for (int b = 0; b < 6; ++b) {
+        fill_tones(0.9f, 0.9f);
+        bus.process_block(ptrs.data(), kMonitorMaxInputChannels, out_l.data(), out_r.data(), kFrames);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            max_peak = std::max(max_peak, std::max(std::fabs(out_l[i]), std::fabs(out_r[i])));
+        }
+    }
+    CHECK(bus.last_comp_gr_db() < -3.0f);  // compressor actively reducing gain
+    CHECK(max_peak <= 0.945f);             // brickwall ceiling strictly <= -0.5 dBFS (0.9441)
+
+    // ------------------------------------------------------------------
+    // Part 2: End-to-End UDP Server <-> Smartphone Client (kMonitorControl + 2ch AUDIO2)
+    // ------------------------------------------------------------------
+    PersonalMonitorServer srv(kRate);
+    CHECK(srv.start(0, "127.0.0.1"));  // ephemeral port
+    srv.set_channel_name(0, "Kick");
+    srv.set_channel_name(1, "Lead Vox");
+
+    PersonalMonitorClient cli(kRate);
+    CHECK(cli.connect("127.0.0.1", srv.bound_port(), "iPhone Singer", 256, 20));
+
+    // Pump server & client for hello + meta response
+    for (int i = 0; i < 10; ++i) {
+        srv.poll_control();
+        cli.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    const auto clients = srv.clients();
+    CHECK(clients.size() == 1);
+    CHECK(clients[0].name == "iPhone Singer");
+    CHECK(clients[0].bitrate_kbps == 256);
+
+    const auto meta = cli.last_meta();
+    CHECK(meta.size() >= 2);
+    CHECK(std::string(meta[0].name) == "Kick");
+    CHECK(std::string(meta[1].name) == "Lead Vox");
+
+    // Smartphone updates Ch 0 gain & DSP remotely over UDP kMonitorControl!
+    CHECK(cli.set_channel_mix(0, {-6.0f, -0.5f, false, true}));
+    PersonalMonitorDspParams remote_dsp{};
+    remote_dsp.hpf_enabled = true;
+    remote_dsp.hpf_hz = 120.0f;
+    remote_dsp.eq_enabled = true;
+    remote_dsp.eq_high_db = 4.5f;
+    remote_dsp.comp_enabled = true;
+    remote_dsp.comp_thresh_db = -20.0f;
+    remote_dsp.comp_ratio = 4.0f;
+    CHECK(cli.set_dsp(remote_dsp));
+
+    for (int i = 0; i < 12; ++i) {
+        fill_tones(0.5f, 0.3f);
+        srv.process_and_send(ptrs.data(), 8, kFrames);
+        cli.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    auto* srv_bus = srv.bus(clients[0].slot);
+    CHECK(srv_bus != nullptr);
+    const auto applied_mix = srv_bus->channel_mix(0);
+    const auto applied_dsp = srv_bus->dsp();
+    CHECK(std::fabs(applied_mix.gain_db - (-6.0f)) < 0.01f);
+    CHECK(std::fabs(applied_mix.pan - (-0.5f)) < 0.01f);
+    CHECK(applied_mix.solo);
+    CHECK(applied_dsp.hpf_enabled && std::fabs(applied_dsp.hpf_hz - 120.0f) < 0.1f);
+    CHECK(applied_dsp.eq_enabled && std::fabs(applied_dsp.eq_high_db - 4.5f) < 0.01f);
+    CHECK(applied_dsp.comp_enabled && std::fabs(applied_dsp.comp_ratio - 4.0f) < 0.01f);
+    CHECK(cli.audio_packets_rx() > 0);
+
+    std::printf("    [PersonalMonitorBus] 64ch->2ch EQ_L=%.3f HPF_R=%.3f comp_GR=%.1f dB lim_peak=%.4f | "
+                "UDP client='%s' audio2_rx=%llu\n",
+                eq_rms_l, eq_rms_r, bus.last_comp_gr_db(), max_peak,
+                clients[0].name.c_str(), static_cast<unsigned long long>(cli.audio_packets_rx()));
+
+    cli.disconnect();
+    srv.stop();
 }

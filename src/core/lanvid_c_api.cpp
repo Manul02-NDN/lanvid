@@ -27,6 +27,7 @@
 #include "common/image.hpp"
 #include "net/discovery.hpp"
 #include "audio/channel_patchbay.hpp"
+#include "audio/personal_monitor_bus.hpp"
 #ifdef LV_HAVE_SHM_BUS
 #include "audio/shm_audio_host.hpp"
 #endif
@@ -1648,6 +1649,7 @@ int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitte
     out->absorbed_jitter_ms = st.absorbed_jitter_ms;
     out->fixed_mode = st.fixed_mode ? 1 : 0;
     out->synced_with_audio = st.synced_with_audio ? 1 : 0;
+    out->midi_only_mode = st.midi_only_mode ? 1 : 0;
     out->queued_events = st.queued_events;
     out->total_enqueued = st.total_enqueued;
     out->total_dispatched = st.total_dispatched;
@@ -1660,6 +1662,165 @@ int lv_duplex_get_midi_dejitter_stats(LvDuplexHandle* h, LV_MidiDejitterStats* o
     *out = {};
     if (!h->running.load(std::memory_order_acquire) || !h->rx) return LV_ERR_NOT_RUNNING;
     return lv_receiver_get_midi_dejitter_stats(h->rx, out);
+}
+
+int lv_sender_set_midi_only(LvSenderHandle* handle, int enabled) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    handle->sender->set_midi_only(enabled != 0);
+    return LV_OK;
+}
+
+int lv_receiver_set_midi_only(LvReceiverHandle* handle, int enabled) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    handle->receiver->set_midi_only(enabled != 0);
+    return LV_OK;
+}
+
+int lv_duplex_set_midi_only(LvDuplexHandle* h, int enabled) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    if (h->tx) lv_sender_set_midi_only(h->tx, enabled);
+    if (h->rx) lv_receiver_set_midi_only(h->rx, enabled);
+    return LV_OK;
+}
+
+// ---- Personal Monitor Bus Server / Client C ABI ----
+
+struct LvMonitorServerHandle {
+    std::unique_ptr<lv::PersonalMonitorServer> srv;
+};
+
+struct LvMonitorClientHandle {
+    std::unique_ptr<lv::PersonalMonitorClient> cli;
+};
+
+LvMonitorServerHandle* lv_monitor_server_create(uint32_t sample_rate) {
+    auto* h = new LvMonitorServerHandle();
+    h->srv = std::make_unique<lv::PersonalMonitorServer>(sample_rate ? sample_rate : 48000);
+    return h;
+}
+
+void lv_monitor_server_destroy(LvMonitorServerHandle* srv) {
+    if (!srv) return;
+    if (srv->srv) srv->srv->stop();
+    delete srv;
+}
+
+int lv_monitor_server_start(LvMonitorServerHandle* srv, uint16_t bind_port) {
+    if (!srv || !srv->srv) return LV_ERR_INVALID_ARG;
+    return srv->srv->start(bind_port) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_monitor_server_stop(LvMonitorServerHandle* srv) {
+    if (srv && srv->srv) srv->srv->stop();
+}
+
+uint16_t lv_monitor_server_port(LvMonitorServerHandle* srv) {
+    return (srv && srv->srv) ? srv->srv->bound_port() : 0;
+}
+
+void lv_monitor_server_set_channel_name(LvMonitorServerHandle* srv, int ch, const char* name) {
+    if (srv && srv->srv && name) srv->srv->set_channel_name(ch, name);
+}
+
+void lv_monitor_server_set_client_mute(LvMonitorServerHandle* srv, int slot, int muted) {
+    if (srv && srv->srv) srv->srv->set_client_mute(slot, muted != 0);
+}
+
+int lv_monitor_server_get_clients(LvMonitorServerHandle* srv, LV_MonitorClientInfo* out, int max_clients) {
+    if (!srv || !srv->srv || !out || max_clients <= 0) return 0;
+    const auto list = srv->srv->clients();
+    const int n = std::min<int>(int(list.size()), max_clients);
+    for (int i = 0; i < n; ++i) {
+        out[i] = {};
+        out[i].slot = list[i].slot;
+        out[i].client_id = list[i].client_id;
+        std::snprintf(out[i].name, sizeof(out[i].name), "%s", list[i].name.c_str());
+        std::snprintf(out[i].address, sizeof(out[i].address), "%s", list[i].address.c_str());
+        out[i].bitrate_kbps = list[i].bitrate_kbps;
+        out[i].latency_ms = list[i].latency_ms;
+        out[i].muted = list[i].muted ? 1 : 0;
+        out[i].connected = list[i].connected ? 1 : 0;
+        out[i].packets_tx = list[i].packets_tx;
+    }
+    return n;
+}
+
+void lv_monitor_server_push_audio_planar(LvMonitorServerHandle* srv, const float* const* planes,
+                                         int num_channels, uint32_t frames) {
+    if (srv && srv->srv) srv->srv->process_and_send(planes, num_channels, frames);
+}
+
+LvMonitorClientHandle* lv_monitor_client_create(uint32_t sample_rate) {
+    auto* h = new LvMonitorClientHandle();
+    h->cli = std::make_unique<lv::PersonalMonitorClient>(sample_rate ? sample_rate : 48000);
+    return h;
+}
+
+void lv_monitor_client_destroy(LvMonitorClientHandle* cli) {
+    if (!cli) return;
+    if (cli->cli) cli->cli->disconnect();
+    delete cli;
+}
+
+int lv_monitor_client_connect(LvMonitorClientHandle* cli, const char* server_ip, uint16_t server_port,
+                              const char* client_name, uint16_t bitrate_kbps, uint16_t latency_ms) {
+    if (!cli || !cli->cli || !server_ip) return LV_ERR_INVALID_ARG;
+    return cli->cli->connect(server_ip, server_port, client_name ? client_name : "Smartphone",
+                             bitrate_kbps ? bitrate_kbps : 256, latency_ms ? latency_ms : 20)
+               ? LV_OK
+               : LV_ERR_SOCKET;
+}
+
+void lv_monitor_client_disconnect(LvMonitorClientHandle* cli) {
+    if (cli && cli->cli) cli->cli->disconnect();
+}
+
+int lv_monitor_client_request_meta(LvMonitorClientHandle* cli) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    return cli->cli->request_meta() ? LV_OK : LV_ERR_SOCKET;
+}
+
+int lv_monitor_client_set_channel_mix(LvMonitorClientHandle* cli, int ch, float gain_db, float pan,
+                                      int mute, int solo) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    lv::PersonalMonitorChannelMix mix{};
+    mix.gain_db = gain_db;
+    mix.pan = pan;
+    mix.mute = mute != 0;
+    mix.solo = solo != 0;
+    return cli->cli->set_channel_mix(ch, mix) ? LV_OK : LV_ERR_SOCKET;
+}
+
+int lv_monitor_client_set_dsp(LvMonitorClientHandle* cli, const LV_MonitorDspParams* dsp) {
+    if (!cli || !cli->cli || !dsp) return LV_ERR_INVALID_ARG;
+    lv::PersonalMonitorDspParams p{};
+    p.hpf_enabled = dsp->hpf_enabled != 0;
+    p.hpf_hz = dsp->hpf_hz;
+    p.eq_enabled = dsp->eq_enabled != 0;
+    p.eq_low_db = dsp->eq_low_db;
+    p.eq_mid_hz = dsp->eq_mid_hz;
+    p.eq_mid_db = dsp->eq_mid_db;
+    p.eq_high_db = dsp->eq_high_db;
+    p.comp_enabled = dsp->comp_enabled != 0;
+    p.comp_thresh_db = dsp->comp_thresh_db;
+    p.comp_ratio = dsp->comp_ratio;
+    p.comp_attack_ms = dsp->comp_attack_ms;
+    p.comp_release_ms = dsp->comp_release_ms;
+    p.comp_makeup_db = dsp->comp_makeup_db;
+    p.master_volume_db = dsp->master_volume_db;
+    p.master_mute = dsp->master_mute != 0;
+    return cli->cli->set_dsp(p) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_monitor_client_poll(LvMonitorClientHandle* cli) {
+    if (cli && cli->cli) cli->cli->poll();
+}
+
+void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames) {
+    if (cli && cli->cli) cli->cli->pop_stereo(out_interleaved, frames);
 }
 
 static lv::ControlSyncPayload to_wire_cs(const LV_ControlSyncState& s) {

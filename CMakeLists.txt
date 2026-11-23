@@ -88,6 +88,7 @@ set(LV_CORE_SOURCES
   src/core/lanvid_c_api.cpp
   src/audio/channel_patchbay.cpp
   src/audio/multi_device_matrix.cpp
+  src/audio/personal_monitor_bus.cpp
   src/midi/midi_sync_engine.cpp
   src/midi/midi_dejitter_queue.cpp
   src/midi/midi_device_manager.cpp

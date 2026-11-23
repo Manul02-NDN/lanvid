@@ -221,6 +221,7 @@ typedef struct LV_MidiDejitterStats {
     double absorbed_jitter_ms;
     int32_t fixed_mode;
     int32_t synced_with_audio;
+    int32_t midi_only_mode;
     uint32_t queued_events;
     uint64_t total_enqueued;
     uint64_t total_dispatched;
@@ -229,6 +230,68 @@ typedef struct LV_MidiDejitterStats {
 
 LV_API int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitterStats* out);
 LV_API int lv_duplex_get_midi_dejitter_stats(LvDuplexHandle* handle, LV_MidiDejitterStats* out);
+
+/* MIDI Only mode: 0 audio/video TX packets, ultra-low latency (~1.5 ms) MIDI playout. */
+LV_API int lv_sender_set_midi_only(LvSenderHandle* handle, int enabled);
+LV_API int lv_receiver_set_midi_only(LvReceiverHandle* handle, int enabled);
+LV_API int lv_duplex_set_midi_only(LvDuplexHandle* handle, int enabled);
+
+/* ---- Server-side Personal Smartphone Monitor Bus (64ch -> Stereo DSP + AUDIO2 2ch) ---- */
+typedef struct LvMonitorServerHandle LvMonitorServerHandle;
+typedef struct LvMonitorClientHandle LvMonitorClientHandle;
+
+typedef struct LV_MonitorDspParams {
+    int32_t hpf_enabled;
+    float hpf_hz;
+    int32_t eq_enabled;
+    float eq_low_db;
+    float eq_mid_hz;
+    float eq_mid_db;
+    float eq_high_db;
+    int32_t comp_enabled;
+    float comp_thresh_db;
+    float comp_ratio;
+    float comp_attack_ms;
+    float comp_release_ms;
+    float comp_makeup_db;
+    float master_volume_db;
+    int32_t master_mute;
+} LV_MonitorDspParams;
+
+typedef struct LV_MonitorClientInfo {
+    int32_t slot;
+    uint32_t client_id;
+    char name[32];
+    char address[32];
+    uint16_t bitrate_kbps;
+    uint16_t latency_ms;
+    int32_t muted;
+    int32_t connected;
+    uint64_t packets_tx;
+} LV_MonitorClientInfo;
+
+LV_API LvMonitorServerHandle* lv_monitor_server_create(uint32_t sample_rate);
+LV_API void lv_monitor_server_destroy(LvMonitorServerHandle* srv);
+LV_API int lv_monitor_server_start(LvMonitorServerHandle* srv, uint16_t bind_port);
+LV_API void lv_monitor_server_stop(LvMonitorServerHandle* srv);
+LV_API uint16_t lv_monitor_server_port(LvMonitorServerHandle* srv);
+LV_API void lv_monitor_server_set_channel_name(LvMonitorServerHandle* srv, int ch, const char* name);
+LV_API void lv_monitor_server_set_client_mute(LvMonitorServerHandle* srv, int slot, int muted);
+LV_API int lv_monitor_server_get_clients(LvMonitorServerHandle* srv, LV_MonitorClientInfo* out, int max_clients);
+LV_API void lv_monitor_server_push_audio_planar(LvMonitorServerHandle* srv, const float* const* planes,
+                                                int num_channels, uint32_t frames);
+
+LV_API LvMonitorClientHandle* lv_monitor_client_create(uint32_t sample_rate);
+LV_API void lv_monitor_client_destroy(LvMonitorClientHandle* cli);
+LV_API int lv_monitor_client_connect(LvMonitorClientHandle* cli, const char* server_ip, uint16_t server_port,
+                                     const char* client_name, uint16_t bitrate_kbps, uint16_t latency_ms);
+LV_API void lv_monitor_client_disconnect(LvMonitorClientHandle* cli);
+LV_API int lv_monitor_client_request_meta(LvMonitorClientHandle* cli);
+LV_API int lv_monitor_client_set_channel_mix(LvMonitorClientHandle* cli, int ch, float gain_db, float pan,
+                                             int mute, int solo);
+LV_API int lv_monitor_client_set_dsp(LvMonitorClientHandle* cli, const LV_MonitorDspParams* dsp);
+LV_API void lv_monitor_client_poll(LvMonitorClientHandle* cli);
+LV_API void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames);
 
 /* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
 typedef struct LV_ControlSyncState {

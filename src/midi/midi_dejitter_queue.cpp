@@ -13,8 +13,20 @@ int64_t MidiDejitterQueue::us_to_samples(int64_t us) const {
 }
 
 double MidiDejitterQueue::active_delay_ms_locked() const {
+    if (midi_only_mode_) return midi_only_delay_ms_;
     if (!adaptive_) return target_buffer_ms_;
     return std::max(target_buffer_ms_, effective_buffer_ms_);
+}
+
+void MidiDejitterQueue::set_midi_only_mode(bool enabled, double ultra_low_ms) {
+    std::lock_guard<std::mutex> lk(mu_);
+    midi_only_mode_ = enabled;
+    midi_only_delay_ms_ = std::clamp(ultra_low_ms, 0.0, 2.0);
+}
+
+bool MidiDejitterQueue::is_midi_only_mode() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return midi_only_mode_;
 }
 
 void MidiDejitterQueue::set_latency(double target_buffer_ms, bool adaptive) {
@@ -166,8 +178,9 @@ MidiDejitterStats MidiDejitterQueue::stats() const {
     s.target_buffer_ms = target_buffer_ms_;
     s.playout_delay_ms = active_delay_ms_locked();
     s.absorbed_jitter_ms = absorbed_jitter_ms_;
-    s.fixed_mode = !adaptive_;
-    s.synced_with_audio = synced_with_audio_;
+    s.fixed_mode = midi_only_mode_ ? true : !adaptive_;
+    s.synced_with_audio = midi_only_mode_ ? false : synced_with_audio_;
+    s.midi_only_mode = midi_only_mode_;
     s.queued_events = uint32_t(queue_.size());
     s.total_enqueued = total_enqueued_.load(std::memory_order_relaxed);
     s.total_dispatched = total_dispatched_.load(std::memory_order_relaxed);

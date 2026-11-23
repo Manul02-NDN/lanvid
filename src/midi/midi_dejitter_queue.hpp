@@ -28,10 +28,11 @@ namespace lv {
 
 struct MidiDejitterStats {
     double target_buffer_ms = 50.0;
-    double playout_delay_ms = 50.0;  // active delay (== target_buffer_ms in Fixed mode)
+    double playout_delay_ms = 50.0;  // active delay (== target_buffer_ms in Fixed mode, ~1.5 ms in MIDI Only)
     double absorbed_jitter_ms = 0.0; // smoothed Wi-Fi arrival jitter absorbed by the queue
     bool fixed_mode = true;
     bool synced_with_audio = false;
+    bool midi_only_mode = false;
     uint32_t queued_events = 0;
     uint64_t total_enqueued = 0;
     uint64_t total_dispatched = 0;
@@ -50,6 +51,11 @@ public:
     // Updates the active effective buffer (used in Adaptive mode to follow AudioSyncMatrix)
     // and whether the queue is currently locked to an active AudioSyncMatrix stream.
     void set_effective_buffer_ms(double effective_ms, bool synced_with_audio);
+
+    // Switches into/out of "MIDI Only" ultra-low-latency mode (0..2 ms micro-buffer, default 1.5 ms),
+    // detaching from the 15-20+ ms audio buffer while still absorbing micro Wi-Fi jitter.
+    void set_midi_only_mode(bool enabled, double ultra_low_ms = 1.5);
+    bool is_midi_only_mode() const;
 
     int64_t target_buffer_samples() const;
     double target_buffer_ms() const;
@@ -99,6 +105,8 @@ private:
     double effective_buffer_ms_ = 50.0;
     bool adaptive_ = false;
     bool synced_with_audio_ = false;
+    bool midi_only_mode_ = false;
+    double midi_only_delay_ms_ = 1.5;
 
     // Minimum transit offset baseline (arrival_local_samples - media_ts_samples) for MIDI-only mode.
     bool has_baseline_ = false;

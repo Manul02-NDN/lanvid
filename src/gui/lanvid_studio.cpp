@@ -699,7 +699,7 @@ void LanVidStudioApp::broadcast_control_sync(bool mute_all_panic) {
     st.audio_bitrate_kbps = uint16_t(std::max(0, cfg_.audio_bitrate_kbps));
     st.target_buffer_ms = uint16_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
     st.latency_mode = uint8_t(cfg_.adaptive_jitter ? 1 : 0);
-    st.audio_only = uint8_t(cfg_.audio_only ? 1 : 0);
+    st.audio_only = uint8_t(cfg_.midi_only ? 2 : (cfg_.audio_only ? 1 : 0));
     st.active_preset_id = int8_t(cfg_.sync_matrix_routing ? matrix_active_preset_ : -1);
     st.flags = uint8_t((mute_all_panic ? 0x01u : 0u) | (cfg_.sync_matrix_routing ? 0x02u : 0u));
     st.master_gain_cb = int16_t(std::clamp(int(std::lrint(matrix_new_gain_db_ * 100.0f)), -6000, 1200));
@@ -733,7 +733,9 @@ void LanVidStudioApp::apply_pending_remote_sync() {
     cfg_.audio_codec = std::clamp<int>(st.audio_codec, 0, 8);
     cfg_.aoip_latency_ms = std::clamp<int>(st.target_buffer_ms, 2, 2000);
     cfg_.adaptive_jitter = st.latency_mode ? 1 : 0;
-    cfg_.audio_only = (st.audio_only != 0);
+    cfg_.midi_only = (st.audio_only == 2);
+    cfg_.audio_only = (st.audio_only >= 1);
+    apply_stream_mode();
     matrix_new_gain_db_ = std::clamp(float(st.master_gain_cb) / 100.0f, -24.0f, 6.0f);
 
     // Apply live to audio engines without triggering a bounce-back sync packet
@@ -889,8 +891,9 @@ void LanVidStudioApp::start_sender() {
     last_tx_preview_fid_ = 0;
     if (lv_sender_start(sender_, &sc)) {
         sender_running_ = true;
-        if (cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
-        if (cfg_.aoip_source == 1) start_vdev_tx();
+        lv_sender_set_midi_only(sender_, cfg_.midi_only ? 1 : 0);
+        if (!cfg_.midi_only && cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
+        if (!cfg_.midi_only && cfg_.aoip_source == 1) start_vdev_tx();
         broadcast_control_sync();  // Automatic handshake on start
         toast_msg_ = std::string(cfg_.audio_only ? "Передача [Audio Only] -> " : "Передача запущена -> ") +
                      cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
@@ -1363,7 +1366,11 @@ void LanVidStudioApp::init_audio_matrix() {
 
     audio_matrix_.set_network_io(
         [this](const float* const* planes, uint32_t ch, uint32_t frames) {
-            if (sender_ && sender_running_ && matrix_has_net_tx_routes_.load(std::memory_order_relaxed)) {
+            if (monitor_server_.is_running()) {
+                monitor_server_.process_and_send(planes, int(ch), frames);
+            }
+            if (sender_ && sender_running_ && !cfg_.midi_only &&
+                matrix_has_net_tx_routes_.load(std::memory_order_relaxed)) {
                 lv_sender_push_audio_multichannel(sender_, planes, uint16_t(ch), frames,
                                                   LV_AUDIO_FORMAT_F32, LV_AUDIO_LAYOUT_PLANAR, LV_MEDIA_TS_AUTO);
             }
@@ -1607,15 +1614,21 @@ void LanVidStudioApp::draw_actual_buffer_line() {
                               cfg_.adaptive_jitter ? ", Adaptive range up to 200 ms" : ", Fixed");
     }
 
-    // MIDI De-Jitter Playout Queue telemetry (synchronized with audio latency settings)
+    // MIDI De-Jitter Playout Queue telemetry (synchronized with audio latency settings or MIDI Only)
+    const bool midi_only_active = cfg_.midi_only || (midi_dejitter_valid_ && midi_dejitter_stats_.midi_only_mode != 0);
     const double midi_delay =
-        midi_dejitter_valid_ ? midi_dejitter_stats_.playout_delay_ms : double(cfg_.aoip_latency_ms);
+        midi_dejitter_valid_ ? midi_dejitter_stats_.playout_delay_ms : (midi_only_active ? 1.5 : double(cfg_.aoip_latency_ms));
     const bool midi_fixed = midi_dejitter_valid_ ? (midi_dejitter_stats_.fixed_mode != 0) : !cfg_.adaptive_jitter;
     const double midi_jit = midi_dejitter_valid_ ? midi_dejitter_stats_.absorbed_jitter_ms : 0.0;
     const uint64_t midi_late = midi_dejitter_valid_ ? midi_dejitter_stats_.late_events : 0;
-    const ImVec4 mcol = midi_late > 0 ? kColAmber : (midi_dejitter_valid_ ? kColAccentPurp : kColTextMuted);
-    ImGui::TextColored(mcol, "MIDI Playout: %.1f ms (%s • Synced with Audio)", midi_delay,
-                       midi_fixed ? "Fixed" : "Adaptive");
+    const ImVec4 mcol = midi_only_active ? kColGreen
+                                         : (midi_late > 0 ? kColAmber : (midi_dejitter_valid_ ? kColAccentPurp : kColTextMuted));
+    if (midi_only_active) {
+        ImGui::TextColored(mcol, "MIDI Only • Ultra-Low Latency (~%.1f ms)", midi_delay);
+    } else {
+        ImGui::TextColored(mcol, "MIDI Playout: %.1f ms (%s • Synced with Audio)", midi_delay,
+                           midi_fixed ? "Fixed" : "Adaptive");
+    }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Sample-Accurate 48 kHz MIDI De-Jitter Queue\n"
@@ -1716,6 +1729,91 @@ const char* LanVidStudioApp::video_source_warning() const {
             return "Не вдалося відкрити відеофайл. Звук передається далі без відео.";
         default:
             return nullptr;
+    }
+}
+
+void LanVidStudioApp::apply_stream_mode() {
+    if (cfg_.midi_only) cfg_.audio_only = true;
+    if (sender_) lv_sender_set_midi_only(sender_, cfg_.midi_only ? 1 : 0);
+    if (receiver_) lv_receiver_set_midi_only(receiver_, cfg_.midi_only ? 1 : 0);
+    if (duplex_) lv_duplex_set_midi_only(duplex_, cfg_.midi_only ? 1 : 0);
+}
+
+void LanVidStudioApp::draw_stream_mode_selector(const char* id) {
+    ImGui::PushID(id);
+    const int cur_mode = cfg_.midi_only ? 2 : (cfg_.audio_only ? 1 : 0);
+    int next_mode = cur_mode;
+    if (status_pill_button("Відео + Аудіо + MIDI", cur_mode == 0, ImVec2(0, 26))) next_mode = 0;
+    ImGui::SameLine();
+    if (status_pill_button("Тільки Аудіо", cur_mode == 1, ImVec2(0, 26))) next_mode = 1;
+    ImGui::SameLine();
+    if (status_pill_button("Тільки MIDI", cur_mode == 2, ImVec2(0, 26))) next_mode = 2;
+
+    if (next_mode != cur_mode) {
+        const bool was_video = !cfg_.audio_only;
+        cfg_.midi_only = (next_mode == 2);
+        cfg_.audio_only = (next_mode >= 1);
+        const bool now_video = !cfg_.audio_only;
+        apply_stream_mode();
+        config_dirty_ = true;
+        broadcast_control_sync();
+        if (was_video != now_video) {
+            if (sender_running_) start_sender();
+            if (receiver_running_) start_receiver();
+        }
+        toast_msg_ = (next_mode == 2)
+                         ? "Режим: Тільки MIDI (Ultra-Low Latency ~1.5 ms, 0 аудіо/відео трафіку)"
+                         : (next_mode == 1 ? "Режим: Тільки Аудіо + MIDI (відео вимкнено)"
+                                           : "Режим: Відео + Аудіо + MIDI");
+        toast_until_us_ = now_us() + 2800000ull;
+    }
+    ImGui::PopID();
+}
+
+void LanVidStudioApp::draw_mobile_monitor_section() {
+    ImGui::TextColored(kColAccentPurp, "МОБІЛЬНИЙ МОНІТОРИНГ (SMARTPHONES)");
+    bool srv_on = monitor_server_.is_running();
+    if (studio_toggle("##MonSrvToggle", &srv_on, kColGreen)) {
+        if (srv_on) {
+            if (monitor_server_.start(kDefaultMonitorPort)) {
+                toast_msg_ = "Сервер мобільного моніторингу запущено на UDP :" +
+                             std::to_string(monitor_server_.bound_port());
+            } else {
+                toast_msg_ = "Не вдалося запустити сервер мобільного моніторингу";
+            }
+            toast_until_us_ = now_us() + 2800000ull;
+        } else {
+            monitor_server_.stop();
+        }
+    }
+    ImGui::SameLine();
+    if (monitor_server_.is_running()) {
+        ImGui::TextColored(kColGreen, "Активний (UDP :%u)", unsigned(monitor_server_.bound_port()));
+    } else {
+        ImGui::TextDisabled("Вимкнено (до 8 смартфонів, DSP на ПК)");
+    }
+
+    if (monitor_server_.is_running()) {
+        monitor_server_.poll_control();
+        const auto phones = monitor_server_.clients();
+        if (phones.empty()) {
+            ImGui::TextDisabled("  Очікування підключення смартфонів (%s:%u)...",
+                                local_lan_ip_.c_str(), unsigned(monitor_server_.bound_port()));
+        } else {
+            for (const auto& ph : phones) {
+                ImGui::PushID(9000 + ph.slot);
+                ImGui::TextColored(ph.connected ? kColGreen : kColTextMuted, "●");
+                ImGui::SameLine(0.0f, 5.0f);
+                ImGui::TextColored(kColTextMain, "%s", ph.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("%u ms · %u kbps", unsigned(ph.latency_ms), unsigned(ph.bitrate_kbps));
+                ImGui::SameLine();
+                if (ImGui::SmallButton(ph.muted ? "UNMUTE" : "MUTE")) {
+                    monitor_server_.set_client_mute(ph.slot, !ph.muted);
+                }
+                ImGui::PopID();
+            }
+        }
     }
 }
 
@@ -1845,15 +1943,17 @@ void LanVidStudioApp::draw_studio_config_panel() {
 
     // ---- STREAM MODE ----
     ImGui::TextColored(kColAccentPurp, "STREAM MODE");
-    if (studio_toggle("##AudioOnlyToggle", &cfg_.audio_only, kColAccentInd)) {
-        config_dirty_ = true;
-        if (sender_running_) start_sender();
-        if (receiver_running_) start_receiver();
-    }
-    ImGui::SameLine();
-    ImGui::TextColored(cfg_.audio_only ? kColAccentPurp : kColTextMain, "AUDIO ONLY");
-    ImGui::TextDisabled(cfg_.audio_only ? "Video disabled (~0 Mbps video, pure AoIP)"
-                                        : "Video + Audio streaming enabled");
+    draw_stream_mode_selector("CfgStreamMode");
+    ImGui::TextDisabled(cfg_.midi_only
+                            ? "MIDI Only: ~1.5 ms Ultra-Low Latency (0 audio/video)"
+                            : (cfg_.audio_only ? "Audio Only: video disabled (pure AoIP + MIDI)"
+                                               : "Video + Audio + MIDI streaming enabled"));
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // ---- PERSONAL MOBILE MONITOR SERVER ----
+    draw_mobile_monitor_section();
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -2490,6 +2590,7 @@ void LanVidStudioApp::start_receiver() {
     lv_receiver_set_volume(receiver_, cfg_.volume);
     if (lv_receiver_start(receiver_, &rc)) {
         receiver_running_ = true;
+        lv_receiver_set_midi_only(receiver_, cfg_.midi_only ? 1 : 0);
         apply_receiver_output();
         toast_msg_ = std::string(cfg_.audio_only ? "Прийом [Audio Only] на UDP :" : "Прийом запущено на UDP :") +
                      std::to_string(rc.bind_port) + " (LAN автопошук увімкнено)";
@@ -4011,16 +4112,10 @@ void LanVidStudioApp::draw_settings_tab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    ImGui::TextColored(kColAccentPurp, "4. Додаткові налаштування");
+    ImGui::TextColored(kColAccentPurp, "4. Режим потоку та додаткові налаштування");
     ImGui::Spacing();
-    if (studio_toggle("##SetAudioOnly", &cfg_.audio_only, kColAccentInd)) {
-        config_dirty_ = true;
-        if (sender_running_) start_sender();
-        if (receiver_running_) start_receiver();
-    }
-    ImGui::SameLine();
-    ImGui::TextColored(kColTextMain, "Лише звук (Вимкнути відео)");
-    ImGui::TextDisabled("Економить процесор і трафік, якщо потрібен тільки звук та MIDI");
+    draw_stream_mode_selector("SetStreamMode");
+    ImGui::TextDisabled("«Тільки MIDI» вимикає аудіо/відео трафік і вмикає ультранизьку затримку ~1.5 мс");
 
     ImGui::Spacing();
     if (studio_toggle("##SetFbGuard", &cfg_.matrix_feedback_guard, kColAccentPurp)) {

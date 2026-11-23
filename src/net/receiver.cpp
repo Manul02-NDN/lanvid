@@ -270,10 +270,12 @@ void UdpReceiver::step_once() {
 
     assembler_.poll(now);
     arx_.service(now);
-    // MIDI without an audio consumer (no pop_audio_* for 50 ms): schedule deterministically via
-    // MidiDejitterQueue (absorbs Wi-Fi jitter at `target_buffer_ms` even before audio starts).
-    if (now - last_pop_us_.load(std::memory_order_relaxed) > 50'000) {
-        midi_dejitter_.set_effective_buffer_ms(double(arx_.latency_ms()), mclock_.synced());
+    // MIDI without an audio consumer (no pop_audio_* for 50 ms) OR in MIDI Only ultra-low latency mode:
+    // schedule deterministically via MidiDejitterQueue.
+    if (midi_only_.load(std::memory_order_relaxed) ||
+        now - last_pop_us_.load(std::memory_order_relaxed) > 50'000) {
+        midi_dejitter_.set_effective_buffer_ms(double(arx_.latency_ms()),
+                                               !midi_only_.load(std::memory_order_relaxed) && mclock_.synced());
         dispatch_midi_local(now);
     }
     maybe_send_ping(now);
@@ -287,7 +289,7 @@ void UdpReceiver::pop_audio_multichannel_interleaved(float* out, uint32_t num_ch
     matrix_.pop_interleaved(mclock_, t, out, num_channels, frames);
     last_pop_us_.store(t, std::memory_order_relaxed);
     const double end = matrix_.playout_cursor();
-    const bool audio_live = (end > 0.0);
+    const bool audio_live = (end > 0.0) && !midi_only_.load(std::memory_order_relaxed);
     midi_dejitter_.set_effective_buffer_ms(arx_.current_effective_latency_ms(), audio_live);
     if (audio_live) {
         dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);
@@ -301,7 +303,7 @@ void UdpReceiver::pop_audio_multichannel_planar(float* const* out, uint32_t num_
     matrix_.pop_planar(mclock_, t, out, num_channels, frames);
     last_pop_us_.store(t, std::memory_order_relaxed);
     const double end = matrix_.playout_cursor();
-    const bool audio_live = (end > 0.0);
+    const bool audio_live = (end > 0.0) && !midi_only_.load(std::memory_order_relaxed);
     midi_dejitter_.set_effective_buffer_ms(arx_.current_effective_latency_ms(), audio_live);
     if (audio_live) {
         dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);

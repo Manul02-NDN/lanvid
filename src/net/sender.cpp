@@ -250,6 +250,7 @@ bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& para
 bool UdpSender::send_audio_raw(uint32_t audio_seq_id, uint32_t timestamp_us, const void* samples,
                                uint16_t num_frames, uint32_t sample_rate, uint8_t channels,
                                AudioSampleFormat fmt) {
+    if (midi_only_.load(std::memory_order_relaxed)) return true;
     if (!samples || num_frames == 0 || channels < 1 || channels > 2) return false;
     const size_t sample_bytes = (fmt == AudioSampleFormat::kFloat32) ? sizeof(float) : sizeof(int16_t);
     const size_t pcm_bytes = size_t(num_frames) * channels * sample_bytes;
@@ -351,6 +352,11 @@ uint64_t UdpSender::next_auto_media_ts(uint32_t num_samples) const {
 
 int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
                                   AudioFormat2 fmt, uint64_t media_ts) {
+    if (midi_only_.load(std::memory_order_relaxed)) {
+        std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
+        if (lk.owns_lock()) service_control();
+        return 0;
+    }
     if (!atx_ || channel >= kMaxAudioChannels) return -1;
     {   // answer PING / NACK from whichever pushing thread gets here first
         std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);

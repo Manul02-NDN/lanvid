@@ -129,6 +129,10 @@ public:
     bool push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port = 0, uint64_t media_ts_us = 0);
     MidiTxStats midi_stats() const { return midi_tx_ ? midi_tx_->stats() : MidiTxStats{}; }
 
+    // MIDI Only mode: suppresses all audio/video TX packets (0 audio/video traffic on wire).
+    void set_midi_only(bool enabled) { midi_only_.store(enabled, std::memory_order_relaxed); }
+    bool midi_only() const { return midi_only_.load(std::memory_order_relaxed); }
+
     // ---- Real-Time Bidirectional Control Sync (kControlSync, 3x Wi-Fi redundant) ----
     using ControlSyncCallback = std::function<void(const ControlSyncPayload&)>;
     bool send_control_sync(const ControlSyncPayload& cs);
@@ -233,6 +237,7 @@ private:
     std::atomic<uint64_t> pongs_sent_{0};
     std::atomic<uint64_t> feedbacks_received_{0};
     std::atomic<uint64_t> pli_received_{0};
+    std::atomic<bool> midi_only_{false};
 };
 
 }  // namespace lv

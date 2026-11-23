@@ -274,6 +274,7 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "conceal_mode", cfg.conceal_mode);
     read_dbl(j, "audio_target_ms", cfg.audio_target_ms);
     read_bool(j, "audio_only", cfg.audio_only);
+    read_bool(j, "midi_only", cfg.midi_only);
     read_int(j, "audio_codec", cfg.audio_codec);
     read_int(j, "audio_bitrate_kbps", cfg.audio_bitrate_kbps);
     read_int(j, "aoip_channels", cfg.aoip_channels);
@@ -373,6 +374,7 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"conceal_mode\": " << cfg.conceal_mode << ",\n"
         << "  \"audio_target_ms\": " << cfg.audio_target_ms << ",\n"
         << "  \"audio_only\": " << (cfg.audio_only ? "true" : "false") << ",\n"
+        << "  \"midi_only\": " << (cfg.midi_only ? "true" : "false") << ",\n"
         << "  \"audio_codec\": " << cfg.audio_codec << ",\n"
         << "  \"audio_bitrate_kbps\": " << cfg.audio_bitrate_kbps << ",\n"
         << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"

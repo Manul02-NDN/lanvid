@@ -25,8 +25,9 @@ enum class PacketType : uint8_t {
     kPong = 0x5,
     kAudio2 = 0x6,     // AudioHeader v2: independent per-channel stream (up to 64), media-clock timestamps
     kAudioNack = 0x7,  // Receiver -> Sender selective retransmission request (bitmask of missing seq)
-    kMidiFrame = 0x8,  // MIDI2: sample-accurate MIDI batch synced to MasterClock + 16-event redundancy ring
-    kControlSync = 0x9,// Real-time bidirectional control/config sync (revision-guarded, 3x Wi-Fi redundant)
+    kMidiFrame = 0x8,      // MIDI2: sample-accurate MIDI batch synced to MasterClock + 16-event redundancy ring
+    kControlSync = 0x9,    // Real-time bidirectional control/config sync (revision-guarded, 3x Wi-Fi redundant)
+    kMonitorControl = 0xA, // Personal smartphone monitor mixer remote control & channel metadata/VU sync
 };
 
 enum class VideoCodecId : uint8_t {
@@ -327,5 +328,62 @@ struct ControlSyncPayload {
 
 void write_control_sync(uint8_t* out, const ControlSyncPayload& cs);
 bool parse_control_sync(const uint8_t* in, size_t len, ControlSyncPayload& cs);
+
+// ---------------------------------------------------------------------------------------------
+// Personal Smartphone Monitor Mixer Remote Control (PacketType::kMonitorControl = 0xA).
+// ---------------------------------------------------------------------------------------------
+enum class MonitorControlOp : uint8_t {
+    kHello = 1,          // Smartphone -> PC: register / keepalive (name, desired bitrate)
+    kSyncMetaReq = 2,    // Smartphone -> PC: request active channel names + live VU meters
+    kSyncMetaResp = 3,   // PC -> Smartphone: active channel count, names (16B each), VU dBFS (int8)
+    kSetChannelMix = 4,  // Smartphone -> PC: gain_db, pan, mute, solo for channel 0..63
+    kSetDsp = 5,         // Smartphone -> PC: HPF, 3-band EQ, Compressor, Master Volume/Mute
+    kDisconnect = 6,     // Smartphone -> PC: clean disconnect
+};
+
+constexpr size_t kMonitorControlSize = 64;
+
+struct MonitorControlPayload {
+    MonitorControlOp op = MonitorControlOp::kHello;
+    uint8_t channel_index = 0;       // 0..63 for kSetChannelMix
+    uint8_t flags = 0;               // bit0=mute, bit1=solo, bit2=hpf_on, bit3=eq_on, bit4=comp_on, bit5=master_mute
+    uint8_t reserved = 0;
+    uint32_t client_id = 0;          // unique smartphone session id
+    uint16_t bitrate_kbps = 256;     // desired total stereo bitrate (e.g. 256 / 384 kbps)
+    uint16_t target_latency_ms = 20; // desired monitor buffer (ms)
+
+    // Channel mix parameters (kSetChannelMix)
+    float gain_db = 0.0f;            // -60..+12 dB
+    float pan = 0.0f;                // -1.0 (L) .. +1.0 (R)
+
+    // Bus DSP parameters (kSetDsp)
+    float hpf_hz = 80.0f;            // 20..250 Hz
+    float eq_low_db = 0.0f;          // ±12 dB @ 100 Hz
+    float eq_mid_hz = 1200.0f;       // 300..5000 Hz
+    float eq_mid_db = 0.0f;          // ±12 dB
+    float eq_high_db = 0.0f;         // ±12 dB @ 8 kHz
+    float comp_thresh_db = -18.0f;   // -40..0 dB
+    float comp_ratio = 3.0f;         // 1.0..10.0
+    float comp_attack_ms = 5.0f;     // 0.5..50 ms
+    float comp_release_ms = 80.0f;   // 10..500 ms
+    float comp_makeup_db = 0.0f;     // 0..18 dB
+    float master_volume_db = 0.0f;   // -60..+12 dB
+
+    char client_name[16] = {};       // for kHello (null-terminated)
+};
+
+void write_monitor_control(uint8_t* out, const MonitorControlPayload& mc);
+bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload& mc);
+
+// Metadata + VU packet (kSyncMetaResp): up to 64 channels (16B name + 1B VU int8 dBFS each).
+struct MonitorMetaChannel {
+    char name[16] = {};
+    int8_t peak_dbfs = -120;  // -120..0 dBFS
+};
+
+size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t num_channels,
+                          const MonitorMetaChannel* channels);
+bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint8_t& num_channels,
+                        MonitorMetaChannel* out_channels, uint8_t max_channels);
 
 }  // namespace lv

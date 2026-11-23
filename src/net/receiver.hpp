@@ -104,6 +104,11 @@ public:
     // pop_audio_* call (sample-accurate scheduling), or -1 when dispatched without an audio consumer.
     using MidiCallback = std::function<void(const TimedMidiEvent& ev, int32_t block_offset_frames)>;
     void set_midi_callback(MidiCallback cb);
+    void set_midi_only(bool enabled) {
+        midi_only_.store(enabled, std::memory_order_relaxed);
+        midi_dejitter_.set_midi_only_mode(enabled, 1.5);
+    }
+    bool midi_only() const { return midi_only_.load(std::memory_order_relaxed); }
     MidiRxStats midi_stats() const { return midi_rx_.stats(); }
     MidiDejitterStats midi_dejitter_stats() const { return midi_dejitter_.stats(); }
     uint32_t active_midi_notes() const;
@@ -184,6 +189,7 @@ private:
     // MIDI2 + De-Jitter Playout Queue + session epoch
     MidiRxEngine midi_rx_;
     MidiDejitterQueue midi_dejitter_;
+    std::atomic<bool> midi_only_{false};
     mutable std::mutex midi_mu_;
     MidiCallback midi_cb_;
     uint8_t active_notes_[kMaxMidiPorts][16][128] = {};

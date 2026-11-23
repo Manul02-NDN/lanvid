@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "audio/multi_device_matrix.hpp"
+#include "audio/personal_monitor_bus.hpp"
 #include "audio/shm_audio_host.hpp"
 #include "midi/midi_device_manager.hpp"
 #include "gui/app_config.hpp"
@@ -111,6 +112,9 @@ private:
     // Jitter-buffer latency mode (Fixed (Ethernet) / Adaptive (Wi-Fi)) + live "ACTUAL BUFFER" telemetry.
     void draw_latency_mode_controls(const char* id, float combo_width);
     void draw_audio_bitrate_pills(const char* id);
+    void draw_stream_mode_selector(const char* id);
+    void apply_stream_mode();
+    void draw_mobile_monitor_section();
     void draw_actual_buffer_line();
     void apply_latency_mode();
     void poll_latency_telemetry(uint64_t now);
@@ -207,6 +211,7 @@ private:
 
     // Multi-Device Audio Matrix (64x64 across up to 8 slots)
     MultiDeviceAudioMatrix audio_matrix_;
+    PersonalMonitorServer monitor_server_{48000};
     std::atomic<bool> matrix_has_net_tx_routes_{false};
     double dpx_tx_mbps_ = 0.0;
     double dpx_rx_mbps_ = 0.0;

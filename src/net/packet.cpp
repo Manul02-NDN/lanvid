@@ -318,4 +318,120 @@ bool parse_control_sync(const uint8_t* in, size_t len, ControlSyncPayload& cs) {
     return true;
 }
 
+namespace {
+inline void store_f32_le(uint8_t* p, float v) {
+    uint32_t u = 0;
+    std::memcpy(&u, &v, 4);
+    store_le32(p, u);
+}
+inline float load_f32_le(const uint8_t* p) {
+    const uint32_t u = load_le32(p);
+    float v = 0.0f;
+    std::memcpy(&v, &u, 4);
+    return v;
+}
+}  // namespace
+
+void write_monitor_control(uint8_t* out, const MonitorControlPayload& mc) {
+    std::memset(out, 0, kMonitorControlSize);
+    out[0] = uint8_t(mc.op);
+    out[1] = mc.channel_index;
+    out[2] = mc.flags;
+    out[3] = mc.reserved;
+    store_le32(out + 4, mc.client_id);
+    store_le16(out + 8, mc.bitrate_kbps);
+    store_le16(out + 10, mc.target_latency_ms);
+    if (mc.op == MonitorControlOp::kHello) {
+        std::memcpy(out + 12, mc.client_name, 16);
+    } else if (mc.op == MonitorControlOp::kSetChannelMix) {
+        store_f32_le(out + 12, mc.gain_db);
+        store_f32_le(out + 16, mc.pan);
+    } else if (mc.op == MonitorControlOp::kSetDsp) {
+        store_f32_le(out + 12, mc.hpf_hz);
+        store_f32_le(out + 16, mc.eq_low_db);
+        store_f32_le(out + 20, mc.eq_mid_hz);
+        store_f32_le(out + 24, mc.eq_mid_db);
+        store_f32_le(out + 28, mc.eq_high_db);
+        store_f32_le(out + 32, mc.comp_thresh_db);
+        store_f32_le(out + 36, mc.comp_ratio);
+        store_f32_le(out + 40, mc.comp_attack_ms);
+        store_f32_le(out + 44, mc.comp_release_ms);
+        store_f32_le(out + 48, mc.comp_makeup_db);
+        store_f32_le(out + 52, mc.master_volume_db);
+    }
+}
+
+bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload& mc) {
+    if (len < kMonitorControlSize) return false;
+    mc = MonitorControlPayload{};
+    mc.op = MonitorControlOp(in[0]);
+    mc.channel_index = in[1];
+    mc.flags = in[2];
+    mc.reserved = in[3];
+    mc.client_id = load_le32(in + 4);
+    mc.bitrate_kbps = load_le16(in + 8);
+    mc.target_latency_ms = load_le16(in + 10);
+    if (mc.op == MonitorControlOp::kHello) {
+        std::memcpy(mc.client_name, in + 12, 16);
+        mc.client_name[15] = '\0';
+    } else if (mc.op == MonitorControlOp::kSetChannelMix) {
+        mc.gain_db = load_f32_le(in + 12);
+        mc.pan = load_f32_le(in + 16);
+    } else if (mc.op == MonitorControlOp::kSetDsp) {
+        mc.hpf_hz = load_f32_le(in + 12);
+        mc.eq_low_db = load_f32_le(in + 16);
+        mc.eq_mid_hz = load_f32_le(in + 20);
+        mc.eq_mid_db = load_f32_le(in + 24);
+        mc.eq_high_db = load_f32_le(in + 28);
+        mc.comp_thresh_db = load_f32_le(in + 32);
+        mc.comp_ratio = load_f32_le(in + 36);
+        mc.comp_attack_ms = load_f32_le(in + 40);
+        mc.comp_release_ms = load_f32_le(in + 44);
+        mc.comp_makeup_db = load_f32_le(in + 48);
+        mc.master_volume_db = load_f32_le(in + 52);
+    }
+    return true;
+}
+
+size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t num_channels,
+                          const MonitorMetaChannel* channels) {
+    const uint8_t n = num_channels > kMaxAudioChannels ? uint8_t(kMaxAudioChannels) : num_channels;
+    const size_t total = 8 + size_t(n) * 17;
+    if (cap < total) return 0;
+    out[0] = uint8_t(MonitorControlOp::kSyncMetaResp);
+    out[1] = n;
+    out[2] = 0;
+    out[3] = 0;
+    store_le32(out + 4, client_id);
+    for (uint8_t i = 0; i < n; ++i) {
+        uint8_t* dst = out + 8 + size_t(i) * 17;
+        std::memset(dst, 0, 17);
+        if (channels) {
+            std::memcpy(dst, channels[i].name, 16);
+            dst[15] = '\0';
+            dst[16] = uint8_t(channels[i].peak_dbfs);
+        } else {
+            dst[16] = uint8_t(int8_t(-120));
+        }
+    }
+    return total;
+}
+
+bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint8_t& num_channels,
+                        MonitorMetaChannel* out_channels, uint8_t max_channels) {
+    if (len < 8 || in[0] != uint8_t(MonitorControlOp::kSyncMetaResp)) return false;
+    const uint8_t n = in[1];
+    if (n > kMaxAudioChannels || len < 8 + size_t(n) * 17) return false;
+    client_id = load_le32(in + 4);
+    num_channels = n;
+    const uint8_t copy_n = (n < max_channels) ? n : max_channels;
+    for (uint8_t i = 0; i < copy_n; ++i) {
+        const uint8_t* src = in + 8 + size_t(i) * 17;
+        std::memcpy(out_channels[i].name, src, 16);
+        out_channels[i].name[15] = '\0';
+        out_channels[i].peak_dbfs = int8_t(src[16]);
+    }
+    return true;
+}
+
 }  // namespace lv
