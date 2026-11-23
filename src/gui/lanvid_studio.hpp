@@ -168,6 +168,8 @@ private:
     uint32_t actual_target_ms_ = 0;    // delay it steers to (> latency when Adaptive has grown it)
     bool actual_buf_valid_ = false;
     uint64_t actual_buf_us_ = 0;
+    LV_MidiDejitterStats midi_dejitter_stats_{};
+    bool midi_dejitter_valid_ = false;
     uint64_t dpx_stats_us_ = 0;
     char dpx_peer_buf_[64]{};
     std::mutex nodes_mu_;

@@ -94,6 +94,11 @@ public:
     // Processes an incoming kMidiFrame payload (after the 28-byte LVSP PacketHeader).
     bool on_packet(const PacketHeader& h, const uint8_t* payload, size_t len);
 
+    // Processes an incoming kMidiFrame payload, deduplicating via `event_seq` and forwarding each
+    // unique event to `on_unique` (used by UdpReceiver to feed MidiDejitterQueue).
+    bool on_packet_with_cb(const PacketHeader& h, const uint8_t* payload, size_t len,
+                           const DispatchFn& on_unique);
+
     // Releases all queued events whose `media_ts_us <= playout_media_ts_us` in chronological order.
     uint32_t pop_due_events(uint64_t playout_media_ts_us, const DispatchFn& on_event);
 

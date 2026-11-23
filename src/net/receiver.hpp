@@ -13,6 +13,7 @@
 #include "audio/audio_rx.hpp"
 #include "audio/audio_sync_matrix.hpp"
 #include "audio/master_clock.hpp"
+#include "midi/midi_dejitter_queue.hpp"
 #include "midi/midi_sync_engine.hpp"
 #include "net/assembler.hpp"
 #include "net/udp_socket.hpp"
@@ -79,10 +80,16 @@ public:
     AudioStats audio_stats() const { return audio_buf_.stats(); }
 
     // ---- 64-channel phase-coherent audio bus ----
-    void set_audio_latency_ms(uint32_t ms) { arx_.set_latency_ms(ms); }
+    void set_audio_latency_ms(uint32_t ms) {
+        arx_.set_latency_ms(ms);
+        midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
+    }
     uint32_t audio_latency_ms() const { return arx_.latency_ms(); }
     // Latency mode (live): Fixed (Ethernet / live monitoring) or Adaptive (Wi-Fi, grows up to 200 ms).
-    void set_audio_adaptive_jitter(bool enabled) { arx_.set_adaptive_jitter_enabled(enabled); }
+    void set_audio_adaptive_jitter(bool enabled) {
+        arx_.set_adaptive_jitter_enabled(enabled);
+        midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
+    }
     bool audio_adaptive_jitter() const { return arx_.adaptive_jitter_enabled(); }
     // Measured playout delay of the 64-channel jitter buffer (ms) and the delay it currently steers to.
     double audio_effective_latency_ms() const { return arx_.current_effective_latency_ms(); }
@@ -98,6 +105,7 @@ public:
     using MidiCallback = std::function<void(const TimedMidiEvent& ev, int32_t block_offset_frames)>;
     void set_midi_callback(MidiCallback cb);
     MidiRxStats midi_stats() const { return midi_rx_.stats(); }
+    MidiDejitterStats midi_dejitter_stats() const { return midi_dejitter_.stats(); }
     uint32_t active_midi_notes() const;
 
     // ---- Real-Time Control Sync (kControlSync, bidirectional, 3x Wi-Fi redundant) ----
@@ -135,6 +143,7 @@ private:
     bool accept_epoch(uint16_t epoch);
     void reset_stream_epoch();
     void dispatch_midi(uint64_t playout_us, double block_start_samples, uint32_t frames);
+    void dispatch_midi_local(uint64_t local_now_us);
     void track_note(const TimedMidiEvent& ev);
     void release_all_notes();
 
@@ -172,8 +181,9 @@ private:
     std::atomic<uint64_t> audio2_bytes_rx_{0};
     std::atomic<uint64_t> audio2_packets_rx_{0};
 
-    // MIDI2 + session epoch
+    // MIDI2 + De-Jitter Playout Queue + session epoch
     MidiRxEngine midi_rx_;
+    MidiDejitterQueue midi_dejitter_;
     mutable std::mutex midi_mu_;
     MidiCallback midi_cb_;
     uint8_t active_notes_[kMaxMidiPorts][16][128] = {};

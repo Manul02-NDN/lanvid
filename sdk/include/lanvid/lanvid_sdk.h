@@ -214,6 +214,22 @@ LV_API int lv_duplex_send_midi(LvDuplexHandle* handle, uint8_t status, uint8_t d
                                uint64_t media_ts_us);
 LV_API void lv_duplex_set_midi_callback(LvDuplexHandle* handle, LV_MidiEventCallback cb, void* user_data);
 
+/* Sample-accurate MIDI De-Jitter Playout Queue telemetry (synchronized with audio latency settings). */
+typedef struct LV_MidiDejitterStats {
+    double target_buffer_ms;
+    double playout_delay_ms;
+    double absorbed_jitter_ms;
+    int32_t fixed_mode;
+    int32_t synced_with_audio;
+    uint32_t queued_events;
+    uint64_t total_enqueued;
+    uint64_t total_dispatched;
+    uint64_t late_events;
+} LV_MidiDejitterStats;
+
+LV_API int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitterStats* out);
+LV_API int lv_duplex_get_midi_dejitter_stats(LvDuplexHandle* handle, LV_MidiDejitterStats* out);
+
 /* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
 typedef struct LV_ControlSyncState {
     uint64_t revision;           /* monotonic version (anti-loop / dedup) */

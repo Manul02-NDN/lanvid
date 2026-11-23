@@ -18,9 +18,11 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       matrix_(cfg.audio_sample_rate),
       arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
           return has_sender_ && sock_.send_to(d, n, sender_ep_) == int(n);
-      }) {
+      }),
+      midi_dejitter_(cfg.audio_sample_rate) {
     arx_.set_latency_ms(cfg.audio_latency_ms);
     arx_.set_adaptive_jitter_enabled(cfg.audio_adaptive_jitter);
+    midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
     assembler_.set_pli_callback([this](uint32_t) { send_pli_now(now_us()); });
 }
 
@@ -229,7 +231,11 @@ void UdpReceiver::step_once() {
                     sender_ep_ = batch[i].src;
                     has_sender_ = true;
                 }
-                midi_rx_.on_packet(h, payload, h.payload_size);
+                midi_rx_.on_packet_with_cb(h, payload, h.payload_size, [&](const TimedMidiEvent& ev) {
+                    const bool msync = mclock_.synced();
+                    const int64_t moff = msync ? (mclock_.master_us(now) - int64_t(now)) : 0;
+                    midi_dejitter_.push(ev, now, msync, moff);
+                });
             } else if (h.type == PacketType::kControlSync) {
                 if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
                     sender_ep_ = batch[i].src;
@@ -264,15 +270,11 @@ void UdpReceiver::step_once() {
 
     assembler_.poll(now);
     arx_.service(now);
-    // MIDI without an audio consumer (no pop_audio_* for 50 ms): schedule on the MasterClock playout
-    // estimate (or immediately while the clock is not synced yet).
+    // MIDI without an audio consumer (no pop_audio_* for 50 ms): schedule deterministically via
+    // MidiDejitterQueue (absorbs Wi-Fi jitter at `target_buffer_ms` even before audio starts).
     if (now - last_pop_us_.load(std::memory_order_relaxed) > 50'000) {
-        uint64_t playout = UINT64_MAX;
-        if (mclock_.synced()) {
-            const int64_t m = mclock_.master_us(now) - int64_t(arx_.latency_ms()) * 1000;
-            playout = m > 0 ? uint64_t(m) : 0;
-        }
-        dispatch_midi(playout, -1.0, 0);
+        midi_dejitter_.set_effective_buffer_ms(double(arx_.latency_ms()), mclock_.synced());
+        dispatch_midi_local(now);
     }
     maybe_send_ping(now);
     maybe_send_feedback(now);
@@ -281,17 +283,31 @@ void UdpReceiver::step_once() {
 // ---- audio pull + sample-accurate MIDI dispatch ----
 
 void UdpReceiver::pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames) {
-    matrix_.pop_interleaved(mclock_, now_us(), out, num_channels, frames);
-    last_pop_us_.store(now_us(), std::memory_order_relaxed);
+    const uint64_t t = now_us();
+    matrix_.pop_interleaved(mclock_, t, out, num_channels, frames);
+    last_pop_us_.store(t, std::memory_order_relaxed);
     const double end = matrix_.playout_cursor();
-    dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);
+    const bool audio_live = (end > 0.0);
+    midi_dejitter_.set_effective_buffer_ms(arx_.current_effective_latency_ms(), audio_live);
+    if (audio_live) {
+        dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);
+    } else {
+        dispatch_midi_local(t);
+    }
 }
 
 void UdpReceiver::pop_audio_multichannel_planar(float* const* out, uint32_t num_channels, uint32_t frames) {
-    matrix_.pop_planar(mclock_, now_us(), out, num_channels, frames);
-    last_pop_us_.store(now_us(), std::memory_order_relaxed);
+    const uint64_t t = now_us();
+    matrix_.pop_planar(mclock_, t, out, num_channels, frames);
+    last_pop_us_.store(t, std::memory_order_relaxed);
     const double end = matrix_.playout_cursor();
-    dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);
+    const bool audio_live = (end > 0.0);
+    midi_dejitter_.set_effective_buffer_ms(arx_.current_effective_latency_ms(), audio_live);
+    if (audio_live) {
+        dispatch_midi(matrix_.playout_media_ts_us(), end - double(frames), frames);
+    } else {
+        dispatch_midi_local(t);
+    }
 }
 
 void UdpReceiver::set_midi_callback(MidiCallback cb) {
@@ -313,7 +329,7 @@ void UdpReceiver::track_note(const TimedMidiEvent& ev) {
 void UdpReceiver::dispatch_midi(uint64_t playout_us, double block_start_samples, uint32_t frames) {
     std::lock_guard<std::mutex> lk(midi_mu_);
     const double rate = double(matrix_.sample_rate());
-    midi_rx_.pop_due_events(playout_us, [&](const TimedMidiEvent& ev) {
+    midi_dejitter_.pop_due_media(playout_us, [&](const TimedMidiEvent& ev, bool) {
         track_note(ev);
         if (!midi_cb_) return;
         int32_t off = -1;
@@ -322,6 +338,15 @@ void UdpReceiver::dispatch_midi(uint64_t playout_us, double block_start_samples,
             off = int32_t(std::clamp(std::floor(pos), 0.0, double(frames - 1)));
         }
         midi_cb_(ev, off);
+    });
+}
+
+void UdpReceiver::dispatch_midi_local(uint64_t local_now_us) {
+    std::lock_guard<std::mutex> lk(midi_mu_);
+    midi_dejitter_.pop_due_local(local_now_us, [&](const TimedMidiEvent& ev, bool) {
+        track_note(ev);
+        if (!midi_cb_) return;
+        midi_cb_(ev, -1);
     });
 }
 
@@ -376,6 +401,7 @@ void UdpReceiver::reset_stream_epoch() {
     sync_ = {};
     last_ping_us_ = 0;               // re-sync immediately
     midi_rx_.reset();                // event_seq dedup window + queued events of the old session
+    midi_dejitter_.reset();          // de-jitter playout queue + transit baseline
     release_all_notes();             // Note Off for everything still sounding -> no stuck notes
     epoch_resets_.fetch_add(1, std::memory_order_relaxed);
 }

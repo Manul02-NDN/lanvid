@@ -1638,6 +1638,30 @@ void lv_duplex_set_midi_callback(LvDuplexHandle* h, LV_MidiEventCallback cb, voi
     if (h->rx) lv_receiver_set_midi_callback(h->rx, cb, user_data);
 }
 
+int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitterStats* out) {
+    if (!handle || !out) return LV_ERR_INVALID_ARG;
+    *out = {};
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    const auto st = handle->receiver->midi_dejitter_stats();
+    out->target_buffer_ms = st.target_buffer_ms;
+    out->playout_delay_ms = st.playout_delay_ms;
+    out->absorbed_jitter_ms = st.absorbed_jitter_ms;
+    out->fixed_mode = st.fixed_mode ? 1 : 0;
+    out->synced_with_audio = st.synced_with_audio ? 1 : 0;
+    out->queued_events = st.queued_events;
+    out->total_enqueued = st.total_enqueued;
+    out->total_dispatched = st.total_dispatched;
+    out->late_events = st.late_events;
+    return LV_OK;
+}
+
+int lv_duplex_get_midi_dejitter_stats(LvDuplexHandle* h, LV_MidiDejitterStats* out) {
+    if (!h || !out) return LV_ERR_INVALID_ARG;
+    *out = {};
+    if (!h->running.load(std::memory_order_acquire) || !h->rx) return LV_ERR_NOT_RUNNING;
+    return lv_receiver_get_midi_dejitter_stats(h->rx, out);
+}
+
 static lv::ControlSyncPayload to_wire_cs(const LV_ControlSyncState& s) {
     lv::ControlSyncPayload cs{};
     cs.revision = s.revision;

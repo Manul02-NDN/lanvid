@@ -144,29 +144,46 @@ bool MidiRxEngine::is_duplicate_and_mark(uint32_t seq) {
 }
 
 bool MidiRxEngine::on_packet(const PacketHeader& h, const uint8_t* payload, size_t len) {
+    return on_packet_with_cb(h, payload, len, nullptr);
+}
+
+bool MidiRxEngine::on_packet_with_cb(const PacketHeader& h, const uint8_t* payload, size_t len,
+                                     const DispatchFn& on_unique) {
     if (h.type != PacketType::kMidiFrame || !payload) return false;
     MidiFrameHeader mh{};
     MidiEventPacket evs[kMaxMidiEventsPerPacket];
     if (!parse_midi_frame(payload, len, mh, evs, kMaxMidiEventsPerPacket)) return false;
 
     packets_rx_.fetch_add(1, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lk(mu_);
-    for (uint16_t i = 0; i < mh.event_count; ++i) {
-        const auto& e = evs[i];
-        if (is_duplicate_and_mark(e.event_seq)) {
-            events_deduped_.fetch_add(1, std::memory_order_relaxed);
-            continue;
+    std::vector<TimedMidiEvent> accepted;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (uint16_t i = 0; i < mh.event_count; ++i) {
+            const auto& e = evs[i];
+            if (is_duplicate_and_mark(e.event_seq)) {
+                events_deduped_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            TimedMidiEvent te{};
+            te.event_seq = e.event_seq;
+            const int64_t ts = int64_t(mh.base_media_ts_us) + int64_t(e.offset_us);
+            te.media_ts_us = ts > 0 ? uint64_t(ts) : 0;
+            te.status = e.status;
+            te.data1 = e.data1;
+            te.data2 = e.data2;
+            te.port_index = e.port_index;
+            if (on_unique) {
+                accepted.push_back(te);
+            } else {
+                queue_.push(te);
+            }
+            events_unique_.fetch_add(1, std::memory_order_relaxed);
         }
-        TimedMidiEvent te{};
-        te.event_seq = e.event_seq;
-        const int64_t ts = int64_t(mh.base_media_ts_us) + int64_t(e.offset_us);
-        te.media_ts_us = ts > 0 ? uint64_t(ts) : 0;
-        te.status = e.status;
-        te.data1 = e.data1;
-        te.data2 = e.data2;
-        te.port_index = e.port_index;
-        queue_.push(te);
-        events_unique_.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (on_unique) {
+        for (const auto& te : accepted) {
+            on_unique(te);
+        }
     }
     return true;
 }

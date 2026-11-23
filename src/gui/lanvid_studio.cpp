@@ -1570,16 +1570,19 @@ void LanVidStudioApp::poll_latency_telemetry(uint64_t now) {
     if (now - actual_buf_us_ < 100000ull) return;  // 10 Hz
     actual_buf_us_ = now;
     actual_buf_valid_ = false;
+    midi_dejitter_valid_ = false;
     if (duplex_running_ && duplex_) {
         lv_duplex_get_stats(duplex_, &dpx_stats_);
         dpx_stats_us_ = now;
         actual_buf_ms_ = dpx_stats_.effective_latency_ms;
         actual_target_ms_ = dpx_stats_.effective_target_ms;
         actual_buf_valid_ = dpx_stats_.running && actual_buf_ms_ > 0.0;
+        midi_dejitter_valid_ = (lv_duplex_get_midi_dejitter_stats(duplex_, &midi_dejitter_stats_) == LV_OK);
     } else if (receiver_running_ && receiver_) {
         actual_buf_ms_ = lv_receiver_get_effective_latency_ms(receiver_);
         actual_target_ms_ = rx_stats_.effective_target_ms;
         actual_buf_valid_ = actual_buf_ms_ > 0.0;
+        midi_dejitter_valid_ = (lv_receiver_get_midi_dejitter_stats(receiver_, &midi_dejitter_stats_) == LV_OK);
     }
 }
 
@@ -1587,22 +1590,41 @@ void LanVidStudioApp::draw_actual_buffer_line() {
     if (!actual_buf_valid_) {
         ImGui::TextColored(kColTextMuted, "ACTUAL BUFFER: -- ms");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("No AoIP stream is being played out yet.");
-        return;
+    } else {
+        ImVec4 col = kColCyan;  // Fixed: held at the configured latency
+        const char* state = "fixed";
+        if (cfg_.adaptive_jitter) {
+            const double lat = double(cfg_.aoip_latency_ms);
+            const bool grown = double(actual_target_ms_) > lat + 0.5 ||
+                               actual_buf_ms_ > lat + std::max(1.5, 0.05 * lat);
+            col = grown ? kColAmber : kColGreen;
+            state = grown ? "expanded (Wi-Fi burst)" : "nominal";
+        }
+        ImGui::TextColored(col, "ACTUAL BUFFER: %.1f ms", actual_buf_ms_);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Measured jitter-buffer playout delay: %.1f ms (%s)\nTarget: %d ms%s", actual_buf_ms_,
+                              state, cfg_.aoip_latency_ms,
+                              cfg_.adaptive_jitter ? ", Adaptive range up to 200 ms" : ", Fixed");
     }
-    ImVec4 col = kColCyan;  // Fixed: held at the configured latency
-    const char* state = "fixed";
-    if (cfg_.adaptive_jitter) {
-        const double lat = double(cfg_.aoip_latency_ms);
-        const bool grown = double(actual_target_ms_) > lat + 0.5 ||
-                           actual_buf_ms_ > lat + std::max(1.5, 0.05 * lat);
-        col = grown ? kColAmber : kColGreen;
-        state = grown ? "expanded (Wi-Fi burst)" : "nominal";
+
+    // MIDI De-Jitter Playout Queue telemetry (synchronized with audio latency settings)
+    const double midi_delay =
+        midi_dejitter_valid_ ? midi_dejitter_stats_.playout_delay_ms : double(cfg_.aoip_latency_ms);
+    const bool midi_fixed = midi_dejitter_valid_ ? (midi_dejitter_stats_.fixed_mode != 0) : !cfg_.adaptive_jitter;
+    const double midi_jit = midi_dejitter_valid_ ? midi_dejitter_stats_.absorbed_jitter_ms : 0.0;
+    const uint64_t midi_late = midi_dejitter_valid_ ? midi_dejitter_stats_.late_events : 0;
+    const ImVec4 mcol = midi_late > 0 ? kColAmber : (midi_dejitter_valid_ ? kColAccentPurp : kColTextMuted);
+    ImGui::TextColored(mcol, "MIDI Playout: %.1f ms (%s • Synced with Audio)", midi_delay,
+                       midi_fixed ? "Fixed" : "Adaptive");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Sample-Accurate 48 kHz MIDI De-Jitter Queue\n"
+            "Playout Delay: %.1f ms (%s)\n"
+            "Absorbed Wi-Fi Jitter: %.1f ms | Late packets: %llu | Queued: %u",
+            midi_delay, midi_fixed ? "Fixed" : "Adaptive", midi_jit,
+            static_cast<unsigned long long>(midi_late),
+            midi_dejitter_valid_ ? midi_dejitter_stats_.queued_events : 0u);
     }
-    ImGui::TextColored(col, "ACTUAL BUFFER: %.1f ms", actual_buf_ms_);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Measured jitter-buffer playout delay: %.1f ms (%s)\nTarget: %d ms%s", actual_buf_ms_, state,
-                          cfg_.aoip_latency_ms,
-                          cfg_.adaptive_jitter ? ", Adaptive range up to 200 ms" : ", Fixed");
 }
 
 void LanVidStudioApp::draw_latency_mode_controls(const char* id, float combo_width) {

@@ -18,6 +18,7 @@
 #include "audio/master_clock.hpp"
 #include "audio/multi_device_matrix.hpp"
 #include "gui/app_config.hpp"
+#include "midi/midi_dejitter_queue.hpp"
 #include "midi/midi_device_manager.hpp"
 #include "midi/midi_sync_engine.hpp"
 #include "midi/virtual_midi.hpp"
@@ -305,4 +306,187 @@ TEST(virtual_midi_daw_port_visibility_and_loopback) {
         CHECK(mst.connected);
         CHECK(!mst.status_text.empty());
     }
+}
+
+TEST(midi_static_playout_delay_absorbs_wifi_jitter) {
+    using namespace lv;
+    constexpr uint32_t kRate = 48000;
+    constexpr double kFixedMs = 15.0;          // 15 ms Fixed delay = 720 samples @ 48 kHz
+    constexpr uint64_t kStepUs = 125'000;      // 16th-note grid @ 120 BPM (125.0 ms)
+    constexpr int kNumNotes = 16;
+    constexpr int64_t kMasterOffsetUs = 5'000'000;  // arbitrary sender/receiver clock offset
+
+    // ------------------------------------------------------------------
+    // Part 1: Deterministic 16th-note grid with random 0..12 ms Wi-Fi jitter at Fixed 15 ms
+    // ------------------------------------------------------------------
+    MidiDejitterQueue dj(kRate);
+    dj.set_latency(kFixedMs, /*adaptive=*/false);
+    CHECK(dj.target_buffer_samples() == 720);
+    CHECK(dj.is_fixed_mode());
+
+    std::mt19937 rng(0x57494649u);
+    std::uniform_int_distribution<uint64_t> wifi_jitter_us(0, 12'000);  // 0..12 ms random Wi-Fi jitter
+
+    struct Arrival {
+        uint64_t arrival_local_us = 0;
+        uint64_t send_local_us = 0;
+        TimedMidiEvent ev{};
+    };
+    std::vector<Arrival> arrivals;
+    const uint64_t t0_local = 1'000'000;
+    for (int i = 0; i < kNumNotes; ++i) {
+        const uint64_t send_local = t0_local + uint64_t(i) * kStepUs;
+        const uint64_t jitter = (i == 0) ? 0 : wifi_jitter_us(rng);  // first note establishes baseline
+        TimedMidiEvent ev{};
+        ev.event_seq = uint32_t(i + 1);
+        ev.media_ts_us = uint64_t(int64_t(send_local) + kMasterOffsetUs);
+        ev.status = 0x90;
+        ev.data1 = uint8_t(60 + (i % 12));
+        ev.data2 = 100;
+        arrivals.push_back({send_local + jitter, send_local, ev});
+    }
+    // Also inject a late Note Off arriving at +22 ms (> 15 ms Fixed buffer) to verify zero stuck notes!
+    {
+        const uint64_t send_local = t0_local + uint64_t(kNumNotes) * kStepUs;
+        TimedMidiEvent off{};
+        off.event_seq = uint32_t(kNumNotes + 1);
+        off.media_ts_us = uint64_t(int64_t(send_local) + kMasterOffsetUs);
+        off.status = 0x80;
+        off.data1 = 60;
+        off.data2 = 0;
+        arrivals.push_back({send_local + 22'000, send_local, off});
+    }
+
+    // Sort by network arrival time and simulate a 0.5 ms (24-sample) receiver playout tick
+    std::sort(arrivals.begin(), arrivals.end(),
+              [](const Arrival& a, const Arrival& b) { return a.arrival_local_us < b.arrival_local_us; });
+
+    std::vector<uint64_t> note_playout_local_us(kNumNotes, 0);
+    bool late_note_off_emitted = false;
+    size_t next_arr = 0;
+    const uint64_t end_local = t0_local + uint64_t(kNumNotes + 1) * kStepUs + 40'000;
+
+    for (uint64_t now = t0_local; now <= end_local; now += 500) {
+        while (next_arr < arrivals.size() && arrivals[next_arr].arrival_local_us <= now) {
+            dj.push(arrivals[next_arr].ev, arrivals[next_arr].arrival_local_us,
+                    /*master_synced=*/true, kMasterOffsetUs);
+            ++next_arr;
+        }
+        dj.pop_due_local(now, [&](const TimedMidiEvent& ev, bool was_late) {
+            if (ev.status == 0x90 && ev.event_seq >= 1 && ev.event_seq <= uint32_t(kNumNotes)) {
+                note_playout_local_us[ev.event_seq - 1] = now;
+            } else if (ev.status == 0x80 && ev.event_seq == uint32_t(kNumNotes + 1)) {
+                CHECK(was_late);
+                late_note_off_emitted = true;
+            }
+        });
+    }
+
+    double min_delay_ms = 1e9, max_delay_ms = 0.0;
+    double max_interval_err_ms = 0.0;
+    for (int i = 0; i < kNumNotes; ++i) {
+        CHECK(note_playout_local_us[i] > 0);
+        const uint64_t send_local = t0_local + uint64_t(i) * kStepUs;
+        const double delay_ms = double(note_playout_local_us[i] - send_local) / 1000.0;
+        min_delay_ms = std::min(min_delay_ms, delay_ms);
+        max_delay_ms = std::max(max_delay_ms, delay_ms);
+        CHECK(std::fabs(delay_ms - kFixedMs) <= 1.5);
+        if (i > 0) {
+            const double interval_ms =
+                double(note_playout_local_us[i] - note_playout_local_us[i - 1]) / 1000.0;
+            const double err_ms = std::fabs(interval_ms - double(kStepUs) / 1000.0);
+            max_interval_err_ms = std::max(max_interval_err_ms, err_ms);
+            CHECK(err_ms < 1.5);
+        }
+    }
+    const auto dj_st = dj.stats();
+    CHECK(late_note_off_emitted);
+    CHECK(dj_st.late_events == 1);
+    CHECK(dj_st.total_dispatched == uint64_t(kNumNotes + 1));
+
+    // Verify live on-the-fly latency update (e.g. from UI or kControlSync)
+    dj.set_latency(30.0, false);
+    CHECK(dj.target_buffer_samples() == 1440);
+
+    // ------------------------------------------------------------------
+    // Part 2: Audio impulse + MIDI note locked to 0 ms skew at Fixed 15 ms under 0..12 ms jitter
+    // ------------------------------------------------------------------
+    MasterClock clk;
+    clk.set_fixed_offset(kMasterOffsetUs);
+    AudioSyncMatrix audio_mat(kRate);
+    audio_mat.set_target_latency_ms(uint32_t(kFixedMs));
+    audio_mat.set_adaptive_jitter(false);
+
+    AudioRxEngine audio_rx(audio_mat, clk, [](const uint8_t*, size_t) { return true; });
+    audio_rx.set_latency_ms(uint32_t(kFixedMs));
+    audio_rx.set_adaptive_jitter_enabled(false);
+
+    std::multimap<uint64_t, std::vector<uint8_t>> net_q;
+    uint64_t sim_now = t0_local;
+    AudioTxEngine audio_tx(kRate, kDefaultMtu, [&](const uint8_t* d, size_t n) {
+        net_q.insert({sim_now + wifi_jitter_us(rng), std::vector<uint8_t>(d, d + n)});
+        return true;
+    });
+    audio_tx.set_latency_ms(uint32_t(kFixedMs));
+
+    MidiDejitterQueue synced_dj(kRate);
+    synced_dj.set_latency(kFixedMs, false);
+    synced_dj.set_effective_buffer_ms(kFixedMs, true);
+
+    constexpr uint32_t kStepFrames = 48;  // 1 ms blocks
+    std::vector<float> in_blk(kStepFrames, 0.0f);
+    std::vector<float> out_blk(kStepFrames, 0.0f);
+    float* out_ptrs[1] = {out_blk.data()};
+    uint64_t audio_imp_us = 0;
+    uint64_t midi_imp_us = 0;
+
+    for (uint32_t step = 0; step < 120; ++step) {
+        const uint64_t master_us = uint64_t(int64_t(sim_now) + kMasterOffsetUs);
+        const uint64_t media_sample = master_us * kRate / 1'000'000;
+        std::fill(in_blk.begin(), in_blk.end(), 0.0f);
+        if (step == 40) {
+            in_blk[0] = 0.9f;
+            TimedMidiEvent ev{};
+            ev.event_seq = 1;
+            ev.media_ts_us = master_us;
+            ev.status = 0x90;
+            ev.data1 = 60;
+            ev.data2 = 127;
+            // Deliver MIDI with +10 ms Wi-Fi jitter
+            synced_dj.push(ev, sim_now + 10'000, true, kMasterOffsetUs);
+        }
+        audio_tx.push_channel(0, in_blk.data(), kStepFrames, AudioFormat2::kFloat32, media_sample, uint32_t(sim_now));
+
+        while (!net_q.empty() && net_q.begin()->first <= sim_now) {
+            auto pkt = std::move(net_q.begin()->second);
+            net_q.erase(net_q.begin());
+            PacketHeader ph{};
+            const uint8_t* pl = nullptr;
+            if (parse_packet(pkt.data(), pkt.size(), ph, &pl) == PacketParseStatus::kOk &&
+                ph.type == PacketType::kAudio2) {
+                audio_rx.on_packet(ph, pl, ph.payload_size, sim_now);
+            }
+        }
+        audio_mat.pop_planar(clk, sim_now, out_ptrs, 1, kStepFrames);
+        for (uint32_t i = 0; i < kStepFrames; ++i) {
+            if (audio_imp_us == 0 && out_blk[i] > 0.4f) {
+                audio_imp_us = sim_now + (uint64_t(i) * 1'000'000 / kRate);
+            }
+        }
+        if (audio_mat.playout_cursor() > 0.0) {
+            synced_dj.pop_due_media(audio_mat.playout_media_ts_us(), [&](const TimedMidiEvent& ev, bool) {
+                if (ev.status == 0x90 && midi_imp_us == 0) midi_imp_us = sim_now;
+            });
+        }
+        sim_now += 1000;
+    }
+
+    const int64_t av_delta_us = std::llabs(int64_t(midi_imp_us) - int64_t(audio_imp_us));
+    std::printf("    [MIDI Static Playout 15ms Fixed | 0-12ms Wi-Fi jitter] delay=%.2f..%.2f ms | "
+                "max_interval_err=%.2f ms | audio_midi_delta=%.2f ms | late=%llu\n",
+                min_delay_ms, max_delay_ms, max_interval_err_ms, double(av_delta_us) / 1000.0,
+                static_cast<unsigned long long>(dj_st.late_events));
+
+    CHECK(audio_imp_us > 0 && midi_imp_us > 0);
+    CHECK(av_delta_us <= 1000);  // 0 ms skew (within 1 ms block quantization)
 }
