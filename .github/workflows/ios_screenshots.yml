@@ -9,7 +9,7 @@ on:
 
 jobs:
   screenshots:
-    runs-on: macos-26
+    runs-on: macos-26-intel   # arm64 macOS runners are often saturated; the simulator render does not depend on the arch
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
