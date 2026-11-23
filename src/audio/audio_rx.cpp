@@ -19,6 +19,69 @@ constexpr int kImaStepTable[89] = {
     2272,  2499,  2749,  3024,  3327,  3660,  4026,  4428,  4871,  5358,  5894,  6484,  7132,  7845,  8630,
     9493,  10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767};
 
+constexpr int kImaIndexTable5[16] = {-1, -1, -1, -1, -1, -1, -1, -1, 1, 2, 3, 4, 5, 6, 7, 8};
+
+void decode_adpcm4_samples(const uint8_t* in, uint32_t m, float* out) {
+    if (m == 0) return;
+    int pred = int16_t(uint16_t(in[0]) | (uint16_t(in[1]) << 8));
+    int idx = std::clamp<int>(in[2], 0, 88);
+    out[0] = float(pred) * (1.0f / 32768.0f);
+    for (uint32_t i = 1; i < m; ++i) {
+        const uint8_t packed = in[4 + (i - 1) / 2];
+        const uint8_t code = ((i - 1) & 1u) == 0u ? (packed & 0x0Fu) : (packed >> 4);
+        int step = kImaStepTable[idx];
+        int diff = step >> 3;
+        if (code & 4) diff += step;
+        if (code & 2) diff += step >> 1;
+        if (code & 1) diff += step >> 2;
+        pred = std::clamp(pred + ((code & 8) ? -diff : diff), -32768, 32767);
+        idx = std::clamp(idx + kImaIndexTable[code], 0, 88);
+        out[i] = float(pred) * (1.0f / 32768.0f);
+    }
+}
+
+void decode_adpcm5_samples(const uint8_t* in, uint32_t m, float* out) {
+    if (m == 0) return;
+    int pred = int16_t(uint16_t(in[0]) | (uint16_t(in[1]) << 8));
+    int idx = std::clamp<int>(in[2], 0, 88);
+    out[0] = float(pred) * (1.0f / 32768.0f);
+    size_t bit_pos = 0;
+    for (uint32_t i = 1; i < m; ++i) {
+        const size_t byte_i = 4 + (bit_pos >> 3);
+        const unsigned shift = unsigned(bit_pos & 7u);
+        uint16_t raw = uint16_t(in[byte_i]) >> shift;
+        if (shift > 3u) raw |= uint16_t(in[byte_i + 1]) << (8u - shift);
+        const uint8_t code = uint8_t(raw & 0x1Fu);
+        int step = kImaStepTable[idx];
+        int diff = step >> 4;
+        if (code & 8) diff += step;
+        if (code & 4) diff += step >> 1;
+        if (code & 2) diff += step >> 2;
+        if (code & 1) diff += step >> 3;
+        pred = std::clamp(pred + ((code & 16) ? -diff : diff), -32768, 32767);
+        idx = std::clamp(idx + kImaIndexTable5[code & 15], 0, 88);
+        out[i] = float(pred) * (1.0f / 32768.0f);
+        bit_pos += 5;
+    }
+}
+
+void upsample_linear(const float* dec, uint32_t m, uint32_t n, uint32_t factor, float* out) {
+    if (m == 0 || n == 0) return;
+    if (m == 1) {
+        std::fill(out, out + n, dec[0]);
+        return;
+    }
+    const float inv_f = 1.0f / float(factor);
+    for (uint32_t i = 0; i < n; ++i) {
+        const float pos = (float(i) + 0.5f) * inv_f - 0.5f;
+        const float clamped = std::clamp(pos, 0.0f, float(m - 1));
+        const uint32_t k0 = uint32_t(clamped);
+        const uint32_t k1 = std::min(m - 1, k0 + 1u);
+        const float frac = clamped - float(k0);
+        out[i] = dec[k0] + (dec[k1] - dec[k0]) * frac;
+    }
+}
+
 void decode_to_float(AudioFormat2 fmt, const uint8_t* in, uint32_t n, float* out) {
     switch (fmt) {
         case AudioFormat2::kPcm16:
@@ -38,23 +101,34 @@ void decode_to_float(AudioFormat2 fmt, const uint8_t* in, uint32_t n, float* out
         case AudioFormat2::kFloat32:
             std::memcpy(out, in, size_t(n) * 4);
             break;
-        case AudioFormat2::kAdpcm4: {
-            if (n == 0) break;
-            int pred = int16_t(uint16_t(in[0]) | (uint16_t(in[1]) << 8));
-            int idx = std::clamp<int>(in[2], 0, 88);
-            out[0] = float(pred) * (1.0f / 32768.0f);
-            for (uint32_t i = 1; i < n; ++i) {
-                const uint8_t packed = in[4 + (i - 1) / 2];
-                const uint8_t code = ((i - 1) & 1u) == 0u ? (packed & 0x0Fu) : (packed >> 4);
-                int step = kImaStepTable[idx];
-                int diff = step >> 3;
-                if (code & 4) diff += step;
-                if (code & 2) diff += step >> 1;
-                if (code & 1) diff += step >> 2;
-                pred = std::clamp(pred + ((code & 8) ? -diff : diff), -32768, 32767);
-                idx = std::clamp(idx + kImaIndexTable[code], 0, 88);
-                out[i] = float(pred) * (1.0f / 32768.0f);
-            }
+        case AudioFormat2::kAdpcm4:
+            decode_adpcm4_samples(in, n, out);
+            break;
+        case AudioFormat2::kAdpcm5:
+            decode_adpcm5_samples(in, n, out);
+            break;
+        case AudioFormat2::kAdpcm128: {
+            const uint32_t m = (n + 1u) / 2u;
+            static thread_local std::vector<float> dec;
+            dec.resize(m);
+            decode_adpcm5_samples(in, m, dec.data());
+            upsample_linear(dec.data(), m, n, 2u, out);
+            break;
+        }
+        case AudioFormat2::kAdpcm96: {
+            const uint32_t m = (n + 1u) / 2u;
+            static thread_local std::vector<float> dec;
+            dec.resize(m);
+            decode_adpcm4_samples(in, m, dec.data());
+            upsample_linear(dec.data(), m, n, 2u, out);
+            break;
+        }
+        case AudioFormat2::kAdpcm64: {
+            const uint32_t m = (n + 2u) / 3u;
+            static thread_local std::vector<float> dec;
+            dec.resize(m);
+            decode_adpcm4_samples(in, m, dec.data());
+            upsample_linear(dec.data(), m, n, 3u, out);
             break;
         }
     }

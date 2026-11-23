@@ -16,11 +16,25 @@
 namespace lv {
 
 enum class AudioCodecProfile : uint8_t {
-    kPcm32F    = 0,  // Uncompressed 32-bit float (4 B/sample, ~98 Mbps @ 64ch 48kHz)
-    kPcm24     = 1,  // Lossless 24-bit packed PCM (3 B/sample, ~73 Mbps, -25%)
-    kPcm16     = 2,  // Compact 16-bit PCM (2 B/sample, ~49 Mbps, -50%)
-    kOpusAdpcm = 3,  // Ultra-Light 4-bit IMA-ADPCM (~12.5 Mbps, -85%, zero external deps)
+    kPcm32F     = 0,  // Uncompressed 32-bit float (Lossless)
+    kPcm24      = 1,  // Lossless 24-bit packed PCM (-25%)
+    kPcm16      = 2,  // Compact 16-bit PCM (-50%)
+    kOpusAdpcm  = 3,  // 192 kbps/ch 4-bit IMA-ADPCM @ 48 kHz
+    kBitrate256 = 4,  // 256 kbps/ch 5-bit IMA-ADPCM @ 48 kHz
+    kBitrate192 = 5,  // 192 kbps/ch 4-bit IMA-ADPCM @ 48 kHz
+    kBitrate128 = 6,  // 128 kbps/ch 5-bit IMA-ADPCM @ 24 kHz
+    kBitrate96  = 7,  // 96 kbps/ch 4-bit IMA-ADPCM @ 24 kHz
+    kBitrate64  = 8,  // 64 kbps/ch 4-bit IMA-ADPCM @ 16 kHz
 };
+
+inline AudioCodecProfile audio_codec_profile_from_bitrate(int kbps_per_ch) {
+    if (kbps_per_ch <= 0) return AudioCodecProfile::kPcm32F;
+    if (kbps_per_ch >= 224) return AudioCodecProfile::kBitrate256;
+    if (kbps_per_ch >= 160) return AudioCodecProfile::kBitrate192;
+    if (kbps_per_ch >= 112) return AudioCodecProfile::kBitrate128;
+    if (kbps_per_ch >= 80) return AudioCodecProfile::kBitrate96;
+    return AudioCodecProfile::kBitrate64;
+}
 
 struct AudioTxStats {
     uint64_t packets_sent = 0;
@@ -47,8 +61,9 @@ public:
     // A receiver that sees it change resets FEC / dedup / jitter state and re-syncs the MasterClock.
     void set_epoch(uint16_t epoch) { epoch_.store(epoch, std::memory_order_relaxed); }
     uint16_t epoch() const { return epoch_.load(std::memory_order_relaxed); }
-    // Live-switchable audio compression profile (PCM32F / PCM24 / PCM16 / Ultra-Light ADPCM).
+    // Live-switchable audio compression profile or target bitrate per channel (0=Lossless, 256/192/128/96/64 kbps).
     void set_codec_profile(AudioCodecProfile p) { codec_profile_.store(uint8_t(p), std::memory_order_release); }
+    void set_bitrate_kbps_per_ch(int kbps) { set_codec_profile(audio_codec_profile_from_bitrate(kbps)); }
     AudioCodecProfile codec_profile() const { return AudioCodecProfile(codec_profile_.load(std::memory_order_acquire)); }
     // Convenience wrapper for 24-bit packed PCM compression.
     void set_wire_pcm24(bool enabled) {

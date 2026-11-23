@@ -137,7 +137,11 @@ enum class AudioFormat2 : uint8_t {
     kPcm16 = 1,
     kPcm24Packed = 2,  // 3 bytes / sample, little-endian signed
     kFloat32 = 3,
-    kAdpcm4 = 4,       // block-independent 4-bit IMA-ADPCM (4B header + ceil((n-1)/2) B, ~8x vs Float32)
+    kAdpcm4 = 4,       // block-independent 4-bit IMA-ADPCM @ 48 kHz (192 kbps/ch)
+    kAdpcm5 = 5,       // block-independent 5-bit IMA-ADPCM @ 48 kHz (256 kbps/ch)
+    kAdpcm128 = 6,     // 2:1 decimated 5-bit IMA-ADPCM @ 24 kHz (128 kbps/ch)
+    kAdpcm96 = 7,      // 2:1 decimated 4-bit IMA-ADPCM @ 24 kHz (96 kbps/ch)
+    kAdpcm64 = 8,      // 3:1 decimated 4-bit IMA-ADPCM @ 16 kHz (64 kbps/ch)
 };
 
 enum AudioFlags2 : uint8_t {
@@ -147,7 +151,12 @@ enum AudioFlags2 : uint8_t {
 };
 
 inline size_t audio2_bytes_per_sample(AudioFormat2 f) {
-    return f == AudioFormat2::kPcm16 ? 2 : (f == AudioFormat2::kPcm24Packed ? 3 : (f == AudioFormat2::kAdpcm4 ? 1 : 4));
+    switch (f) {
+        case AudioFormat2::kPcm16:       return 2;
+        case AudioFormat2::kPcm24Packed: return 3;
+        case AudioFormat2::kFloat32:     return 4;
+        default:                         return 1;
+    }
 }
 
 inline size_t audio2_payload_bytes(AudioFormat2 f, uint32_t num_samples) {
@@ -156,7 +165,20 @@ inline size_t audio2_payload_bytes(AudioFormat2 f, uint32_t num_samples) {
         case AudioFormat2::kPcm16:       return size_t(num_samples) * 2;
         case AudioFormat2::kPcm24Packed: return size_t(num_samples) * 3;
         case AudioFormat2::kFloat32:     return size_t(num_samples) * 4;
-        case AudioFormat2::kAdpcm4:      return 4u + (num_samples > 1 ? (size_t(num_samples - 1) + 1) / 2 : 0u);
+        case AudioFormat2::kAdpcm4:      return 4u + (num_samples > 1 ? (size_t(num_samples - 1) + 1u) / 2u : 0u);
+        case AudioFormat2::kAdpcm5:      return 4u + (num_samples > 1 ? (size_t(num_samples - 1) * 5u + 7u) / 8u : 0u);
+        case AudioFormat2::kAdpcm128: {
+            const uint32_t m = (num_samples + 1u) / 2u;
+            return 4u + (m > 1 ? (size_t(m - 1) * 5u + 7u) / 8u : 0u);
+        }
+        case AudioFormat2::kAdpcm96: {
+            const uint32_t m = (num_samples + 1u) / 2u;
+            return 4u + (m > 1 ? (size_t(m - 1) + 1u) / 2u : 0u);
+        }
+        case AudioFormat2::kAdpcm64: {
+            const uint32_t m = (num_samples + 2u) / 3u;
+            return 4u + (m > 1 ? (size_t(m - 1) + 1u) / 2u : 0u);
+        }
     }
     return size_t(num_samples) * 4;
 }

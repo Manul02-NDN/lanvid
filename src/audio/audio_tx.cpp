@@ -53,6 +53,61 @@ void encode_float32_to_adpcm4(const float* in, uint32_t n, std::vector<uint8_t>&
     }
 }
 
+constexpr int kImaIndexTable5[16] = {-1, -1, -1, -1, -1, -1, -1, -1, 1, 2, 3, 4, 5, 6, 7, 8};
+
+// Encodes `n` float32 samples into a self-contained 5-bit IMA-ADPCM block (4B header + ceil((n-1)*5/8) B).
+void encode_float32_to_adpcm5(const float* in, uint32_t n, std::vector<uint8_t>& out) {
+    out.assign(4u + (n > 1 ? (size_t(n - 1) * 5u + 7u) / 8u : 0u), 0);
+    if (n == 0) return;
+    auto to_i16 = [](float f) -> int {
+        const float c = std::clamp(f, -1.0f, 1.0f);
+        return std::clamp<int>(int(std::lrint(double(c) * 32767.0)), -32768, 32767);
+    };
+    int pred = to_i16(in[0]);
+    int idx = 0;
+    out[0] = uint8_t(pred & 0xFF);
+    out[1] = uint8_t((pred >> 8) & 0xFF);
+    out[2] = uint8_t(idx);
+    out[3] = 0;
+    size_t bit_pos = 0;
+    for (uint32_t i = 1; i < n; ++i) {
+        const int target = to_i16(in[i]);
+        int diff = target - pred;
+        uint8_t code = 0;
+        if (diff < 0) { code = 16; diff = -diff; }
+        int step = kImaStepTable[idx];
+        int vpdiff = step >> 4;
+        if (diff >= step) { code |= 8; diff -= step; vpdiff += step; }
+        step >>= 1;
+        if (diff >= step) { code |= 4; diff -= step; vpdiff += step; }
+        step >>= 1;
+        if (diff >= step) { code |= 2; diff -= step; vpdiff += step; }
+        step >>= 1;
+        if (diff >= step) { code |= 1; vpdiff += step; }
+        pred = std::clamp(pred + ((code & 16) ? -vpdiff : vpdiff), -32768, 32767);
+        idx = std::clamp(idx + kImaIndexTable5[code & 15], 0, 88);
+        const size_t byte_i = 4 + (bit_pos >> 3);
+        const unsigned shift = unsigned(bit_pos & 7u);
+        out[byte_i] |= uint8_t((code << shift) & 0xFFu);
+        if (shift > 3u && byte_i + 1 < out.size()) {
+            out[byte_i + 1] |= uint8_t(code >> (8u - shift));
+        }
+        bit_pos += 5;
+    }
+}
+
+void decimate_box(const float* in, uint32_t n, uint32_t factor, std::vector<float>& dec) {
+    const uint32_t m = (n + factor - 1u) / factor;
+    dec.resize(m);
+    for (uint32_t k = 0; k < m; ++k) {
+        const uint32_t s0 = k * factor;
+        const uint32_t s1 = std::min(n, s0 + factor);
+        float sum = 0.0f;
+        for (uint32_t j = s0; j < s1; ++j) sum += in[j];
+        dec[k] = sum / float(std::max<uint32_t>(1u, s1 - s0));
+    }
+}
+
 void encode_float32_wire(AudioCodecProfile prof, const float* in, uint32_t n,
                          AudioFormat2& out_fmt, std::vector<uint8_t>& out) {
     switch (prof) {
@@ -80,9 +135,36 @@ void encode_float32_wire(AudioCodecProfile prof, const float* in, uint32_t n,
             }
             return;
         }
-        case AudioCodecProfile::kOpusAdpcm: {
+        case AudioCodecProfile::kOpusAdpcm:
+        case AudioCodecProfile::kBitrate192: {
             out_fmt = AudioFormat2::kAdpcm4;
             encode_float32_to_adpcm4(in, n, out);
+            return;
+        }
+        case AudioCodecProfile::kBitrate256: {
+            out_fmt = AudioFormat2::kAdpcm5;
+            encode_float32_to_adpcm5(in, n, out);
+            return;
+        }
+        case AudioCodecProfile::kBitrate128: {
+            out_fmt = AudioFormat2::kAdpcm128;
+            static thread_local std::vector<float> dec;
+            decimate_box(in, n, 2u, dec);
+            encode_float32_to_adpcm5(dec.data(), uint32_t(dec.size()), out);
+            return;
+        }
+        case AudioCodecProfile::kBitrate96: {
+            out_fmt = AudioFormat2::kAdpcm96;
+            static thread_local std::vector<float> dec;
+            decimate_box(in, n, 2u, dec);
+            encode_float32_to_adpcm4(dec.data(), uint32_t(dec.size()), out);
+            return;
+        }
+        case AudioCodecProfile::kBitrate64: {
+            out_fmt = AudioFormat2::kAdpcm64;
+            static thread_local std::vector<float> dec;
+            decimate_box(in, n, 3u, dec);
+            encode_float32_to_adpcm4(dec.data(), uint32_t(dec.size()), out);
             return;
         }
         case AudioCodecProfile::kPcm32F:

@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+#include "audio/audio_rx.hpp"
+#include "audio/audio_tx.hpp"
 #include "audio/device_rate_adapter.hpp"
 #include "audio/multi_device_matrix.hpp"
 #include "audio/planar_ring.hpp"
@@ -458,4 +460,79 @@ TEST(udp_sender_receiver_audio_only_bitrate_and_routing) {
     CHECK(rx_st.audio_kbps > 1000.0);
     CHECK(rx_st.audio_packets_rx > 50);
     CHECK(rx_peak.load() > 0.10f);
+}
+
+TEST(audio2_bitrate_profiles_256_to_64_kbps) {
+    // Verifies real AUDIO2 encoding/decoding of a 440 Hz sine wave and exact wire bitrate scaling
+    // across Lossless (0), 256, 192, 128, 96, and 64 kbps per channel @ 48 kHz.
+    constexpr int kTargets[6] = {0, 256, 192, 128, 96, 64};
+    constexpr uint32_t kRate = 48000;
+    constexpr uint32_t kBlk = 240;  // 5 ms blocks
+    constexpr uint32_t kTotalBlocks = 200;  // 1.0 second
+    double prev_wire_kbps = 1e9;
+
+    for (int target : kTargets) {
+        lv::AudioSyncMatrix matrix(kRate);
+        lv::MasterClock mc;
+        mc.on_exchange(0, 0, 0, 0);
+        lv::AudioRxEngine rx(matrix, mc, [](const uint8_t*, size_t) { return true; });
+        rx.set_latency_ms(20);
+
+        uint64_t wire_payload_bytes = 0;
+        lv::AudioTxEngine tx(
+            kRate, 1400,
+            [&](const uint8_t* dgram, size_t len) -> bool {
+                lv::PacketHeader h{};
+                const uint8_t* body = nullptr;
+                if (lv::parse_packet(dgram, len, h, &body) == lv::PacketParseStatus::kOk &&
+                    h.type == lv::PacketType::kAudio2) {
+                    lv::AudioHeader2 ah{};
+                    if (lv::parse_audio_header2(body, h.payload_size, ah) &&
+                        !(ah.flags & lv::kAudioFlagFecParity) &&
+                        h.payload_size > lv::kAudioHeader2Size) {
+                        wire_payload_bytes += (h.payload_size - lv::kAudioHeader2Size);
+                    }
+                    rx.on_packet(h, body, h.payload_size, uint64_t(ah.wallclock_us));
+                }
+                return true;
+            });
+        tx.set_latency_ms(20);  // 5 ms chunks (200 pkt/s, standard AoIP Wi-Fi latency)
+        tx.set_bitrate_kbps_per_ch(target);
+
+        std::vector<float> src(kTotalBlocks * kBlk);
+        for (size_t i = 0; i < src.size(); ++i) {
+            src[i] = 0.5f * float(std::sin(2.0 * kPi * 440.0 * double(i) / double(kRate)));
+        }
+
+        std::vector<float> dec(kTotalBlocks * kBlk, 0.0f);
+        float* ptrs[1] = {dec.data()};
+        for (uint32_t b = 0; b < kTotalBlocks; ++b) {
+            const uint64_t t_us = uint64_t(b) * 5000ull;
+            tx.push_channel(0, src.data() + size_t(b) * kBlk, kBlk, lv::AudioFormat2::kFloat32,
+                            uint64_t(b) * kBlk, uint32_t(t_us));
+            ptrs[0] = dec.data() + size_t(b) * kBlk;
+            matrix.pop_planar(mc, t_us + 20000ull, ptrs, 1, kBlk);
+        }
+        tx.flush(kTotalBlocks * 5000u);
+
+        // Measure signal energy & frequency integrity on the steady-state middle segment
+        double energy = 0.0;
+        std::vector<float> mid(dec.begin() + 4800, dec.end() - 4800);
+        for (float v : mid) energy += double(v) * double(v);
+        const double rms = std::sqrt(energy / double(mid.size()));
+        const double f_est = estimate_freq(mid, double(kRate));
+        const double wire_kbps = double(wire_payload_bytes) * 8.0 / 1000.0;  // 1.0 s -> kbps
+
+        std::printf("    [AUDIO2 bitrate %4d kbps/ch] payload=%.1f kbps | rms=%.3f | tone=%.2f Hz\n",
+                    target, wire_kbps, rms, f_est);
+
+        CHECK(wire_kbps < prev_wire_kbps);
+        prev_wire_kbps = wire_kbps;
+        CHECK(rms > 0.25 && rms < 0.45);
+        CHECK(std::fabs(f_est - 440.0) < 2.0);
+        if (target > 0) {
+            // Verify payload bitrate sits closely around target (allowing 4B/block ADPCM header overhead)
+            CHECK(wire_kbps >= double(target) * 0.85 && wire_kbps <= double(target) * 1.10 + 14.0);
+        }
+    }
 }

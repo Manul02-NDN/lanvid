@@ -104,6 +104,7 @@ private:
     void draw_studio_config_panel();
     // Jitter-buffer latency mode (Fixed (Ethernet) / Adaptive (Wi-Fi)) + live "ACTUAL BUFFER" telemetry.
     void draw_latency_mode_controls(const char* id, float combo_width);
+    void draw_audio_bitrate_pills(const char* id);
     void draw_actual_buffer_line();
     void apply_latency_mode();
     void poll_latency_telemetry(uint64_t now);

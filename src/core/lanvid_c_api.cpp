@@ -973,9 +973,17 @@ int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms) 
 }
 
 int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec) {
-    if (!handle || codec < 0 || codec > 3) return LV_ERR_INVALID_ARG;
+    if (!handle || codec < 0 || codec > 8) return LV_ERR_INVALID_ARG;
     if (handle->sender) {
         handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(codec));
+    }
+    return LV_OK;
+}
+
+int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    if (handle->sender) {
+        handle->sender->set_audio_bitrate_kbps(kbps_per_ch);
     }
     return LV_OK;
 }
@@ -1451,7 +1459,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
     sc.dest_port = cfg->peer_port;
     r = lv_sdk_sender_start(h->tx, &sc);
     if (r != LV_OK) { h->stop_internal(); return r; }
-    lv_sender_set_audio_codec(h->tx, std::clamp<int>(cfg->audio_codec, 0, 3));
+    lv_sender_set_audio_codec(h->tx, std::clamp<int>(cfg->audio_codec, 0, 8));
 
     lv::ShmAudioHost::Config hc;
     hc.channels = uint32_t(cfg->num_channels);
@@ -1566,10 +1574,18 @@ int lv_duplex_set_adaptive_jitter(LvDuplexHandle* h, int enabled) {
 }
 
 int lv_duplex_set_audio_codec(LvDuplexHandle* h, int codec) {
-    if (!h || codec < 0 || codec > 3) return LV_ERR_INVALID_ARG;
+    if (!h || codec < 0 || codec > 8) return LV_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lk(h->api_mu);
     h->cfg.audio_codec = codec;
     if (h->tx) lv_sender_set_audio_codec(h->tx, codec);
+    return LV_OK;
+}
+
+int lv_duplex_set_audio_bitrate(LvDuplexHandle* h, int kbps_per_ch) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->cfg.audio_codec = int(lv::audio_codec_profile_from_bitrate(kbps_per_ch));
+    if (h->tx) lv_sender_set_audio_bitrate(h->tx, kbps_per_ch);
     return LV_OK;
 }
 
@@ -1773,7 +1789,11 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
     std::lock_guard<std::mutex> lk(handle->api_mu);
     handle->legacy_cfg = *cfg;
     if (handle->sender) {
-        handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(std::clamp(cfg->audio_codec, 0, 3)));
+        if (cfg->audio_bitrate_kbps > 0) {
+            handle->sender->set_audio_bitrate_kbps(cfg->audio_bitrate_kbps);
+        } else {
+            handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(std::clamp(cfg->audio_codec, 0, 8)));
+        }
     }
     if (cfg->sim_loss_pct > 0.0 && handle->sender) handle->sender->set_sim_loss_pct(cfg->sim_loss_pct);
 

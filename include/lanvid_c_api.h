@@ -110,7 +110,8 @@ typedef struct LvSenderConfig {
     uint32_t bitrate_kbps; /* target bitrate for H.264/H.265 (default 8000) */
     uint32_t keyframe_interval; /* IDR interval in frames (default 120) */
     int audio_only;        /* 1=disable video capture/encode/TX (AoIP + MasterClock only) */
-    int audio_codec;       /* 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM */
+    int audio_codec;       /* 0=PCM32F, 1=PCM24, 2=PCM16, 3=192k, 4=256k, 5=192k, 6=128k, 7=96k, 8=64k */
+    int audio_bitrate_kbps;/* 0=Lossless (use audio_codec), or 256/192/128/96/64 kbps per channel */
 } LvSenderConfig;
 
 typedef struct LvSenderStats {

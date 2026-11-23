@@ -112,6 +112,9 @@ public:
         audio_codec_ = p;
         if (atx_) atx_->set_codec_profile(p);
     }
+    void set_audio_bitrate_kbps(int kbps_per_ch) {
+        set_audio_codec_profile(audio_codec_profile_from_bitrate(kbps_per_ch));
+    }
     AudioCodecProfile audio_codec_profile() const { return atx_ ? atx_->codec_profile() : audio_codec_; }
     void flush_audio();
     // Current master-clock position in samples (sender epoch = construction time).

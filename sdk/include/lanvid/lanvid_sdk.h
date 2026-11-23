@@ -110,6 +110,8 @@ LV_API int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void*
 LV_API int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms);
 /* Live audio compression profile: 0=PCM32F, 1=PCM24 (-25%), 2=PCM16 (-50%), 3=Opus/ADPCM (-85%). */
 LV_API int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec);
+/* Live per-channel audio bitrate target: 0 = Lossless (PCM), or 256 / 192 / 128 / 96 / 64 kbps/ch. */
+LV_API int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch);
 /* Current master-clock position in samples (use to timestamp pushes from a DAW callback). */
 LV_API uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle);
 
@@ -182,6 +184,8 @@ LV_API void lv_duplex_stop(LvDuplexHandle* handle);
 LV_API int lv_duplex_get_stats(LvDuplexHandle* handle, LV_DuplexStats* out);
 LV_API int lv_duplex_set_latency_ms(LvDuplexHandle* handle, uint32_t latency_ms);
 LV_API int lv_duplex_set_audio_codec(LvDuplexHandle* handle, int codec);
+/* Live per-channel audio bitrate target for Duplex TX: 0 = Lossless, or 256 / 192 / 128 / 96 / 64 kbps/ch. */
+LV_API int lv_duplex_set_audio_bitrate(LvDuplexHandle* handle, int kbps_per_ch);
 
 /* 64x64 patchbay of the duplex bridge, live (5 ms crossfade). dst_of_src[s] = destination channel
  * (0..63) of source channel s, or -1 for unrouted; NULL resets to 1:1. */

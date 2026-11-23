@@ -28,9 +28,19 @@ constexpr const char* kAudioCodecItems[4] = {
     "Ultra-Light (Opus / ADPCM · -80%)"
 };
 
-double estimate_aoip_mbps(int channels, int codec) {
-    const double bits_per_sample = (codec == 0) ? 32.0 : (codec == 1 ? 24.0 : (codec == 2 ? 16.0 : 4.2));
-    return double(std::clamp(channels, 1, 64)) * 48000.0 * bits_per_sample / 1e6;
+double estimate_aoip_mbps(int channels, int codec, int bitrate_kbps = 0) {
+    const int ch = std::clamp(channels, 1, 64);
+    if (bitrate_kbps > 0) {
+        return double(ch) * double(bitrate_kbps) / 1000.0;
+    }
+    const double bits_per_sample = (codec == 0) ? 32.0
+                                                : (codec == 1 ? 24.0
+                                                              : (codec == 2 ? 16.0
+                                                                            : (codec == 4 ? 5.33
+                                                                                          : (codec == 6 ? 2.67
+                                                                                                        : (codec == 7 ? 2.0
+                                                                                                                      : (codec == 8 ? 1.33 : 4.0))))));
+    return double(ch) * 48000.0 * bits_per_sample / 1e6;
 }
 
 void noop_bus_callback(const LV_MultichannelAudioBlock*, void*) {}  // drives the playout clock + meters
@@ -755,7 +765,8 @@ void LanVidStudioApp::start_sender() {
     sc.audio_device_index = cfg_.audio_device_index;
     sc.audio_chunk_ms = cfg_.audio_chunk_ms;
     sc.audio_only = cfg_.audio_only ? 1 : 0;
-    sc.audio_codec = std::clamp(cfg_.audio_codec, 0, 3);
+    sc.audio_codec = std::clamp(cfg_.audio_codec, 0, 8);
+    sc.audio_bitrate_kbps = cfg_.audio_bitrate_kbps;
 
     LV_AudioBusConfig bus;
     lv_audio_bus_config_default(&bus);
@@ -952,11 +963,12 @@ void LanVidStudioApp::start_duplex() {
     dc.listen_port = uint16_t(std::clamp(cfg_.dpx_listen_port, 1024, 65535));
     dc.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
     dc.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
-    dc.audio_codec = std::clamp(cfg_.audio_codec, 0, 3);
+    dc.audio_codec = std::clamp(cfg_.audio_codec, 0, 8);
     dc.adaptive_jitter = cfg_.adaptive_jitter ? 1 : 0;
     const int rc = lv_duplex_start(duplex_, &dc);
     duplex_running_ = rc == LV_OK;
     if (duplex_running_) {
+        if (cfg_.audio_bitrate_kbps > 0) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
         lv_audio_set_tx_routing(duplex_, route_[0]);
         lv_audio_set_rx_routing(duplex_, route_[1]);
         toast_msg_ = "Duplex 64x64: DAW -> " + std::string(dpx_peer_buf_) + ":" + std::to_string(dc.peer_port) +
@@ -1108,13 +1120,8 @@ void LanVidStudioApp::draw_duplex_tab() {
     }
     draw_latency_mode_controls("DpxLatMode", ImGui::CalcItemWidth());
     draw_actual_buffer_line();
-    if (ImGui::Combo("Audio Compression", &cfg_.audio_codec, kAudioCodecItems, 4)) {
-        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
-        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
-        config_dirty_ = true;
-    }
-    ImGui::TextDisabled("Est. AoIP TX: %.1f Mbps (%d ch @ 48 kHz)",
-                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
+    ImGui::TextDisabled("Бітрейт аудіо на канал:");
+    draw_audio_bitrate_pills("DpxBitrate");
     if (ImGui::Checkbox("Audio Only (Disable Video)", &cfg_.audio_only)) {
         config_dirty_ = true;
     }
@@ -1479,6 +1486,59 @@ void LanVidStudioApp::draw_latency_mode_controls(const char* id, float combo_wid
     ImGui::PopID();
 }
 
+void LanVidStudioApp::draw_audio_bitrate_pills(const char* id) {
+    ImGui::PushID(id);
+    struct BitrateOpt {
+        int kbps;
+        const char* label;
+        const char* tip;
+    };
+    const BitrateOpt opts[6] = {
+        {0,   "Lossless", "Без стиснення (PCM 32-bit/24-bit, студійний еталон для Ethernet)"},
+        {256, "256 kbps", "Прозора студійна якість (5-bit ADPCM @ 48 кГц на канал)"},
+        {192, "192 kbps", "Оптимально для Wi-Fi 6 (4-bit IMA-ADPCM @ 48 кГц на канал)"},
+        {128, "128 kbps", "Збалансований потік (5-bit @ 24 кГц, низьке навантаження на Wi-Fi)"},
+        {96,  "96 kbps",  "Економний Wi-Fi (4-bit @ 24 кГц, стабільна передача)"},
+        {64,  "64 kbps",  "Максимальна економія трафіку (4-bit @ 16 кГц, для слабкого Wi-Fi)"},
+    };
+
+    const float avail_x = ImGui::GetContentRegionAvail().x;
+    float row_x = 0.0f;
+    for (int i = 0; i < 6; ++i) {
+        const float bw = (i == 0) ? 84.0f : 76.0f;
+        if (i > 0 && row_x + bw + 6.0f <= avail_x) {
+            ImGui::SameLine(0.0f, 6.0f);
+        } else if (i > 0) {
+            row_x = 0.0f;
+        }
+        const bool active = (cfg_.audio_bitrate_kbps == opts[i].kbps);
+        if (status_pill_button(opts[i].label, active, ImVec2(bw, 28.0f))) {
+            cfg_.audio_bitrate_kbps = opts[i].kbps;
+            if (cfg_.audio_bitrate_kbps == 0) {
+                if (cfg_.audio_codec > 3) cfg_.audio_codec = 0;
+                if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+                if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+            } else {
+                if (sender_) lv_sender_set_audio_bitrate(sender_, cfg_.audio_bitrate_kbps);
+                if (duplex_running_) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
+            }
+            config_dirty_ = true;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", opts[i].tip);
+        row_x += bw + 6.0f;
+    }
+
+    const double est_mbps = estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec, cfg_.audio_bitrate_kbps);
+    if (cfg_.audio_bitrate_kbps > 0) {
+        ImGui::TextDisabled("Бітрейт: %d кбіт/с на канал  ·  Загальний потік (%d кан.): ~%.1f Мбіт/с",
+                            cfg_.audio_bitrate_kbps, cfg_.aoip_channels, est_mbps);
+    } else {
+        ImGui::TextDisabled("Бітрейт: Lossless PCM  ·  Загальний потік (%d кан.): ~%.1f Мбіт/с",
+                            cfg_.aoip_channels, est_mbps);
+    }
+    ImGui::PopID();
+}
+
 void LanVidStudioApp::draw_studio_config_panel() {
     begin_glass_card("##StudioConfig", ImVec2(0, 0));
 
@@ -1580,14 +1640,8 @@ void LanVidStudioApp::draw_studio_config_panel() {
         config_dirty_ = true;
     }
 
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::Combo("##CfgAudioCodec", &cfg_.audio_codec, kAudioCodecItems, 4)) {
-        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
-        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
-        config_dirty_ = true;
-    }
-    ImGui::TextDisabled("Audio Compression · Est: %.1f Mbps (%d ch)",
-                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
+    ImGui::TextDisabled("Бітрейт аудіо на канал:");
+    draw_audio_bitrate_pills("CfgBitrate");
 
     if (ImGui::Checkbox("Feedback Loop Guard", &cfg_.matrix_feedback_guard)) {
         audio_matrix_.set_feedback_guard(cfg_.matrix_feedback_guard);
@@ -2269,13 +2323,8 @@ void LanVidStudioApp::draw_aoip_sender_controls() {
         if (sender_) lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
         config_dirty_ = true;
     }
-    if (ImGui::Combo("Audio Compression", &cfg_.audio_codec, kAudioCodecItems, 4)) {
-        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
-        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
-        config_dirty_ = true;
-    }
-    ImGui::TextDisabled("Est. AoIP: %.1f Mbps (%d ch @ 48 kHz)",
-                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
+    ImGui::TextDisabled("Бітрейт аудіо на канал:");
+    draw_audio_bitrate_pills("SndBitrate");
     ImGui::TextDisabled("2 мс — Ultra Low Latency  <->  2000 мс — Bulletproof");
     ImGui::TextWrapped("%s", latency_mode_label(cfg_.aoip_latency_ms));
     const char* src_items[] = {"Built-in Test Tone Generator", "Virtual Audio Device (ASIO / CoreAudio / PipeWire)"};
@@ -3360,14 +3409,13 @@ void LanVidStudioApp::draw_connect_tab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Quick status summary cards
-    begin_glass_card("##QuickSummary", ImVec2(0, 150.0f), true);
-    ImGui::TextColored(kColAccentPurp, "Поточна конфігурація");
-    ImGui::Spacing();
-    const char* q_names[4] = {"Максимальна (32-bit)", "Студійна (24-bit)", "Збалансована (16-bit)", "Економна (Wi-Fi)"};
-    ImGui::Text("Канали: %d кан. @ 48 кГц  ·  %s", cfg_.aoip_channels, q_names[std::clamp(cfg_.audio_codec, 0, 3)]);
-    ImGui::Text("Очікуваний трафік: ~%.1f Мбіт/с", est_mbps);
-    ImGui::Text("Режим затримки: %s (%d мс)",
+    // Quick status summary + instant bitrate selector
+    begin_glass_card("##QuickSummary", ImVec2(0, 210.0f), true);
+    ImGui::TextColored(kColAccentPurp, "Бітрейт кодування на канал");
+    draw_audio_bitrate_pills("ConnectBitrate");
+    ImGui::Separator();
+    ImGui::Text("Канали: %d кан. @ 48 кГц  ·  Режим: %s (%d мс)",
+                cfg_.aoip_channels,
                 cfg_.adaptive_jitter ? "Авто для Wi-Fi" : "Фіксована для кабелю", cfg_.aoip_latency_ms);
     ImGui::Text("Активні маршрути: %zu аудіо  ·  %zu MIDI",
                 audio_matrix_.crosspoints().size(), audio_matrix_.midi_crosspoints().size());
@@ -3583,35 +3631,36 @@ void LanVidStudioApp::draw_settings_tab() {
     const float col_gap = 14.0f;
     const float left_w = std::max(380.0f, (avail_w - col_gap) * 0.54f);
 
-    // ---- LEFT COLUMN: Audio Quality Cards + Channel Count Pills ----
+    // ---- LEFT COLUMN: Per-Channel Bitrate Pills + Lossless Quality Cards + Channel Count Pills ----
     ImGui::BeginGroup();
-    ImGui::TextColored(kColAccentPurp, "1. Якість звуку і трафік мережі");
-    ImGui::TextDisabled("Оберіть баланс між точністю звучання та навантаженням на Wi-Fi чи Ethernet");
+    ImGui::TextColored(kColAccentPurp, "1. Бітрейт кодування на канал (Lossless / kbps)");
+    ImGui::TextDisabled("Оберіть цільовий бітрейт на один канал — перемикається на льоту без обриву звуку");
+    ImGui::Spacing();
+    draw_audio_bitrate_pills("SettingsBitrate");
     ImGui::Spacing();
 
-    struct QualityCard {
-        int codec;
-        const char* title;
-        const char* desc;
-    };
-    const QualityCard qcards[4] = {
-        {0, "Максимальна (Без втрат 32-bit)", "Для кабелю Ethernet (~98 Мбіт/с на 64 кан.)"},
-        {1, "Студійна (24-bit)",              "Оптимально для швидкого Wi-Fi 6 (-25% трафіку)"},
-        {2, "Збалансована (16-bit)",          "Стабільно для звичайного Wi-Fi (-50% трафіку)"},
-        {3, "Економна (Стиснення для Wi-Fi)", "Мінімальне навантаження на мережу (-80% трафіку)"},
-    };
-    for (const auto& q : qcards) {
-        ImGui::PushID(q.codec);
-        if (selectable_choice_card("##QCard", q.title, q.desc, cfg_.audio_codec == q.codec, ImVec2(left_w, 60.0f))) {
-            cfg_.audio_codec = q.codec;
-            if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
-            if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
-            config_dirty_ = true;
+    if (cfg_.audio_bitrate_kbps == 0) {
+        struct QualityCard {
+            int codec;
+            const char* title;
+            const char* desc;
+        };
+        const QualityCard qcards[3] = {
+            {0, "Максимальна (Lossless 32-bit Float)", "Для кабелю Ethernet (~98 Мбіт/с на 64 кан.)"},
+            {1, "Студійна (Lossless 24-bit PCM)",      "Оптимально для швидкого Wi-Fi 6 (-25% трафіку)"},
+            {2, "Збалансована (PCM 16-bit)",           "Стабільно для звичайного Wi-Fi (-50% трафіку)"},
+        };
+        for (const auto& q : qcards) {
+            ImGui::PushID(q.codec);
+            if (selectable_choice_card("##QCard", q.title, q.desc, cfg_.audio_codec == q.codec, ImVec2(left_w, 56.0f))) {
+                cfg_.audio_codec = q.codec;
+                if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+                if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+                config_dirty_ = true;
+            }
+            ImGui::PopID();
         }
-        ImGui::PopID();
     }
-    ImGui::TextDisabled("Орієнтовний трафік для %d каналів: %.1f Мбіт/с",
-                        cfg_.aoip_channels, estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec));
 
     ImGui::Spacing();
     ImGui::Separator();

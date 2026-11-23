@@ -30,7 +30,8 @@ struct AppConfig {
 
     // 64-channel AoIP bus
     bool audio_only = false;   // true=disable video capture/encode/decode (same as CLI --audio-only)
-    int audio_codec = 0;       // 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM
+    int audio_codec = 0;       // 0=PCM32F, 1=PCM24, 2=PCM16, 3=192k, 4=256k, 5=192k, 6=128k, 7=96k, 8=64k
+    int audio_bitrate_kbps = 0;// 0=Lossless (PCM), or 256 / 192 / 128 / 96 / 64 kbps per channel
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
     int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
     int adaptive_jitter = 1;   // 1 = Adaptive (Wi-Fi) jitter buffer, 0 = Fixed (Ethernet / live monitoring)

@@ -275,6 +275,7 @@ bool load_app_config(AppConfig& cfg) {
     read_dbl(j, "audio_target_ms", cfg.audio_target_ms);
     read_bool(j, "audio_only", cfg.audio_only);
     read_int(j, "audio_codec", cfg.audio_codec);
+    read_int(j, "audio_bitrate_kbps", cfg.audio_bitrate_kbps);
     read_int(j, "aoip_channels", cfg.aoip_channels);
     read_int(j, "aoip_latency_ms", cfg.aoip_latency_ms);
     {
@@ -319,7 +320,11 @@ bool load_app_config(AppConfig& cfg) {
     cfg.aoip_channels = std::clamp(cfg.aoip_channels, 1, 64);
     cfg.aoip_latency_ms = std::clamp(cfg.aoip_latency_ms, 2, 2000);
     cfg.adaptive_jitter = cfg.adaptive_jitter != 0 ? 1 : 0;
-    cfg.audio_codec = std::clamp(cfg.audio_codec, 0, 3);
+    cfg.audio_codec = std::clamp(cfg.audio_codec, 0, 8);
+    if (cfg.audio_bitrate_kbps != 0 && cfg.audio_bitrate_kbps != 256 && cfg.audio_bitrate_kbps != 192 &&
+        cfg.audio_bitrate_kbps != 128 && cfg.audio_bitrate_kbps != 96 && cfg.audio_bitrate_kbps != 64) {
+        cfg.audio_bitrate_kbps = 0;
+    }
     cfg.aoip_source = std::clamp(cfg.aoip_source, 0, 1);
     cfg.aoip_output = std::clamp(cfg.aoip_output, 0, 1);
     cfg.dpx_peer_port = std::clamp(cfg.dpx_peer_port, 1024, 65535);
@@ -367,6 +372,7 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"audio_target_ms\": " << cfg.audio_target_ms << ",\n"
         << "  \"audio_only\": " << (cfg.audio_only ? "true" : "false") << ",\n"
         << "  \"audio_codec\": " << cfg.audio_codec << ",\n"
+        << "  \"audio_bitrate_kbps\": " << cfg.audio_bitrate_kbps << ",\n"
         << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"
         << "  \"aoip_latency_ms\": " << cfg.aoip_latency_ms << ",\n"
         << "  \"adaptive_jitter\": " << cfg.adaptive_jitter << ",\n"
