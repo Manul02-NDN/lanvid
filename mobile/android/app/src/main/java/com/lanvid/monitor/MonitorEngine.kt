@@ -85,19 +85,19 @@ object MonitorEngine {
 
     // ---- Stream / mixer / DSP (sent instantly) ----
 
-    fun setQuality(q: StreamQuality) {
+    fun changeQuality(q: StreamQuality) {
         quality = q
         prefs.edit().putString("quality", q.name).apply()
         if (connected != null) MonitorNative.nativeSetStream(handle, q.wireKbps, buffer.ms)
     }
 
-    fun setBuffer(b: MonitorBuffer) {
+    fun changeBuffer(b: MonitorBuffer) {
         buffer = b
         prefs.edit().putString("buffer", b.name).apply()
         if (connected != null) MonitorNative.nativeSetStream(handle, quality.wireKbps, b.ms)
     }
 
-    fun setClientName(n: String) {
+    fun changeClientName(n: String) {
         clientName = n.take(15)
         prefs.edit().putString("clientName", clientName).apply()
     }

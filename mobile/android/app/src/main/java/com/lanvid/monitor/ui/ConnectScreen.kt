@@ -137,7 +137,7 @@ fun ConnectScreen() {
 
         SectionCard("Цей телефон") {
             OutlinedTextField(
-                value = MonitorEngine.clientName, onValueChange = { MonitorEngine.setClientName(it) },
+                value = MonitorEngine.clientName, onValueChange = { MonitorEngine.changeClientName(it) },
                 label = { Text("Назва у списку LanVid Studio") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
             )
             Text("До 15 символів — так телефон підписаний у списку смартфонів на ПК.", color = Lv.muted, fontSize = 12.sp)

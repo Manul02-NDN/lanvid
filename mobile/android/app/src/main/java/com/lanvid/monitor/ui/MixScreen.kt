@@ -34,10 +34,10 @@ fun MixScreen() {
     Column(Modifier.fillMaxSize().padding(vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionCard("Моніторинговий стереопотік", Modifier.padding(horizontal = 16.dp)) {
             Text("Якість", color = Lv.muted, fontSize = 12.sp)
-            SegmentRow(StreamQuality.entries, MonitorEngine.quality, { it.label }) { MonitorEngine.setQuality(it) }
+            SegmentRow(StreamQuality.entries, MonitorEngine.quality, { it.label }) { MonitorEngine.changeQuality(it) }
             Text(MonitorEngine.quality.detail, color = Lv.muted, fontSize = 11.sp)
             Text("Буфер", color = Lv.muted, fontSize = 12.sp)
-            SegmentRow(MonitorBuffer.entries, MonitorEngine.buffer, { "${it.ms} мс" }) { MonitorEngine.setBuffer(it) }
+            SegmentRow(MonitorBuffer.entries, MonitorEngine.buffer, { "${it.ms} мс" }) { MonitorEngine.changeBuffer(it) }
         }
         when {
             MonitorEngine.connected == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
