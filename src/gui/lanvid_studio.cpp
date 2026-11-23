@@ -148,6 +148,8 @@ void LanVidStudioApp::refresh_devices() {
     loop_devs_ = list_audio_devices(true);
     mic_devs_ = list_audio_devices(false);
     asio_devs_ = list_external_asio_drivers(true);
+    sys_out_devs_ = list_system_audio_devices(true);   // macOS CoreAudio (empty on Windows/Linux)
+    sys_in_devs_ = list_system_audio_devices(false);
     ifaces_ = list_network_interfaces();
     local_lan_ip_ = "127.0.0.1";
     for (const auto& iface : ifaces_) {
@@ -580,7 +582,11 @@ void LanVidStudioApp::init_audio_matrix() {
         hp.id = 2;
         hp.type = MatrixSlotType::kSystemAudio;
         hp.role = MatrixSlotRole::kOutput;
+#if defined(__APPLE__)
+        hp.name = "Mac Headphones / Output (CoreAudio)";
+#else
         hp.name = "PC Headphones / Output";
+#endif
         hp.device_index = -1;
         hp.channels = 2;
         hp.buffer_size = cfg_.matrix_buffer_size;
@@ -682,6 +688,47 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
     ImGui::SameLine();
     if (ImGui::Button("Оновити")) refresh_devices();
 
+    auto add_sys_slot = [this](const SystemAudioDeviceEntry* d, MatrixSlotRole role) {
+        MatrixSlotConfig s{};
+        s.id = -1;
+        s.type = MatrixSlotType::kSystemAudio;
+        s.role = role;
+        s.name = d ? d->name : (role == MatrixSlotRole::kOutput ? "Default Output (CoreAudio)" : "Default Input (CoreAudio)");
+        s.device_id = d ? d->uid : "";  // "" = follow the macOS default device
+        s.device_index = -1;
+        s.channels = d ? std::clamp(d->channels, 1, 64) : 2;
+        s.buffer_size = cfg_.matrix_buffer_size;
+        audio_matrix_.add_slot(s);
+        config_dirty_ = true;
+    };
+#if defined(__APPLE__)
+    if (ImGui::BeginPopup("##AddOutDev")) {
+        ImGui::TextDisabled("CoreAudio виходи (динаміки / навушники / USB-інтерфейси), -> 48 кГц автоматично:");
+        if (ImGui::Selectable("Системний вихід за замовчуванням (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kOutput);
+        for (const auto& d : sys_out_devs_) {
+            char lbl[320];
+            std::snprintf(lbl, sizeof(lbl), "%s  (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
+                          d.is_default ? "  [за замовч.]" : "");
+            if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kOutput);
+        }
+        if (sys_out_devs_.empty()) ImGui::TextDisabled("Пристроїв не знайдено (натисніть «Оновити»)");
+        ImGui::TextDisabled("«LanVid Virtual 64ch» доступний через слот Virtual Bus.");
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopup("##AddInDev")) {
+        ImGui::TextDisabled("CoreAudio входи (мікрофон / Line-In / USB-інтерфейси), -> 48 кГц автоматично:");
+        if (ImGui::Selectable("Системний вхід за замовчуванням (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kInput);
+        for (const auto& d : sys_in_devs_) {
+            char lbl[320];
+            std::snprintf(lbl, sizeof(lbl), "%s  (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
+                          d.is_default ? "  [за замовч.]" : "");
+            if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kInput);
+        }
+        if (sys_in_devs_.empty()) ImGui::TextDisabled("Пристроїв не знайдено (натисніть «Оновити»)");
+        ImGui::TextDisabled("Потрібен дозвіл macOS на мікрофон для LanVid Studio.");
+        ImGui::EndPopup();
+    }
+#else
     if (ImGui::BeginPopup("##AddOutDev")) {
         ImGui::TextDisabled("WASAPI Виходи (навушники / звукові карти):");
         if (ImGui::Selectable("Системний вихід за замовчуванням (WASAPI)")) {
@@ -763,6 +810,7 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
         }
         ImGui::EndPopup();
     }
+#endif
 
     ImGui::Separator();
     slots = audio_matrix_.slots();

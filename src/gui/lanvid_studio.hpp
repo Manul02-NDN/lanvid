@@ -83,6 +83,8 @@ private:
     std::vector<AudioDeviceInfo> loop_devs_;
     std::vector<AudioDeviceInfo> mic_devs_;
     std::vector<AsioDriverEntry> asio_devs_;
+    std::vector<SystemAudioDeviceEntry> sys_out_devs_;  // CoreAudio outputs (macOS)
+    std::vector<SystemAudioDeviceEntry> sys_in_devs_;   // CoreAudio inputs (macOS)
     std::vector<NetInterfaceInfo> ifaces_;
     std::string local_lan_ip_ = "127.0.0.1";
 

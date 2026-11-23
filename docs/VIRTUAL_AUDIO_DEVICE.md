@@ -111,6 +111,29 @@ IP and ports; manual IP stays as fallback), start/stop, per-direction status, an
 *Channel Routing & Solo/Mute* block (TX/RX, src → dst editor, 1:1 / reverse presets, 8×8 M/S grid).
 Starting the duplex node releases the single-direction virtual-device bridges of the other tabs.
 
+## Multi-Device Audio Matrix on macOS (CoreAudio)
+
+The *Audio Matrix* tab's **+ Add Output Device** / **+ Add Input Device** list the Mac's CoreAudio
+devices (built-in speakers / headphones / microphone, USB and aggregate interfaces) with their
+channel count and nominal rate; *LanVid Virtual 64ch* is excluded because it is already the
+Virtual Bus (SHM) slot. Each System Audio slot runs an `AudioDeviceIOProc` on the device's
+real-time thread and converts between the device rate (44.1 / 88.2 / 96 kHz …) and the 48 kHz
+matrix with a streaming linear resampler (`src/audio/stream_resampler.hpp`, exact cross-block
+continuity, ±0.05 % drift trim around a 2-block ring fill). A device-rate change is picked up live.
+Inputs need the macOS microphone permission for *LanVid Studio.app*.
+
+On macOS `lanvid_app` builds as **`LanVid Studio.app`** (`NSHighResolutionCapable`,
+microphone / camera / local-network usage strings). Local install:
+
+```bash
+cmake --build build --target lanvid_app
+codesign --force --deep --sign - "build/LanVid Studio.app"
+ditto "build/LanVid Studio.app" "/Applications/LanVid Studio.app"
+```
+
+The bundle links SDL2 from Homebrew, so it runs on machines with `brew install sdl2`; it is not yet
+a self-contained, notarised distribution.
+
 ## Verification
 
 * `shm_audio_bus_64ch_lockfree_roundtrip`: two processes' worth of mappings, multi-threaded

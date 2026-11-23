@@ -191,6 +191,10 @@ else()
       "-framework CoreFoundation"
     )
     set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation")
+    if(NOT IOS)  # CoreAudio HAL: System Audio slots of the Multi-Device Audio Matrix
+      list(APPEND LV_PLATFORM_LIBS "-framework CoreAudio")
+      string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -framework CoreAudio")
+    endif()
   elseif(ANDROID)
     list(APPEND LV_CORE_SOURCES src/codec/hw_codec_android.cpp)
     list(APPEND LV_PLATFORM_LIBS log mediandk)
@@ -318,6 +322,14 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
       target_include_directories(lanvid_app PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
       target_link_libraries(lanvid_app PRIVATE lanvid_core OpenGL::GL)
       lanvid_set_flags(lanvid_app)
+      if(APPLE)
+        # macOS: "LanVid Studio.app" (Retina, microphone permission prompt for CoreAudio inputs).
+        set_target_properties(lanvid_app PROPERTIES
+          MACOSX_BUNDLE TRUE
+          OUTPUT_NAME "LanVid Studio"
+          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
+        target_compile_definitions(lanvid_app PRIVATE GL_SILENCE_DEPRECATION=1)
+      endif()
     endif()
   endif()
 endif()
@@ -396,6 +408,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_video_codecs.cpp
     tests/test_audio_duplex.cpp
     tests/test_multi_device_matrix.cpp
+    tests/test_coreaudio_matrix.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

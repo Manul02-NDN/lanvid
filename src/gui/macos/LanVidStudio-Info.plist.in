@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>uk</string>
+    <key>CFBundleDisplayName</key>
+    <string>LanVid Studio</string>
+    <key>CFBundleExecutable</key>
+    <string>LanVid Studio</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.lanvid.studio</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>LanVid Studio</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@PROJECT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@PROJECT_VERSION@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>LanVid Studio routes microphone / line-in / USB interface inputs into the 64-channel Audio Matrix and the LAN AoIP stream.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>LanVid Studio can stream a camera over the local network.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>LanVid Studio discovers and streams to LanVid nodes on your local network.</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>LanVid — MIT License</string>
+</dict>
+</plist>

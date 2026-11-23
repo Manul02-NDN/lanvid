@@ -8,6 +8,16 @@
 #include <thread>
 
 #include "common/clock.hpp"
+#include "audio/stream_resampler.hpp"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_OSX
+#define LV_MATRIX_COREAUDIO 1
+#include <CoreAudio/CoreAudio.h>
+#else
+#define LV_MATRIX_COREAUDIO 0
+#endif
 #ifdef LV_HAVE_SHM_BUS
 #include "audio/shm_audio_bridge.hpp"
 #endif
@@ -593,7 +603,303 @@ private:
 };
 #endif
 
+#if LV_MATRIX_COREAUDIO
+// ---------------------------------------------------------------------------------------------
+// macOS CoreAudio HAL backend for kSystemAudio slots (built-in speakers / headphones / USB, etc.).
+// An AudioDeviceIOProc runs on the device's real-time thread and moves audio between the device
+// (any nominal rate, any channel layout) and the slot's 48 kHz lock-free rings. Everything the
+// IOProc touches is preallocated; it only uses atomics, ring copies and arithmetic.
+
+const char* kLanVidHalUid = "LanVidVirtual64ch_UID";
+
+std::string cf_to_utf8(CFStringRef s) {
+    if (!s) return {};
+    char buf[512] = {};
+    if (CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8)) return buf;
+    return {};
+}
+
+std::string ca_device_string(AudioObjectID dev, AudioObjectPropertySelector sel) {
+    AudioObjectPropertyAddress a{sel, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    CFStringRef s = nullptr;
+    UInt32 sz = sizeof(s);
+    if (AudioObjectGetPropertyData(dev, &a, 0, nullptr, &sz, &s) != noErr || !s) return {};
+    std::string out = cf_to_utf8(s);
+    CFRelease(s);
+    return out;
+}
+
+int ca_device_channels(AudioObjectID dev, bool output) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyStreamConfiguration,
+                                 output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput,
+                                 kAudioObjectPropertyElementMain};
+    UInt32 sz = 0;
+    if (AudioObjectGetPropertyDataSize(dev, &a, 0, nullptr, &sz) != noErr || sz == 0) return 0;
+    std::vector<uint8_t> mem(sz);
+    auto* abl = reinterpret_cast<AudioBufferList*>(mem.data());
+    if (AudioObjectGetPropertyData(dev, &a, 0, nullptr, &sz, abl) != noErr) return 0;
+    int ch = 0;
+    for (UInt32 i = 0; i < abl->mNumberBuffers; ++i) ch += int(abl->mBuffers[i].mNumberChannels);
+    return ch;
+}
+
+double ca_device_rate(AudioObjectID dev) {
+    AudioObjectPropertyAddress a{kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal,
+                                 kAudioObjectPropertyElementMain};
+    Float64 r = 0;
+    UInt32 sz = sizeof(r);
+    if (AudioObjectGetPropertyData(dev, &a, 0, nullptr, &sz, &r) != noErr) return 0.0;
+    return r;
+}
+
+AudioObjectID ca_default_device(bool output) {
+    AudioObjectPropertyAddress a{output ? kAudioHardwarePropertyDefaultOutputDevice : kAudioHardwarePropertyDefaultInputDevice,
+                                 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    AudioObjectID dev = kAudioObjectUnknown;
+    UInt32 sz = sizeof(dev);
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, nullptr, &sz, &dev);
+    return dev;
+}
+
+AudioObjectID ca_device_for_uid(const std::string& uid) {
+    if (uid.empty()) return kAudioObjectUnknown;
+    CFStringRef cf = CFStringCreateWithCString(nullptr, uid.c_str(), kCFStringEncodingUTF8);
+    AudioObjectID dev = kAudioObjectUnknown;
+    AudioValueTranslation t{&cf, sizeof(cf), &dev, sizeof(dev)};
+    AudioObjectPropertyAddress a{kAudioHardwarePropertyDeviceForUID, kAudioObjectPropertyScopeGlobal,
+                                 kAudioObjectPropertyElementMain};
+    UInt32 sz = sizeof(t);
+    AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, nullptr, &sz, &t);
+    CFRelease(cf);
+    return dev;
+}
+
+class CoreAudioSlotBackend {
+public:
+    static constexpr uint32_t kMaxBlock = 4096;
+
+    ~CoreAudioSlotBackend() { stop(); }
+
+    // `uid` empty = current default device for the role. Duplex opens both directions of one device.
+    bool start(MatrixSlotRole role, const std::string& uid, int channels, int buffer_size,
+               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring) {
+        stop();
+        role_ = role;
+        want_out_ = role != MatrixSlotRole::kInput;
+        want_in_ = role != MatrixSlotRole::kOutput;
+        ch_ = std::clamp(channels, 1, kMatrixMaxChannels);
+        block_ = uint32_t(std::clamp(buffer_size, 32, 2048));
+        in_ring_ = in_ring;
+        out_ring_ = out_ring;
+        dev_ = uid.empty() ? ca_default_device(want_out_) : ca_device_for_uid(uid);
+        if (dev_ == kAudioObjectUnknown) { status_ = "CoreAudio: device not found"; return false; }
+        if (ca_device_string(dev_, kAudioDevicePropertyDeviceUID) == kLanVidHalUid) {
+            status_ = "CoreAudio: LanVid Virtual 64ch is the Virtual Bus slot";
+            dev_ = kAudioObjectUnknown;
+            return false;
+        }
+        name_ = ca_device_string(dev_, kAudioObjectPropertyName);
+        const double r = ca_device_rate(dev_);
+        rate_.store(r > 1000.0 ? r : 48000.0, std::memory_order_release);
+
+        // Preallocate everything the IOProc needs.
+        for (auto& v : tmp_a_) v.assign(kMaxBlock * 3, 0.0f);
+        for (auto& v : tmp_b_) v.assign(kMaxBlock * 3, 0.0f);
+        rs_out_.configure(ch_, kMaxBlock * 3);
+        rs_in_.configure(ch_, kMaxBlock * 3);
+
+        UInt32 bs = block_;
+        AudioObjectPropertyAddress ba{kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
+                                      kAudioObjectPropertyElementMain};
+        AudioObjectSetPropertyData(dev_, &ba, 0, nullptr, sizeof(bs), &bs);  // best effort
+
+        AudioObjectPropertyAddress ra{kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal,
+                                      kAudioObjectPropertyElementMain};
+        AudioObjectAddPropertyListener(dev_, &ra, &CoreAudioSlotBackend::on_rate_changed, this);
+        listening_ = true;
+
+        if (AudioDeviceCreateIOProcID(dev_, &CoreAudioSlotBackend::io_proc, this, &proc_) != noErr || !proc_) {
+            status_ = "CoreAudio: cannot create IOProc";
+            stop();
+            return false;
+        }
+        if (AudioDeviceStart(dev_, proc_) != noErr) {
+            status_ = "CoreAudio: device start failed";
+            stop();
+            return false;
+        }
+        running_.store(true, std::memory_order_release);
+        status_ = "CoreAudio Active";
+        return true;
+    }
+
+    void stop() {
+        if (dev_ != kAudioObjectUnknown && proc_) {
+            AudioDeviceStop(dev_, proc_);
+            AudioDeviceDestroyIOProcID(dev_, proc_);
+        }
+        if (dev_ != kAudioObjectUnknown && listening_) {
+            AudioObjectPropertyAddress ra{kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal,
+                                          kAudioObjectPropertyElementMain};
+            AudioObjectRemovePropertyListener(dev_, &ra, &CoreAudioSlotBackend::on_rate_changed, this);
+        }
+        listening_ = false;
+        proc_ = nullptr;
+        dev_ = kAudioObjectUnknown;
+        running_.store(false, std::memory_order_release);
+        callbacks_.store(0, std::memory_order_relaxed);
+    }
+
+    // Connected = the device is actually calling us back.
+    bool connected() const { return running_.load(std::memory_order_acquire) && callbacks_.load() > 0; }
+    uint32_t sample_rate() const { return uint32_t(rate_.load(std::memory_order_acquire) + 0.5); }
+    const std::string& device_name() const { return name_; }
+    const std::string& status() const { return status_; }
+    uint64_t callbacks() const { return callbacks_.load(std::memory_order_relaxed); }
+
+private:
+    static OSStatus on_rate_changed(AudioObjectID dev, UInt32, const AudioObjectPropertyAddress*, void* ud) {
+        auto* self = static_cast<CoreAudioSlotBackend*>(ud);
+        const double r = ca_device_rate(dev);
+        if (r > 1000.0) self->rate_.store(r, std::memory_order_release);
+        return noErr;
+    }
+
+    static OSStatus io_proc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList* in, const AudioTimeStamp*,
+                            AudioBufferList* out, const AudioTimeStamp*, void* ud) {
+        auto* self = static_cast<CoreAudioSlotBackend*>(ud);
+        self->callbacks_.fetch_add(1, std::memory_order_relaxed);
+        if (self->want_out_ && out && out->mNumberBuffers) self->render(out);
+        if (self->want_in_ && in && in->mNumberBuffers) self->capture(in);
+        return noErr;
+    }
+
+    // matrix (48 kHz) -> device
+    void render(AudioBufferList* out) {
+        const UInt32 nc0 = std::max<UInt32>(1, out->mBuffers[0].mNumberChannels);
+        const uint32_t n = std::min<uint32_t>(kMaxBlock, out->mBuffers[0].mDataByteSize / (sizeof(float) * nc0));
+        double ratio = double(kMatrixSampleRate) / rate_.load(std::memory_order_relaxed);
+        // Drift trim: keep the matrix->device ring around 2 blocks.
+        const uint32_t fill = out_ring_ ? out_ring_->available() : 0;
+        if (fill > 3 * block_) ratio *= 1.0005;
+        else if (fill < block_ / 2) ratio *= 0.9995;
+        float* a[kMatrixMaxChannels];
+        float* b[kMatrixMaxChannels];
+        for (int c = 0; c < ch_; ++c) { a[c] = tmp_a_[c].data(); b[c] = tmp_b_[c].data(); }
+        const uint32_t need = rs_out_.needed_for(n, ratio);
+        if (rs_out_.buffered() < need && out_ring_) {
+            const uint32_t pull = std::min<uint32_t>(need - rs_out_.buffered(), rs_out_.space());
+            out_ring_->read(a, uint32_t(ch_), pull, true);  // zero-padded on underrun
+            const float* ca[kMatrixMaxChannels];
+            for (int c = 0; c < ch_; ++c) ca[c] = a[c];
+            rs_out_.push(ca, ch_, pull);
+        }
+        const uint32_t got = rs_out_.produce(b, ch_, n, ratio);
+        for (int c = 0; c < ch_; ++c) if (got < n) std::memset(b[c] + got, 0, size_t(n - got) * sizeof(float));
+        // Scatter into the device's buffers (interleaved per buffer); extra device channels get silence.
+        int dev_ch = 0;
+        for (UInt32 bi = 0; bi < out->mNumberBuffers; ++bi) {
+            AudioBuffer& ab = out->mBuffers[bi];
+            float* d = static_cast<float*>(ab.mData);
+            const UInt32 nc = ab.mNumberChannels;
+            if (!d || nc == 0) continue;
+            const uint32_t frames = std::min<uint32_t>(n, ab.mDataByteSize / (sizeof(float) * nc));
+            for (UInt32 k = 0; k < nc; ++k, ++dev_ch) {
+                const float* src = dev_ch < ch_ ? b[dev_ch] : nullptr;
+                for (uint32_t i = 0; i < frames; ++i) d[size_t(i) * nc + k] = src ? src[i] : 0.0f;
+            }
+        }
+    }
+
+    // device -> matrix (48 kHz)
+    void capture(const AudioBufferList* in) {
+        const UInt32 nc0 = std::max<UInt32>(1, in->mBuffers[0].mNumberChannels);
+        const uint32_t n = std::min<uint32_t>(kMaxBlock, in->mBuffers[0].mDataByteSize / (sizeof(float) * nc0));
+        float* a[kMatrixMaxChannels];
+        float* b[kMatrixMaxChannels];
+        for (int c = 0; c < ch_; ++c) {
+            a[c] = tmp_a_[c].data() + kMaxBlock;  // separate region from render()'s use
+            b[c] = tmp_b_[c].data() + kMaxBlock;
+        }
+        // Gather slot channels from the device's (possibly several) interleaved buffers.
+        int dev_ch = 0;
+        for (int c = 0; c < ch_; ++c) std::memset(a[c], 0, size_t(n) * sizeof(float));
+        for (UInt32 bi = 0; bi < in->mNumberBuffers; ++bi) {
+            const AudioBuffer& ab = in->mBuffers[bi];
+            const float* d = static_cast<const float*>(ab.mData);
+            const UInt32 nc = ab.mNumberChannels;
+            if (nc == 0) continue;
+            const uint32_t frames = std::min<uint32_t>(n, ab.mDataByteSize / (sizeof(float) * nc));
+            for (UInt32 k = 0; k < nc; ++k, ++dev_ch) {
+                if (dev_ch >= ch_ || !d) continue;
+                for (uint32_t i = 0; i < frames; ++i) a[dev_ch][i] = d[size_t(i) * nc + k];
+            }
+        }
+        const float* ca[kMatrixMaxChannels];
+        for (int c = 0; c < ch_; ++c) ca[c] = a[c];
+        rs_in_.push(ca, ch_, n);
+        double ratio = rate_.load(std::memory_order_relaxed) / double(kMatrixSampleRate);
+        const uint32_t fill = in_ring_ ? in_ring_->available() : 0;
+        if (fill > 4 * block_) ratio *= 1.0005;       // mixer is slower than the device: emit less
+        else if (fill < block_) ratio *= 0.9995;      // mixer is faster: emit a little more
+        const uint32_t got = rs_in_.produce(b, ch_, kMaxBlock, ratio);
+        if (got && in_ring_) {
+            const float* cb[kMatrixMaxChannels];
+            for (int c = 0; c < ch_; ++c) cb[c] = b[c];
+            in_ring_->write(cb, uint32_t(ch_), got);
+        }
+    }
+
+    MatrixSlotRole role_ = MatrixSlotRole::kOutput;
+    bool want_out_ = true, want_in_ = false;
+    int ch_ = 2;
+    uint32_t block_ = 256;
+    LockFreePlanarRing* in_ring_ = nullptr;
+    LockFreePlanarRing* out_ring_ = nullptr;
+    AudioObjectID dev_ = kAudioObjectUnknown;
+    AudioDeviceIOProcID proc_ = nullptr;
+    bool listening_ = false;
+    std::string name_;
+    std::string status_ = "CoreAudio Stopped";
+    std::atomic<double> rate_{48000.0};
+    std::atomic<bool> running_{false};
+    std::atomic<uint64_t> callbacks_{0};
+    StreamResampler rs_out_, rs_in_;
+    std::array<std::vector<float>, kMatrixMaxChannels> tmp_a_, tmp_b_;
+};
+#endif  // LV_MATRIX_COREAUDIO
+
 }  // namespace
+
+std::vector<SystemAudioDeviceEntry> list_system_audio_devices(bool output, bool exclude_lanvid) {
+    std::vector<SystemAudioDeviceEntry> out;
+#if LV_MATRIX_COREAUDIO
+    AudioObjectPropertyAddress a{kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                 kAudioObjectPropertyElementMain};
+    UInt32 sz = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &a, 0, nullptr, &sz) != noErr || sz == 0) return out;
+    std::vector<AudioObjectID> ids(sz / sizeof(AudioObjectID));
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, nullptr, &sz, ids.data()) != noErr) return out;
+    const AudioObjectID def = ca_default_device(output);
+    for (AudioObjectID dev : ids) {
+        const int ch = ca_device_channels(dev, output);
+        if (ch <= 0) continue;
+        SystemAudioDeviceEntry e;
+        e.uid = ca_device_string(dev, kAudioDevicePropertyDeviceUID);
+        if (exclude_lanvid && e.uid == kLanVidHalUid) continue;
+        e.name = ca_device_string(dev, kAudioObjectPropertyName);
+        e.channels = ch;
+        e.sample_rate = uint32_t(ca_device_rate(dev) + 0.5);
+        e.is_default = dev == def;
+        out.push_back(std::move(e));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const auto& x, const auto& y) { return x.is_default > y.is_default; });
+#else
+    (void)output;
+    (void)exclude_lanvid;
+#endif
+    return out;
+}
 
 std::vector<AsioDriverEntry> list_external_asio_drivers(bool exclude_lanvid) {
     std::vector<AsioDriverEntry> out;
@@ -643,6 +949,9 @@ struct MultiDeviceAudioMatrix::Impl {
 #if defined(_WIN32)
         std::unique_ptr<WasapiSlotBackend> wasapi;
         std::unique_ptr<ExternalAsioSlotBackend> asio;
+#endif
+#if LV_MATRIX_COREAUDIO
+        std::unique_ptr<CoreAudioSlotBackend> coreaudio;
 #endif
     };
 
@@ -696,9 +1005,19 @@ struct MultiDeviceAudioMatrix::Impl {
             st.asio->start(st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size, &st.in_ring, &st.out_ring);
         }
 #endif
+#if LV_MATRIX_COREAUDIO
+        if (st.cfg.type == MatrixSlotType::kSystemAudio) {
+            st.coreaudio = std::make_unique<CoreAudioSlotBackend>();
+            st.coreaudio->start(st.cfg.role, st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size,
+                                &st.in_ring, &st.out_ring);
+        }
+#endif
     }
 
     void stop_slot_backend(SlotState& st) {
+#if LV_MATRIX_COREAUDIO
+        if (st.coreaudio) { st.coreaudio->stop(); st.coreaudio.reset(); }
+#endif
 #if defined(_WIN32)
         if (st.wasapi) { st.wasapi->stop(); st.wasapi.reset(); }
         if (st.asio) { st.asio->stop(); st.asio.reset(); }
@@ -1103,6 +1422,13 @@ MatrixSlotRuntimeStatus MultiDeviceAudioMatrix::slot_status(int slot_id) const {
         out.connected = st.wasapi && st.wasapi->connected();
         out.device_sample_rate = st.wasapi ? st.wasapi->sample_rate() : kMatrixSampleRate;
         out.status_text = out.connected ? "WASAPI Active" : "WASAPI Stopped";
+#elif LV_MATRIX_COREAUDIO
+        out.connected = st.coreaudio && st.coreaudio->connected();
+        out.device_sample_rate = st.coreaudio ? st.coreaudio->sample_rate() : kMatrixSampleRate;
+        if (!st.coreaudio) out.status_text = "CoreAudio Stopped";
+        else if (out.connected) out.status_text = "CoreAudio Active: " + st.coreaudio->device_name() + " @ " +
+                                                  std::to_string(out.device_sample_rate) + " Hz -> 48 kHz";
+        else out.status_text = st.coreaudio->status();
 #else
         out.status_text = "System Audio (stub)";
 #endif

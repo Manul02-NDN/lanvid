@@ -3,7 +3,8 @@
 // 2..64 channels per slot):
 //   - Slot Virtual Bus (LanVidAudioBus_v1 SHM v2: 64 In / 64 Out to DAW)
 //   - Slot Network AoIP (64 In / 64 Out from/to Sender, Receiver or Duplex node)
-//   - Slot System Audio (Windows WASAPI Shared Mode render/capture with 44.1/96 -> 48 kHz resampler + drift guard)
+//   - Slot System Audio (Windows WASAPI Shared Mode / macOS CoreAudio HAL render/capture with
+//     44.1/88.2/96 -> 48 kHz resampler + drift guard)
 //   - Slot External ASIO (Windows 64-bit COM IASIO host for any installed third-party ASIO driver)
 //
 // Supports 1-to-many fan-out, many-to-1 summing with per-crosspoint gain_db & mute,
@@ -26,7 +27,7 @@ constexpr uint32_t kMatrixSampleRate = 48000;
 enum class MatrixSlotType : int {
     kVirtualBus = 0,   // LanVidAudioBus_v1 SHM v2 (DAW 64ch)
     kNetworkAoip = 1,  // Network AoIP 64ch stream
-    kSystemAudio = 2,  // OS audio device (WASAPI render/capture)
+    kSystemAudio = 2,  // OS audio device (WASAPI / CoreAudio render/capture)
     kExternalAsio = 3  // Third-party Windows ASIO driver
 };
 
@@ -79,6 +80,20 @@ enum class CrosspointResult {
     kInvalidSlotOrChannel = 1,
     kBlockedFeedbackLoop = 2
 };
+
+// Physical OS audio device for kSystemAudio slots (macOS CoreAudio; empty elsewhere — Windows uses
+// the WASAPI endpoint lists). `uid` goes into MatrixSlotConfig::device_id ("" = system default).
+struct SystemAudioDeviceEntry {
+    std::string name;
+    std::string uid;
+    int channels = 0;           // channels in the requested direction
+    uint32_t sample_rate = 0;   // nominal device rate (converted to/from 48 kHz by the matrix)
+    bool is_default = false;
+};
+
+// Lists CoreAudio output (output=true) or input devices. Excludes "LanVid Virtual 64ch" by default:
+// it is already reachable through the Virtual Bus (SHM) slot and opening it twice would loop.
+std::vector<SystemAudioDeviceEntry> list_system_audio_devices(bool output, bool exclude_lanvid = true);
 
 // Enumerates installed 64-bit ASIO drivers from HKLM\SOFTWARE\ASIO (Windows; empty on UNIX).
 // Excludes "LanVid Virtual ASIO" by default to prevent recursive self-hosting.
