@@ -135,6 +135,7 @@ void LanVidStudioApp::init() {
 
     sender_ = lv_sender_create();
     receiver_ = lv_receiver_create();
+    wire_network_midi();
     if (host_.create_texture) {
         sender_tex_ = host_.create_texture(host_.ctx);
         receiver_tex_ = host_.create_texture(host_.ctx);
@@ -188,6 +189,34 @@ void LanVidStudioApp::shutdown() {
     sync_matrix_to_config();
     save_app_config(cfg_);
     lv_shutdown();
+}
+
+// MIDI2 over IP <-> Audio & MIDI Matrix:
+//   matrix "Network MIDI TX" slot -> duplex node (if running) or sender -> peer
+//   peer -> receiver / duplex -> matrix "Network MIDI RX" slot -> crosspoints -> CoreMIDI / WinMM outputs
+//   (e.g. "LanVid Virtual MIDI Out" into the DAW)
+void LanVidStudioApp::wire_network_midi() {
+    audio_matrix_.set_midi_sink([this](int dst_slot, uint8_t st, uint8_t d1, uint8_t d2, uint8_t port, uint64_t) {
+        bool to_net = false;
+        for (const auto& s : audio_matrix_.midi_slots())
+            if (s.id == dst_slot && s.type == MidiSlotType::kNetworkMidiTx) to_net = true;
+        if (!to_net) return;  // OS MIDI outputs are driven by the matrix itself
+        if (duplex_running_ && duplex_) lv_duplex_send_midi(duplex_, st, d1, d2, port, 0);
+        else if (sender_running_ && sender_) lv_sender_push_midi(sender_, st, d1, d2, port, 0);
+    });
+    if (receiver_) lv_receiver_set_midi_callback(receiver_, &LanVidStudioApp::on_network_midi, this);
+    if (duplex_) lv_duplex_set_midi_callback(duplex_, &LanVidStudioApp::on_network_midi, this);
+}
+
+void LanVidStudioApp::on_network_midi(const LV_MidiEvent* ev, void* user_data) {
+    auto* self = static_cast<LanVidStudioApp*>(user_data);
+    if (!self || !ev) return;
+    for (const auto& s : self->audio_matrix_.midi_slots()) {
+        if (s.type == MidiSlotType::kNetworkMidiRx && s.active) {
+            self->audio_matrix_.inject_midi_event(s.id, ev->status, ev->data1, ev->data2, ev->media_ts_us);
+            return;
+        }
+    }
 }
 
 void LanVidStudioApp::refresh_devices() {

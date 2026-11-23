@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "common/clock.hpp"
+#include "common/rt_thread.hpp"
 #include "audio/stream_resampler.hpp"
 #include "midi/midi_device_manager.hpp"
 #if defined(__APPLE__)
@@ -1368,6 +1369,9 @@ bool MultiDeviceAudioMatrix::start() {
     impl_->stop_flag.store(false, std::memory_order_relaxed);
     impl_->running.store(true, std::memory_order_release);
     impl_->mix_thread = std::thread([this]() {
+        // Real-time scheduling for the mixer: period = one block at 48 kHz (128 -> 2.67 ms, 256 -> 5.33 ms).
+        const uint32_t rt_period_us = uint32_t(uint64_t(buffer_size()) * 1000000ull / kMatrixSampleRate);
+        RealtimeThreadScope rt(rt_period_us);
 #if defined(_WIN32)
         timeBeginPeriod(1);
 #endif

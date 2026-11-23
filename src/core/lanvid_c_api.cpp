@@ -21,6 +21,7 @@
 #include "codec/video_codec_common.hpp"
 #include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
+#include "common/rt_thread.hpp"
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/discovery.hpp"
@@ -224,6 +225,8 @@ struct LvReceiverHandle {
     LV_AudioSamplesCallback audio_cb = nullptr;
     void* audio_ud = nullptr;
     LV_StateChangedCallback state_cb = nullptr;
+    LV_MidiEventCallback midi_cb = nullptr;
+    void* midi_ud = nullptr;
     void* state_ud = nullptr;
 
     // 64-channel bus
@@ -245,6 +248,8 @@ struct LvReceiverHandle {
         mc_stop.store(false, std::memory_order_release);
         mc_active.store(true, std::memory_order_release);
         mc_thread = std::thread([this]() {
+            lv::RealtimeThreadScope rt(uint32_t(uint64_t(bus_cfg.block_frames ? bus_cfg.block_frames : 240) * 1000000ull /
+                                                uint64_t(bus_cfg.sample_rate > 0 ? bus_cfg.sample_rate : 48000)));
             const uint32_t frames = bus_cfg.block_frames ? bus_cfg.block_frames : 240;
             const int ch = std::clamp(bus_cfg.num_channels, 1, 64);
             const uint32_t rate = uint32_t(bus_cfg.sample_rate);
@@ -404,6 +409,25 @@ struct LvReceiverHandle {
             }
         });
 
+        rx->set_midi_callback([this](const lv::TimedMidiEvent& ev, int32_t off) {
+            LV_MidiEventCallback cb = nullptr;
+            void* ud = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(cb_mu);
+                cb = midi_cb;
+                ud = midi_ud;
+            }
+            if (!cb) return;
+            LV_MidiEvent e{};
+            e.media_ts_us = ev.media_ts_us;
+            e.event_seq = ev.event_seq;
+            e.block_offset_frames = off;
+            e.status = ev.status;
+            e.data1 = ev.data1;
+            e.data2 = ev.data2;
+            e.port = ev.port_index;
+            cb(&e, ud);
+        });
         rx->set_audio_callback([this](uint32_t seq_id, uint32_t ts_us, const lv::AudioHeader& ah,
                                       const uint8_t* pcm_data) {
             LV_AudioSamplesCallback acb = nullptr;
@@ -450,6 +474,7 @@ struct LvReceiverHandle {
         if (mc_cb) start_mc_pump();
 
         rx_thread = std::thread([this, auto_os_audio]() {
+            lv::RealtimeThreadScope rt(2000, 400, 1500);  // network RX (audio / MIDI2 / clock sync)
             while (!stop.load(std::memory_order_relaxed)) {
                 receiver->step_once();
 #ifndef LANVID_SDK_CORE_ONLY
@@ -1318,6 +1343,8 @@ struct LvDuplexHandle {
     lv::ChannelPatchbay rx_patch;
     std::unique_ptr<lv::DiscoveryResponder> disc;
     LV_DuplexConfig cfg{};
+    LV_MidiEventCallback midi_cb = nullptr;
+    void* midi_ud = nullptr;
     std::atomic<bool> running{false};
 
     void stop_internal() {
@@ -1378,6 +1405,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
 
     // RX direction: our receiver (own socket, own MasterClock/RTT towards the peer's sender).
     h->rx = lv_receiver_create();
+    lv_receiver_set_midi_callback(h->rx, h->midi_cb, h->midi_ud);
     lv_receiver_configure_audio_bus(h->rx, &bus);
     LV_ReceiverConfig rc;
     lv_sdk_receiver_config_default(&rc);
@@ -1454,6 +1482,45 @@ void lv_duplex_stop(LvDuplexHandle* h) {
     h->stop_internal();
 }
 
+int lv_sender_push_midi(LvSenderHandle* handle, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
+                        uint64_t media_ts_us) {
+    if (!handle || status < 0x80 || port >= lv::kMaxMidiPorts) return LV_ERR_INVALID_ARG;
+    if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
+    return handle->sender->push_midi(status, data1 & 0x7F, data2 & 0x7F, port, media_ts_us) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_receiver_set_midi_callback(LvReceiverHandle* handle, LV_MidiEventCallback cb, void* user_data) {
+    if (!handle) return;
+    std::lock_guard<std::mutex> lk(handle->cb_mu);
+    handle->midi_cb = cb;
+    handle->midi_ud = user_data;
+}
+
+int lv_receiver_get_stream_epoch_info(LvReceiverHandle* handle, uint64_t* epoch_resets, uint32_t* active_midi_notes,
+                                      uint64_t* midi_events_rx) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    if (epoch_resets) *epoch_resets = handle->receiver->stream_epoch_resets();
+    if (active_midi_notes) *active_midi_notes = handle->receiver->active_midi_notes();
+    if (midi_events_rx) *midi_events_rx = handle->receiver->midi_stats().events_unique;
+    return LV_OK;
+}
+
+int lv_duplex_send_midi(LvDuplexHandle* h, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
+                        uint64_t media_ts_us) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    if (!h->running.load(std::memory_order_acquire) || !h->tx) return LV_ERR_NOT_RUNNING;
+    return lv_sender_push_midi(h->tx, status, data1, data2, port, media_ts_us);
+}
+
+void lv_duplex_set_midi_callback(LvDuplexHandle* h, LV_MidiEventCallback cb, void* user_data) {
+    if (!h) return;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->midi_cb = cb;
+    h->midi_ud = user_data;
+    if (h->rx) lv_receiver_set_midi_callback(h->rx, cb, user_data);
+}
+
 int lv_duplex_set_latency_ms(LvDuplexHandle* h, uint32_t ms) {
     if (!h || ms < 2 || ms > 2000) return LV_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lk(h->api_mu);
@@ -1490,6 +1557,9 @@ int lv_duplex_get_stats(LvDuplexHandle* h, LV_DuplexStats* out) {
     out->tx_overruns = ts.tx_overruns;
 #endif
     if (h->rx && h->rx->receiver) {
+        out->midi_rx_events = h->rx->receiver->midi_stats().events_unique;
+        out->stream_epoch_resets = h->rx->receiver->stream_epoch_resets();
+        out->active_midi_notes = h->rx->receiver->active_midi_notes();
         const auto& mc = h->rx->receiver->master_clock();
         out->rx_clock_synced = mc.synced() ? 1 : 0;
         out->rx_rtt_us = mc.min_rtt_us();
@@ -1503,6 +1573,7 @@ int lv_duplex_get_stats(LvDuplexHandle* h, LV_DuplexStats* out) {
     if (h->tx && h->tx->sender) {
         out->tx_packets = h->tx->sender->audio2_stats().packets_sent;
         out->tx_pongs_sent = h->tx->sender->stats().pongs_sent;
+        out->midi_tx_events = h->tx->sender->midi_stats().events_pushed;
     }
     return LV_OK;
 }

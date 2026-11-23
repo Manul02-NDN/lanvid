@@ -108,6 +108,33 @@ void UdpSocket::set_buffer_sizes(int send_bytes, int recv_bytes) {
                      sizeof(recv_bytes));
 }
 
+bool UdpSocket::set_low_latency_qos() {
+    if (!is_open()) return false;
+    // Windows ignores IP_TOS unless the "DisableUserTOSSetting" policy is off; it is still the
+    // portable way to request DSCP EF (qWAVE / Group Policy QoS can enforce it system-wide).
+    int tos = kDscpEfTos;
+    return ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_TOS, reinterpret_cast<const char*>(&tos), sizeof(tos)) == 0;
+}
+
+int UdpSocket::tos() const {
+    if (!is_open()) return -1;
+    int v = 0;
+    int l = sizeof(v);
+    return ::getsockopt(SOCKET(fd_), IPPROTO_IP, IP_TOS, reinterpret_cast<char*>(&v), &l) == 0 ? v : -1;
+}
+
+int UdpSocket::send_buffer_bytes() const {
+    int v = 0;
+    int l = sizeof(v);
+    return (is_open() && ::getsockopt(SOCKET(fd_), SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&v), &l) == 0) ? v : -1;
+}
+
+int UdpSocket::recv_buffer_bytes() const {
+    int v = 0;
+    int l = sizeof(v);
+    return (is_open() && ::getsockopt(SOCKET(fd_), SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&v), &l) == 0) ? v : -1;
+}
+
 bool UdpSocket::set_recv_timeout_ms(int ms) {
     if (!is_open()) return false;
     DWORD tv = DWORD(ms < 0 ? 0 : ms);

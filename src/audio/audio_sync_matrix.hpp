@@ -75,6 +75,19 @@ public:
     uint64_t newest_media_ts() const;
     void reset();
 
+    // ---- Stream epoch reset (sender restarted: new MasterClock timeline, sequence numbers reset) ----
+    // Producer side (network thread): forget heads / first timestamps and ask the consumer for a
+    // click-free re-anchor: the next rendered block crossfades the old position into silence and
+    // playout restarts on the new timeline as soon as it has data.
+    void request_epoch_reset();
+    uint64_t epoch_resets() const { return epoch_resets_.load(std::memory_order_relaxed); }
+
+    // MasterClock time (us) of the sample at the playout cursor (end of the last rendered block).
+    uint64_t playout_media_ts_us() const {
+        const double c = cursor_pub_.load(std::memory_order_relaxed);
+        return c > 0.0 ? uint64_t(c * 1e6 / double(rate_)) : 0;
+    }
+
 private:
     struct Ring {
         std::vector<float> data;
@@ -118,6 +131,8 @@ private:
     std::atomic<uint32_t> jitter_max_ms_{200};
     std::atomic<uint32_t> observed_jitter_us_{0};
     std::atomic<bool> atomic_frame_lock_{false};
+    std::atomic<bool> epoch_reset_req_{false};
+    std::atomic<uint64_t> epoch_resets_{0};
 
     Chan ch_[kChannels];
 

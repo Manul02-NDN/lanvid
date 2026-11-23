@@ -43,6 +43,10 @@ public:
 
     void set_latency_ms(uint32_t ms);
     uint32_t latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
+    // Sender session epoch carried in PacketHeader::total_slices of every AUDIO2 packet (0 = none).
+    // A receiver that sees it change resets FEC / dedup / jitter state and re-syncs the MasterClock.
+    void set_epoch(uint16_t epoch) { epoch_.store(epoch, std::memory_order_relaxed); }
+    uint16_t epoch() const { return epoch_.load(std::memory_order_relaxed); }
     // Live-switchable audio compression profile (PCM32F / PCM24 / PCM16 / Ultra-Light ADPCM).
     void set_codec_profile(AudioCodecProfile p) { codec_profile_.store(uint8_t(p), std::memory_order_release); }
     AudioCodecProfile codec_profile() const { return AudioCodecProfile(codec_profile_.load(std::memory_order_acquire)); }
@@ -82,6 +86,7 @@ private:
     size_t mtu_;
     SendFn send_;
     std::atomic<uint32_t> latency_ms_{20};
+    std::atomic<uint16_t> epoch_{0};
     std::atomic<uint8_t> codec_profile_{uint8_t(AudioCodecProfile::kPcm32F)};
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
     std::mutex create_mu_;

@@ -20,6 +20,14 @@ UdpSender::UdpSender(const SenderConfig& cfg)
       fec_group_size_(cfg.fec_group_size),
       sim_loss_pct_(cfg.sim_loss_pct) {
     epoch_us_ = now_us();
+    {
+        // Non-zero 16-bit session epoch: differs between sender instances / restarts.
+        uint64_t x = epoch_us_ ^ (uint64_t(reinterpret_cast<uintptr_t>(this)) << 7) ^ 0x9E3779B97F4A7C15ull;
+        x ^= x >> 33;
+        x *= 0xff51afd7ed558ccdull;
+        x ^= x >> 33;
+        stream_epoch_ = uint16_t(x) ? uint16_t(x) : uint16_t(1);
+    }
     if (cfg_.bitrate_kbps > 0) {
         cfg_.adaptive.initial_bitrate_kbps = cfg_.bitrate_kbps;
         aq_.reset(cfg_.adaptive);
@@ -34,8 +42,12 @@ bool UdpSender::init() {
     });
     atx_->set_latency_ms(cfg_.audio_latency_ms);
     atx_->set_codec_profile(audio_codec_);
+    atx_->set_epoch(stream_epoch_);
+    midi_tx_ = std::make_unique<MidiTxEngine>(
+        [this](const uint8_t* d, size_t n) { return sock_.send_to(d, n, dst_) == int(n); }, stream_epoch_);
     if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
-    sock_.set_buffer_sizes(cfg_.socket_buf_bytes, 256 * 1024);
+    sock_.set_buffer_sizes(std::max(cfg_.socket_buf_bytes, UdpSocket::kMinSocketBuffer), UdpSocket::kMinSocketBuffer);
+    sock_.set_low_latency_qos();  // DSCP EF (Wi-Fi WMM AC_VO) for audio / MIDI / clock sync
     sock_.set_nonblocking(true);
     last_pace_us_ = now_us();
     tokens_bytes_ = 64.0 * 1024.0;
@@ -347,7 +359,24 @@ void UdpSender::flush_audio() {
     if (atx_) atx_->flush(now_us32());
 }
 
+bool UdpSender::push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port, uint64_t media_ts_us) {
+    if (!midi_tx_) return false;
+    const uint64_t ts = media_ts_us ? media_ts_us : master_us_now();
+    midi_tx_->push_event(status, d1, d2, port, ts);
+    last_midi_us_.store(now_us(), std::memory_order_relaxed);
+    return midi_tx_->flush(ts, now_us32());
+}
+
 void UdpSender::service_control() {
+    // MIDI2 heartbeat: re-send recent events every 100 ms for 2 s after the last one (stuck-note guard).
+    if (midi_tx_) {
+        const uint64_t t = now_us();
+        const uint64_t last = last_midi_us_.load(std::memory_order_relaxed);
+        if (last && t - last < 2'000'000 && t - last_midi_hb_us_.load(std::memory_order_relaxed) >= 100'000) {
+            last_midi_hb_us_.store(t, std::memory_order_relaxed);
+            midi_tx_->flush(master_us_now(), now_us32(), true);
+        }
+    }
     uint8_t buf[256];
     Endpoint peer{};
     for (int i = 0; i < 32; ++i) {

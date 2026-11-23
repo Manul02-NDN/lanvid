@@ -281,7 +281,24 @@ typedef struct LV_DuplexStats {
     uint64_t tx_frames_from_daw;
     uint64_t tx_overruns;
     uint64_t tx_pongs_sent;       /* clock-sync answers given to the peer's receiver */
+    /* MIDI2 + session epoch (appended) */
+    uint64_t midi_tx_events;      /* MIDI events sent to the peer */
+    uint64_t midi_rx_events;      /* unique MIDI events received from the peer */
+    uint64_t stream_epoch_resets; /* peer restarts handled (FEC / dedup / jitter / clock reset) */
+    uint32_t active_midi_notes;   /* notes currently held on the receive side */
+    uint32_t reserved_midi;
 } LV_DuplexStats;
+
+/* MIDI2 event delivered to the application, sample-aligned to the audio playout. */
+typedef struct LV_MidiEvent {
+    uint64_t media_ts_us;         /* MasterClock time of the event */
+    uint32_t event_seq;           /* sender sequence (0 for synthesized Note Offs after a stream reset) */
+    int32_t block_offset_frames;  /* frame inside the audio block just returned by pop (-1 = no audio pull) */
+    uint8_t status;
+    uint8_t data1;
+    uint8_t data2;
+    uint8_t port;                 /* 0..15 */
+} LV_MidiEvent;
 
 /* Discovered AoIP node (LAN discovery, port 5099). */
 typedef struct LV_AudioNode {

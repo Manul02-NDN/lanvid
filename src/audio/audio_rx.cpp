@@ -102,7 +102,28 @@ struct AudioRxEngine::Stream {
     std::atomic<uint64_t> rx{0}, lost{0}, fec_rec{0}, nack_rec{0}, nacks_sent{0}, dups{0}, late{0};
     std::atomic<uint32_t> jitter_us{0};
     std::atomic<bool> seen_pub{false};
+
+    void reset_transport() {
+        seen = false;
+        highest = first_unresolved = 0;
+        std::fill(recv_bits.begin(), recv_bits.end(), 0ull);
+        for (auto& m : miss) m = {};
+        for (auto& st : store) st.valid = false;
+        parities.clear();
+        ref_seq = 0;
+        ref_ts = 0;
+        chunk = 0;
+        has_transit = false;
+        prev_transit = 0;
+        jitter = 0.0;
+        jitter_us.store(0, std::memory_order_relaxed);
+    }
 };
+
+void AudioRxEngine::reset_transport() {
+    for (auto& sp : streams_)
+        if (sp) sp->reset_transport();
+}
 
 AudioRxEngine::AudioRxEngine(AudioSyncMatrix& matrix, MasterClock& clock, SendFn send)
     : matrix_(matrix), clock_(clock), send_(std::move(send)) {

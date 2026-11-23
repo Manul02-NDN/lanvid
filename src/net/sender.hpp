@@ -10,6 +10,7 @@
 
 #include "common/clock.hpp"
 #include "audio/audio_tx.hpp"
+#include "midi/midi_sync_engine.hpp"
 #include "codec/frame_codec.hpp"
 #include "codec/video_encoder.hpp"
 #include "common/image.hpp"
@@ -113,6 +114,18 @@ public:
     uint64_t master_us_now() const { return now_us() - epoch_us_; }
     AudioTxStats audio2_stats() const { return atx_ ? atx_->stats() : AudioTxStats{}; }
 
+    // ---- MIDI2 over the same UDP stream ----
+    // Sends one MIDI short message stamped with the sender MasterClock (media_ts_us = 0 -> now).
+    // Flushed immediately; every event is repeated in the next packets and in 100 ms heartbeats
+    // (16-event redundancy ring), so a lost Note Off is recovered on lossy Wi-Fi.
+    bool push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port = 0, uint64_t media_ts_us = 0);
+    MidiTxStats midi_stats() const { return midi_tx_ ? midi_tx_->stats() : MidiTxStats{}; }
+
+    // Session epoch (random, non-zero) carried by every AUDIO2 / MIDI2 packet. A receiver resets its
+    // transport state and MasterClock when it changes (sender restart).
+    uint16_t stream_epoch() const { return stream_epoch_; }
+    const UdpSocket& socket() const { return sock_; }
+
     // Non-blocking poll for incoming control packets (PING -> PONG, FEEDBACK -> AIMD).
     void service_control();
     // Same, but skips if another thread (an audio push) is already servicing the socket.
@@ -151,6 +164,10 @@ private:
 
     SenderConfig cfg_;
     uint64_t epoch_us_ = 0;
+    uint16_t stream_epoch_ = 1;
+    std::unique_ptr<MidiTxEngine> midi_tx_;
+    std::atomic<uint64_t> last_midi_us_{0};
+    std::atomic<uint64_t> last_midi_hb_us_{0};
     std::mutex ctl_mu_;
     std::unique_ptr<AudioTxEngine> atx_;
     AudioCodecProfile audio_codec_ = AudioCodecProfile::kPcm32F;

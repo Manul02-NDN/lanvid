@@ -176,6 +176,7 @@ void AudioTxEngine::send_payload(uint32_t seq, uint16_t stream, uint32_t wallclo
     h.frame_id = seq;
     h.timestamp_us = wallclock_us;
     h.slice_id = stream;
+    h.total_slices = epoch_.load(std::memory_order_relaxed);  // sender session epoch
     h.seq = uint16_t(seq);
     const size_t n = write_packet(buf, sizeof(buf), h, payload, len);
     if (n && send_ && send_(buf, n)) {

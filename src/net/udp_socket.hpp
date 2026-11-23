@@ -48,6 +48,15 @@ public:
     uint16_t local_port() const;
 
     void set_buffer_sizes(int send_bytes, int recv_bytes);
+    // Low-latency QoS: DSCP 46 / Expedited Forwarding (IP_TOS 0xB8 -> Wi-Fi WMM AC_VO), plus
+    // SO_NET_SERVICE_TYPE = NET_SERVICE_TYPE_VO on Apple platforms. Returns true if the TOS was set.
+    bool set_low_latency_qos();
+    // Effective values as reported by the OS (for diagnostics / tests).
+    int tos() const;
+    int send_buffer_bytes() const;
+    int recv_buffer_bytes() const;
+    static constexpr int kDscpEfTos = 0xB8;
+    static constexpr int kMinSocketBuffer = 2 * 1024 * 1024;
     bool set_recv_timeout_ms(int ms);
     bool set_nonblocking(bool nb);
 

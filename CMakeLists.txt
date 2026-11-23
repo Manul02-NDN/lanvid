@@ -60,6 +60,7 @@ endif()
 # ---------------------------------------------------------------- core sources
 set(LV_CORE_SOURCES
   src/common/cpu_features.cpp
+  src/common/rt_thread.cpp
   src/common/crc32c.cpp
   src/common/image.cpp
   src/codec/color.cpp
@@ -168,8 +169,8 @@ if(WIN32)
     src/codec/hw_codec_win32.cpp
   )
   # Core SDK always links Winsock2 + Windows Media Foundation + D3D11/DXGI for HW H.264/H.265 codecs
-  list(APPEND LV_PLATFORM_LIBS ws2_32 iphlpapi ole32 oleaut32 uuid d3d11 dxgi mf mfplat mfuuid winmm)
-  set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lws2_32 -liphlpapi -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -lmf -lmfplat -lmfuuid")
+  list(APPEND LV_PLATFORM_LIBS ws2_32 iphlpapi ole32 oleaut32 uuid d3d11 dxgi mf mfplat mfuuid winmm avrt)
+  set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lws2_32 -liphlpapi -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -lmf -lmfplat -lmfuuid -lwinmm -lavrt")
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES
       src/platform/preview_window_win32.cpp
@@ -414,6 +415,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_coreaudio_matrix.cpp
     tests/test_midi_sync.cpp
     tests/test_coremidi_ports.cpp
+    tests/test_udp_e2e_audio_midi.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

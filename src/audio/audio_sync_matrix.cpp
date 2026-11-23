@@ -56,6 +56,15 @@ void AudioSyncMatrix::reset() {
     latency_dirty_.store(true, std::memory_order_release);
 }
 
+void AudioSyncMatrix::request_epoch_reset() {
+    for (auto& c : ch_) {
+        c.head.store(0, std::memory_order_relaxed);
+        c.first_ts.store(UINT64_MAX, std::memory_order_relaxed);
+    }
+    epoch_resets_.fetch_add(1, std::memory_order_relaxed);
+    epoch_reset_req_.store(true, std::memory_order_release);
+}
+
 void AudioSyncMatrix::set_target_latency_ms(uint32_t ms) {
     ms = std::clamp(ms, kMinLatencyMs, kMaxLatencyMs);
     if (latency_ms_.exchange(ms, std::memory_order_acq_rel) != ms) {
@@ -190,6 +199,18 @@ int64_t AudioSyncMatrix::desired_cursor(const MasterClock& clk, uint64_t local_n
 AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t local_now_us,
                                             uint32_t frames) {
     Plan p;
+    if (epoch_reset_req_.exchange(false, std::memory_order_acq_rel)) {
+        // New sender epoch: the old timeline is gone. Fade the old position out (crossfade into a
+        // position with no data = silence) and re-anchor once the new stream has data / clock sync.
+        p.seek = started_;
+        p.old_cursor = cursor_;
+        p.cursor = -4.0 * double(frames);  // negative positions never hold data -> silence
+        p.ratio = 1.0;
+        started_ = false;
+        err_filt_ = 0.0;
+        cursor_ = p.cursor;
+        return p;
+    }
     const int64_t desired = desired_cursor(clk, local_now_us);
     const bool dirty = latency_dirty_.exchange(false, std::memory_order_acq_rel);
     const bool adaptive = adaptive_jitter_.load(std::memory_order_acquire);

@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -103,6 +104,40 @@ void UdpSocket::set_buffer_sizes(int send_bytes, int recv_bytes) {
     if (!is_open()) return;
     set_sockbuf_best_effort(fd_, SO_SNDBUF, send_bytes);
     set_sockbuf_best_effort(fd_, SO_RCVBUF, recv_bytes);
+}
+
+bool UdpSocket::set_low_latency_qos() {
+    if (!is_open()) return false;
+    int tos = kDscpEfTos;
+    const bool ok = ::setsockopt(fd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == 0;
+#if defined(IPV6_TCLASS)
+    int tclass = kDscpEfTos;  // only effective on IPv6 sockets (ours are AF_INET); harmless otherwise
+    (void)::setsockopt(fd_, IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
+#endif
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+    int svc = NET_SERVICE_TYPE_VO;  // Apple maps this to the Wi-Fi voice access category (AC_VO)
+    (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
+#endif
+    return ok;
+}
+
+int UdpSocket::tos() const {
+    if (!is_open()) return -1;
+    int v = 0;
+    socklen_t l = sizeof(v);
+    return ::getsockopt(fd_, IPPROTO_IP, IP_TOS, &v, &l) == 0 ? v : -1;
+}
+
+int UdpSocket::send_buffer_bytes() const {
+    int v = 0;
+    socklen_t l = sizeof(v);
+    return (is_open() && ::getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &v, &l) == 0) ? v : -1;
+}
+
+int UdpSocket::recv_buffer_bytes() const {
+    int v = 0;
+    socklen_t l = sizeof(v);
+    return (is_open() && ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &v, &l) == 0) ? v : -1;
 }
 
 bool UdpSocket::set_recv_timeout_ms(int ms) {

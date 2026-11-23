@@ -45,6 +45,10 @@ public:
     // Periodic (<= every few ms): NACK scheduling and loss bookkeeping.
     void service(uint64_t local_now_us);
 
+    // Forgets all transport state (sequence windows, FEC groups, NACK schedule, jitter estimate) for a
+    // new sender epoch. Network thread only. Statistics counters are kept (cumulative).
+    void reset_transport();
+
     AudioChannelRxStats channel_stats(uint16_t channel_index) const;
     uint64_t rate_mismatch_drops() const { return rate_drops_.load(std::memory_order_relaxed); }
     uint32_t active_channel_count() const;

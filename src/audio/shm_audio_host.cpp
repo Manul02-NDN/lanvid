@@ -1,4 +1,5 @@
 #include "audio/shm_audio_host.hpp"
+#include "common/rt_thread.hpp"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -51,6 +52,7 @@ void ShmAudioHost::publish_network_state(uint32_t latency_ms, bool clock_synced,
 
 void ShmAudioHost::loop() {
     using clock = std::chrono::steady_clock;
+    RealtimeThreadScope rt(1000, 200, 700);  // ~1 ms pump cadence feeding the DAW / network rings
     const uint32_t ch = cfg_.channels;
     const uint32_t blk = cfg_.block_frames;
     std::vector<std::vector<float>> bufs(ch, std::vector<float>(blk));

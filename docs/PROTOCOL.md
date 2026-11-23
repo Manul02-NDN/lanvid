@@ -123,6 +123,27 @@ Rules: an FEC group never spans more than `latency/3`; chunks are clamped so pac
 (e.g. 20 ms PCM16 at 48 kHz → 672 samples = 14 ms per packet at MTU 1400); NACK first wait = `clamp(latency·0.1, 2, 100) ms`,
 retry spacing = `latency·0.6 / attempts`; a hole is abandoned once its samples have passed the playout cursor.
 
+### 8. Stream epoch, MIDI2 transport and QoS (v2.4.x hardening)
+
+* **Session epoch:** every sender picks a random non-zero 16-bit epoch. AUDIO2 packets carry it in
+  `PacketHeader.total_slices` (unused for audio), MIDI2 frames in `MidiFrameHeader.stream_id`. When
+  the receiver sees a new epoch (sender restart) it resets FEC groups, sequence windows and NACK
+  schedule, the `event_seq` de-duplicator and queued MIDI, the MasterClock (immediate re-ping), and
+  re-anchors the AudioSyncMatrix with a 96-sample crossfade into silence; every note still held is
+  released with a synthesized Note Off. Late packets of the previous epoch are dropped. Epoch 0 =
+  legacy sender (no epoch handling).
+* **MIDI2 on the live stream:** `UdpSender::push_midi` / `lv_sender_push_midi` / `lv_duplex_send_midi`
+  send `kMidiFrame` packets on the audio socket, stamped with the sender MasterClock and repeated via
+  the 16-event redundancy ring plus 100 ms heartbeats (2 s after the last event). The receiver
+  dispatches events from inside `pop_audio_multichannel_*` for the block that contains them
+  (`block_offset_frames` = sample position), or on the network thread on the MasterClock playout
+  estimate when no audio is pulled.
+* **QoS:** all LVSP sockets request DSCP 46 / EF (`IP_TOS 0xB8`, Wi-Fi WMM AC_VO; on Apple also
+  `SO_NET_SERVICE_TYPE = NET_SERVICE_TYPE_VO`) and use >= 2 MB send/receive buffers.
+* **Real-time threads:** mixer, SHM pump and network RX threads use Mach
+  `THREAD_TIME_CONSTRAINT_POLICY` (macOS), MMCSS "Pro Audio" + `timeBeginPeriod(1)` (Windows) or
+  `SCHED_FIFO` when permitted (Linux).
+
 ## Platform Backends & Build
 
 | Feature | Windows | Linux | macOS |

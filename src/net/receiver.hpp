@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 
 #include "common/clock.hpp"
@@ -12,6 +13,7 @@
 #include "audio/audio_rx.hpp"
 #include "audio/audio_sync_matrix.hpp"
 #include "audio/master_clock.hpp"
+#include "midi/midi_sync_engine.hpp"
 #include "net/assembler.hpp"
 #include "net/udp_socket.hpp"
 #include "parallel/thread_pool.hpp"
@@ -78,13 +80,23 @@ public:
     // ---- 64-channel phase-coherent audio bus ----
     void set_audio_latency_ms(uint32_t ms) { arx_.set_latency_ms(ms); }
     uint32_t audio_latency_ms() const { return arx_.latency_ms(); }
-    // Renders `frames` synchronised frames for channels [0, num_channels) (interleaved or planar).
-    void pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames) {
-        matrix_.pop_interleaved(mclock_, now_us(), out, num_channels, frames);
-    }
-    void pop_audio_multichannel_planar(float* const* out, uint32_t num_channels, uint32_t frames) {
-        matrix_.pop_planar(mclock_, now_us(), out, num_channels, frames);
-    }
+    // Renders `frames` synchronised frames for channels [0, num_channels) (interleaved or planar), then
+    // dispatches every MIDI2 event that falls inside this block (sample offset given to the callback).
+    void pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames);
+    void pop_audio_multichannel_planar(float* const* out, uint32_t num_channels, uint32_t frames);
+
+    // ---- MIDI2 (same UDP stream) ----
+    // `block_offset_frames`: sample position of the event inside the audio block just rendered by a
+    // pop_audio_* call (sample-accurate scheduling), or -1 when dispatched without an audio consumer.
+    using MidiCallback = std::function<void(const TimedMidiEvent& ev, int32_t block_offset_frames)>;
+    void set_midi_callback(MidiCallback cb);
+    MidiRxStats midi_stats() const { return midi_rx_.stats(); }
+    uint32_t active_midi_notes() const;
+
+    // ---- Stream epoch (sender restart) ----
+    uint16_t stream_epoch() const { return cur_epoch_.load(std::memory_order_relaxed); }
+    uint64_t stream_epoch_resets() const { return epoch_resets_.load(std::memory_order_relaxed); }
+    const UdpSocket& socket() const { return sock_; }
     AudioSyncMatrix& audio_matrix() { return matrix_; }
     const MasterClock& master_clock() const { return mclock_; }
     AudioChannelRxStats audio_channel_rx_stats(uint16_t ch) const { return arx_.channel_stats(ch); }
@@ -101,6 +113,11 @@ private:
     void maybe_send_feedback(uint64_t now);
     void send_pli_now(uint64_t now);
     void handle_pong(const uint8_t* payload, size_t len, uint32_t t4_us);
+    bool accept_epoch(uint16_t epoch);
+    void reset_stream_epoch();
+    void dispatch_midi(uint64_t playout_us, double block_start_samples, uint32_t frames);
+    void track_note(const TimedMidiEvent& ev);
+    void release_all_notes();
 
     ReceiverConfig cfg_;
     FrameCallback user_on_frame_;
@@ -133,6 +150,16 @@ private:
     uint64_t feedbacks_sent_ = 0;
     uint64_t plis_sent_ = 0;
     uint64_t video_ignored_ = 0;
+
+    // MIDI2 + session epoch
+    MidiRxEngine midi_rx_;
+    mutable std::mutex midi_mu_;
+    MidiCallback midi_cb_;
+    uint8_t active_notes_[kMaxMidiPorts][16][128] = {};
+    std::atomic<uint64_t> last_pop_us_{0};
+    std::atomic<uint16_t> cur_epoch_{0};
+    uint16_t prev_epoch_ = 0;
+    std::atomic<uint64_t> epoch_resets_{0};
 
     uint8_t recv_batch_buf_[kRecvBatchSize][kRecvSlotCap];
 };

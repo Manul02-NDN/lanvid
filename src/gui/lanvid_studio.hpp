@@ -53,6 +53,8 @@ private:
     void draw_aoip_sender_controls();
     void draw_aoip_meter_grid();
     void apply_receiver_bus();
+    void wire_network_midi();
+    static void on_network_midi(const LV_MidiEvent* ev, void* user_data);
     void start_vdev_tx();
     void stop_vdev_tx();
     void apply_receiver_output();

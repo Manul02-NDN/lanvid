@@ -29,6 +29,7 @@ typedef struct LvReceiverHandle LvReceiverHandle;
 typedef void (*LV_VideoFrameCallback)(const LV_VideoFrameView* frame, void* user_data);
 typedef void (*LV_AudioSamplesCallback)(const LV_AudioChunkView* audio, void* user_data);
 typedef void (*LV_MultichannelAudioCallback)(const LV_MultichannelAudioBlock* block, void* user_data);
+typedef void (*LV_MidiEventCallback)(const LV_MidiEvent* ev, void* user_data);
 typedef void (*LV_StateChangedCallback)(int new_state, int error_code, const char* message,
                                         void* user_data);
 
@@ -194,6 +195,20 @@ LV_API int lv_audio_set_channel_mute_solo(LvDuplexHandle* handle, LV_AudioDirect
 /* Scans for AoIP nodes (duplex transceivers and receivers announcing the bus). Returns count >= 0. */
 LV_API int lv_discovery_scan_audio_nodes(int timeout_ms, uint16_t discovery_port, LV_AudioNode* out_nodes,
                                          int max_nodes);
+
+/* ---- MIDI2 over IP (same UDP stream as the audio, MasterClock-stamped, Note-Off redundancy) ----
+ * media_ts_us = 0 stamps the event with the sender's MasterClock "now". On the receiver the callback
+ * fires from inside lv_receiver_pop_audio_multichannel() for events within the returned block
+ * (block_offset_frames = sample position), or from the network thread when no audio is pulled. */
+LV_API int lv_sender_push_midi(LvSenderHandle* handle, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
+                               uint64_t media_ts_us);
+LV_API void lv_receiver_set_midi_callback(LvReceiverHandle* handle, LV_MidiEventCallback cb, void* user_data);
+/* Sender-restart handling and held notes on the receive side (any argument may be NULL). */
+LV_API int lv_receiver_get_stream_epoch_info(LvReceiverHandle* handle, uint64_t* epoch_resets, uint32_t* active_midi_notes,
+                                             uint64_t* midi_events_rx);
+LV_API int lv_duplex_send_midi(LvDuplexHandle* handle, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
+                               uint64_t media_ts_us);
+LV_API void lv_duplex_set_midi_callback(LvDuplexHandle* handle, LV_MidiEventCallback cb, void* user_data);
 
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active receivers and populates `out_peers` (up to `max_peers`).
