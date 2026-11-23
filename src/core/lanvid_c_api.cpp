@@ -1392,6 +1392,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
     lv::ShmAudioHost::Config hc;
     hc.channels = uint32_t(cfg->num_channels);
     hc.bus_name = cfg->bus_name;
+    hc.rx_target_frames = cfg->rx_headroom_frames;
     LvDuplexHandle* self = h;
     const bool ok_tx = h->tx_host.start(hc, [self](const float* const* p, uint32_t ch, uint32_t n, bool disc) {
         static thread_local std::vector<float> buf;

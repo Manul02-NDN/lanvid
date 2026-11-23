@@ -257,6 +257,8 @@ typedef struct LV_DuplexConfig {
     int32_t enable_discovery; /* 1 = announce this node as an AoIP node on the LAN */
     char device_name[128];    /* friendly name in discovery (default: host name) */
     char bus_name[64];        /* shared-memory bus (default "LanVidAudioBus_v1") */
+    uint32_t rx_headroom_frames; /* frames kept queued for the DAW inputs (0 = auto: max(3 x DAW buffer, 512));
+                                    raise on busy hosts to avoid underruns, at the cost of latency */
 } LV_DuplexConfig;
 
 typedef struct LV_DuplexStats {
