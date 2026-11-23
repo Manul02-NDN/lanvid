@@ -222,6 +222,9 @@ DMG_STAGE="$BUILD_DIR/dmg-stage"
 mkdir -p "$DMG_STAGE"
 cp "$PKG_OUT" "$DMG_STAGE/"
 cp "$ROOT/sdk/README.md" "$DMG_STAGE/README.md"
+if [ -d "$ROOT/build-macos-app/LanVid Studio.app" ]; then
+  cp -R "$ROOT/build-macos-app/LanVid Studio.app" "$DMG_STAGE/"
+fi
 
 cat > "$DMG_STAGE/Verify_LanVidSDK.command" <<'VEOF'
 #!/usr/bin/env bash

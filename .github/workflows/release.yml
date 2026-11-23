@@ -73,11 +73,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tools & Build Universal .pkg, .dmg & XCFramework
+      - name: Install Tools & Build Universal .pkg, .dmg, LanVid Studio.app & XCFramework
         run: |
-          brew install cmake ninja
+          brew install cmake ninja sdl2
           chmod +x sdk/apple/build_xcframework.sh sdk/apple/build_macos_pkg.sh \
                    sdk/apple/installer/scripts/preinstall sdk/apple/installer/scripts/postinstall
+          cmake -S . -B build-macos-app -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=OFF -DLANVID_BUILD_CLI=OFF
+          cmake --build build-macos-app --target lanvid_app
+          codesign --force --deep --sign - "build-macos-app/LanVid Studio.app"
+          mkdir -p dist/apple
+          ditto -c -k --sequesterRsrc --keepParent "build-macos-app/LanVid Studio.app" dist/apple/LanVid-Studio-macOS.zip
           ./sdk/apple/build_macos_pkg.sh
           cd sdk/apple && swift build
 
@@ -87,6 +93,7 @@ jobs:
           path: |
             dist/apple/LanVidSDK-v2.4.0-macOS.pkg
             dist/apple/LanVidSDK-v2.4.0-macOS.dmg
+            dist/apple/LanVid-Studio-macOS.zip
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
@@ -165,6 +172,7 @@ jobs:
           cp release-staging/rel-linux/installer/linux/LanVid-Linux-x86_64.run release-assets/
           cp release-staging/rel-apple/LanVidSDK-v2.4.0-macOS.pkg release-assets/
           cp release-staging/rel-apple/LanVidSDK-v2.4.0-macOS.dmg release-assets/
+          cp release-staging/rel-apple/LanVid-Studio-macOS.zip release-assets/
           cp release-staging/rel-android/LanVid-Android-v2.4.0.apk release-assets/
           cp release-staging/rel-android/LanVid-Android.apk release-assets/
           cp release-staging/rel-android/lanvid-sdk-2.4.0.aar release-assets/
@@ -198,6 +206,7 @@ jobs:
             release-assets/LanVid-Linux-x86_64.run
             release-assets/LanVidSDK-v2.4.0-macOS.pkg
             release-assets/LanVidSDK-v2.4.0-macOS.dmg
+            release-assets/LanVid-Studio-macOS.zip
             release-assets/LanVid-Android-v2.4.0.apk
             release-assets/LanVid-Android.apk
             release-assets/lanvid-sdk-2.4.0.aar
