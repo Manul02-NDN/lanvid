@@ -26,6 +26,26 @@ foreach ($f in $files) {
     Copy-Item $f $stageDir -Force
 }
 
+# Stage obs-lanvid plugin + locales if built against OBS SDK, and copy to local OBS Studio if installed
+$obsDll = Join-Path $buildDir "plugins\obs-lanvid\obs-lanvid.dll"
+$obsLocaleDir = Join-Path $root "plugins\obs-lanvid\data\locale"
+if (Test-Path $obsDll) {
+    $obsStage = Join-Path $stageDir "obs-lanvid"
+    New-Item -ItemType Directory -Path (Join-Path $obsStage "obs-plugins\64bit") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $obsStage "data\obs-plugins\obs-lanvid\locale") -Force | Out-Null
+    Copy-Item $obsDll (Join-Path $obsStage "obs-plugins\64bit\obs-lanvid.dll") -Force
+    if (Test-Path $obsLocaleDir) {
+        Copy-Item (Join-Path $obsLocaleDir "*.ini") (Join-Path $obsStage "data\obs-plugins\obs-lanvid\locale\") -Force
+    }
+    $obsSystemDir = "C:\Program Files\obs-studio\obs-plugins\64bit"
+    if (Test-Path $obsSystemDir) {
+        try {
+            Copy-Item $obsDll (Join-Path $obsSystemDir "obs-lanvid.dll") -Force
+            Write-Host "Installed obs-lanvid.dll into $obsSystemDir"
+        } catch {}
+    }
+}
+
 Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal -Force
 
 $cl = Get-Command cl.exe -ErrorAction SilentlyContinue

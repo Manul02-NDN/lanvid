@@ -54,7 +54,7 @@ jobs:
       - name: Build Core, Studio GUI, Tests & SDK
         shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
           cmake --build build
           .\build\lanvid_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "lanvid_tests failed (exit=$LASTEXITCODE)" }

@@ -65,6 +65,7 @@ option(LANVID_BUILD_GUI     "Build LanVid Studio Desktop GUI (Dear ImGui)" ON)
 option(LANVID_BUILD_CLI     "Build CLI sender/receiver executables" ON)
 option(LANVID_BUILD_TESTS   "Build unit tests and benchmark" ON)
 option(LANVID_BUILD_DRIVERS "Build OS virtual audio devices (ASIO DLL / CoreAudio HAL / JACK bridge)" ON)
+option(BUILD_OBS_PLUGIN     "Build obs-lanvid plugin for OBS Studio" ON)
 
 set(LV_IS_X86 FALSE)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
@@ -436,6 +437,11 @@ if(LANVID_BUILD_DRIVERS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS
   endif()
 endif()
 
+# ---------------------------------------------------------------- OBS Studio Plugin (obs-lanvid)
+if(BUILD_OBS_PLUGIN AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/plugins/obs-lanvid/CMakeLists.txt")
+  add_subdirectory(plugins/obs-lanvid)
+endif()
+
 if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
   enable_testing()
   add_executable(lanvid_tests
@@ -466,6 +472,10 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
+  if(TARGET obs_lanvid_core)
+    target_sources(lanvid_tests PRIVATE tests/test_obs_plugin.cpp)
+    target_link_libraries(lanvid_tests PRIVATE obs_lanvid_core)
+  endif()
   if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     target_compile_definitions(lanvid_tests PRIVATE LV_HAVE_SHM_BUS=1)
   endif()

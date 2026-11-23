@@ -10,7 +10,7 @@ VER="$(sed -n 's/^project(lanvid VERSION \([0-9.]*\).*/\1/p' "$ROOT/CMakeLists.t
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 
 cmake -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DLANVID_BUILD_GUI=ON -DLANVID_BUILD_SHARED=ON -DLANVID_BUILD_TESTS=ON
+      -DLANVID_BUILD_GUI=ON -DLANVID_BUILD_SHARED=ON -DLANVID_BUILD_TESTS=ON -DBUILD_OBS_PLUGIN=ON
 cmake --build "$BUILD" --parallel "$(nproc)"
 ctest --test-dir "$BUILD" --output-on-failure
 
@@ -26,6 +26,11 @@ install -m 0755 "$BUILD/lanvid-audio-bridge" "$DEB_ROOT/usr/local/bin/lanvid-aud
 install -m 0755 "$BUILD/liblanvid_core.so" "$DEB_ROOT/usr/local/lib/liblanvid_core.so"
 install -m 0644 "$OUT/lanvid.desktop" "$DEB_ROOT/usr/share/applications/lanvid.desktop"
 install -m 0644 "$OUT/lanvid.svg"     "$DEB_ROOT/usr/share/icons/hicolor/scalable/apps/lanvid.svg"
+if [ -f "$BUILD/plugins/obs-lanvid/obs-lanvid.so" ]; then
+  install -d "$DEB_ROOT/usr/lib/obs-plugins" "$DEB_ROOT/usr/share/obs/obs-plugins/obs-lanvid/locale"
+  install -m 0755 "$BUILD/plugins/obs-lanvid/obs-lanvid.so" "$DEB_ROOT/usr/lib/obs-plugins/obs-lanvid.so"
+  install -m 0644 "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$DEB_ROOT/usr/share/obs/obs-plugins/obs-lanvid/locale/"
+fi
 
 cat > "$DEB_ROOT/DEBIAN/control" <<EOF
 Package: lanvid-studio

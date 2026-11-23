@@ -118,6 +118,15 @@ cp "$ROOT/sdk/README.md" "$ROOT_CORE/README.md"
 
 # Component 2: Swift Package LanVidKit (adjust binaryTarget path for installed /usr/local/LanVidSDK/apple layout)
 cp -R "$APPLE_DIR/LanVidKit" "$ROOT_SWIFT/apple/"
+
+# Stage obs-lanvid plugin locales (and .plugin bundle if built with OBS SDK; install target: ~/Library/Application Support/obs-studio/plugins/)
+if [ -d "$ROOT/plugins/obs-lanvid/data/locale" ]; then
+  mkdir -p "$ROOT_EXTRAS/obs-lanvid/locale"
+  cp "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$ROOT_EXTRAS/obs-lanvid/locale/"
+fi
+if [ -d "$ROOT/build/plugins/obs-lanvid/obs-lanvid.plugin" ]; then
+  cp -R "$ROOT/build/plugins/obs-lanvid/obs-lanvid.plugin" "$ROOT_EXTRAS/obs-lanvid/"
+fi
 sed 's|../../dist/apple/LanVidCore.xcframework|LanVidCore.xcframework|g' \
   "$APPLE_DIR/Package.swift" > "$ROOT_SWIFT/apple/Package.swift"
 

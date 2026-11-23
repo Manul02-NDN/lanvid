@@ -32,7 +32,7 @@ jobs:
       - name: Configure & Build (CMake + Ninja Release)
         shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
           cmake --build build
 
       - name: Run Unit Tests (44 tests) & 4K Codec Benchmark
@@ -92,7 +92,7 @@ jobs:
 
       - name: Configure & Build (CMake + Ninja Release)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
           cmake --build build --parallel "$(nproc)"
 
       - name: Run Unit Tests & Codec Benchmark
