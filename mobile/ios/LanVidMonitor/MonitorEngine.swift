@@ -70,6 +70,8 @@ final class MonitorEngine: ObservableObject {
             return
         }
         cli = h
+        connectStartedAt = Date()
+        handshakeConfirmed = false
         connected = studio
         lastError = nil
         UserDefaults.standard.set(studio.host, forKey: "lastHost")
@@ -276,6 +278,8 @@ final class MonitorEngine: ObservableObject {
     }
 
     private var lastPackets: UInt64 = 0
+    private var connectStartedAt: Date = .distantPast
+    private var handshakeConfirmed = false
 
     private func applyMeta(_ snap: [(String, Float)], _ t: MonitorTelemetry) {
         guard cli != nil else { return }
@@ -296,6 +300,13 @@ final class MonitorEngine: ObservableObject {
             }
         }
         if next != channels { channels = next }
+        if !next.isEmpty || t.audioPackets > 0 {
+            handshakeConfirmed = true
+            if lastError != nil { lastError = nil }
+        } else if !handshakeConfirmed && Date().timeIntervalSince(connectStartedAt) > 3.5, let s = connected {
+            lastError = tr("Немає відповіді від \(s.host):\(s.port) — перевірте Wi-Fi, LanVid Studio на ПК та Firewall (UDP 5020)",
+                           "No response from \(s.host):\(s.port) — check Wi-Fi, LanVid Studio on PC, and Firewall (UDP 5020)")
+        }
         var tt = t
         tt.receiving = t.audioPackets > lastPackets
         lastPackets = t.audioPackets

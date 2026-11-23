@@ -59,6 +59,7 @@ public:
     static constexpr int kMinSocketBuffer = 2 * 1024 * 1024;
     bool set_recv_timeout_ms(int ms);
     bool set_nonblocking(bool nb);
+    bool set_broadcast(bool enable);
 
     int send_to(const uint8_t* data, size_t len, const Endpoint& dst) const;
     int recv_from(uint8_t* buf, size_t cap, Endpoint& src) const;

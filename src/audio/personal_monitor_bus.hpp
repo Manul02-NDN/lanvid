@@ -157,16 +157,39 @@ struct MonitorClientInfo {
     uint64_t control_rx = 0;
 };
 
+constexpr uint16_t kDefaultMonitorDiscoveryPort = 5021;
+constexpr const char* kMonitorDiscoveryReq = "LV_MON_DISC_REQ";
+constexpr const char* kMonitorDiscoveryRespPrefix = "LV_MON_DISC_RESP|";
+
+struct DiscoveredMonitorServer {
+    std::string name;
+    std::string ip;
+    uint16_t port = kDefaultMonitorPort;
+    uint8_t channels = 8;
+};
+
+// Broadcasts LV_MON_DISC_REQ on 255.255.255.255 (+ loopback fallback) to find LanVid Studio servers
+// even when mDNS/Bonjour is blocked on Windows or Wi-Fi routers.
+std::vector<DiscoveredMonitorServer> discover_monitor_servers(
+    int timeout_ms = 350, uint16_t discovery_port = kDefaultMonitorDiscoveryPort,
+    bool include_loopback = false);
+
 // Server hosting up to 8 PersonalMonitorBus instances over UDP (control + 2ch AUDIO2 stream).
 class PersonalMonitorServer {
 public:
     explicit PersonalMonitorServer(uint32_t sample_rate = 48000);
     ~PersonalMonitorServer();
 
-    bool start(uint16_t bind_port = kDefaultMonitorPort, const std::string& bind_ip = "0.0.0.0");
+    bool start(uint16_t bind_port = kDefaultMonitorPort, const std::string& bind_ip = "0.0.0.0",
+               uint16_t discovery_port = kDefaultMonitorDiscoveryPort);
     void stop();
     bool is_running() const { return running_.load(std::memory_order_acquire); }
     uint16_t bound_port() const { return bound_port_; }
+    uint16_t discovery_port() const { return disc_port_; }
+    void set_studio_name(const std::string& name);
+
+    uint64_t total_control_rx() const { return total_control_rx_.load(std::memory_order_relaxed); }
+    uint64_t discovery_replies() const { return discovery_replies_.load(std::memory_order_relaxed); }
 
     void set_channel_name(int ch, const std::string& name);
     void set_client_mute(int slot, bool muted);
@@ -210,8 +233,13 @@ private:
 
     uint32_t sample_rate_ = 48000;
     uint16_t bound_port_ = 0;
+    uint16_t disc_port_ = 0;
+    std::string studio_name_ = "LanVid Studio";
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> total_control_rx_{0};
+    std::atomic<uint64_t> discovery_replies_{0};
     UdpSocket sock_;
+    UdpSocket disc_sock_;
     mutable std::mutex mu_;
     std::array<ClientSlot, kMaxMonitorClients> slots_{};
     std::array<std::string, kMonitorMaxInputChannels> ch_names_{};

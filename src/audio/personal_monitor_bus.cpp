@@ -1,9 +1,11 @@
 #include "audio/personal_monitor_bus.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 #include "common/clock.hpp"
 
@@ -310,7 +312,7 @@ PersonalMonitorServer::PersonalMonitorServer(uint32_t sample_rate)
 
 PersonalMonitorServer::~PersonalMonitorServer() { stop(); }
 
-bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip) {
+bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip, uint16_t discovery_port) {
     stop();
     if (!sock_.open()) return false;
     if (!sock_.bind(bind_ip, bind_port)) {
@@ -320,6 +322,21 @@ bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip
     sock_.set_low_latency_qos();
     sock_.set_nonblocking(true);  // non-blocking poll (SO_RCVTIMEO=0 blocks forever on Winsock!)
     bound_port_ = sock_.local_port();
+
+    // Optional LAN UDP Broadcast Discovery responder (guarantees discovery even when mDNS is blocked)
+    disc_port_ = 0;
+    if (disc_sock_.open()) {
+        disc_sock_.set_broadcast(true);
+        if (disc_sock_.bind("0.0.0.0", discovery_port)) {
+            disc_sock_.set_nonblocking(true);
+            disc_port_ = disc_sock_.local_port();
+        } else {
+            disc_sock_.close();
+        }
+    }
+
+    total_control_rx_.store(0, std::memory_order_relaxed);
+    discovery_replies_.store(0, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
     return true;
 }
@@ -332,8 +349,15 @@ void PersonalMonitorServer::stop() {
         s.tx.reset();
         s.bus.reset();
     }
+    disc_sock_.close();
     sock_.close();
     bound_port_ = 0;
+    disc_port_ = 0;
+}
+
+void PersonalMonitorServer::set_studio_name(const std::string& name) {
+    std::lock_guard<std::mutex> lk(mu_);
+    studio_name_ = name.empty() ? "LanVid Studio" : name.substr(0, 63);
 }
 
 void PersonalMonitorServer::set_channel_name(int ch, const std::string& name) {
@@ -414,11 +438,12 @@ int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const E
             s.control_rx = 0;
             s.media_sample = 0;
             s.bus = std::make_unique<PersonalMonitorBus>(sample_rate_);
-            const Endpoint target_ep = ep;
+            // Always read slots_[i].ep dynamically so phone reconnects on a new UDP port keep working!
             s.tx = std::make_unique<AudioTxEngine>(
                 sample_rate_, kDefaultMtu,
-                [this, i, target_ep](const uint8_t* d, size_t n) {
-                    const bool ok = sock_.send_to(d, n, target_ep) == int(n);
+                [this, i](const uint8_t* d, size_t n) {
+                    const Endpoint dst = slots_[i].ep;
+                    const bool ok = sock_.send_to(d, n, dst) == int(n);
                     if (ok) ++slots_[i].packets_tx;
                     return ok;
                 });
@@ -467,6 +492,7 @@ void PersonalMonitorServer::handle_control_packet(const PacketHeader&, const uin
     s.ep = src;
     s.last_seen_us = now;
     ++s.control_rx;
+    total_control_rx_.fetch_add(1, std::memory_order_relaxed);
 
     switch (mc.op) {
         case MonitorControlOp::kHello:
@@ -528,9 +554,41 @@ void PersonalMonitorServer::poll_control() {
     uint8_t buf[2048];
     Endpoint src{};
     const uint64_t now = now_us();
+    const size_t req_len = std::strlen(kMonitorDiscoveryReq);
+
+    auto maybe_reply_discovery = [&](UdpSocket& s, const uint8_t* data, int n, const Endpoint& from) -> bool {
+        if (n < int(req_len) || std::memcmp(data, kMonitorDiscoveryReq, req_len) != 0) return false;
+        std::string name;
+        uint8_t ch = 8;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            name = studio_name_;
+            ch = active_in_channels_ ? active_in_channels_ : 8;
+        }
+        char resp[192];
+        const int rlen = std::snprintf(resp, sizeof(resp), "%s%u|%u|%s",
+                                       kMonitorDiscoveryRespPrefix, unsigned(bound_port_), unsigned(ch), name.c_str());
+        if (rlen > 0) {
+            s.send_to(reinterpret_cast<const uint8_t*>(resp), size_t(rlen), from);
+            discovery_replies_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return true;
+    };
+
+    // 1. Poll dedicated LAN UDP broadcast discovery socket (UDP :5021)
+    if (disc_port_ != 0) {
+        for (int i = 0; i < 16; ++i) {
+            const int n = disc_sock_.recv_from(buf, sizeof(buf), src);
+            if (n <= 0) break;
+            maybe_reply_discovery(disc_sock_, buf, n, src);
+        }
+    }
+
+    // 2. Poll main monitor control socket (UDP :5020)
     for (int i = 0; i < 32; ++i) {
         const int n = sock_.recv_from(buf, sizeof(buf), src);
         if (n <= 0) break;
+        if (maybe_reply_discovery(sock_, buf, n, src)) continue;
         PacketHeader h{};
         const uint8_t* payload = nullptr;
         if (parse_packet(buf, size_t(n), h, &payload) != PacketParseStatus::kOk) continue;
@@ -538,6 +596,57 @@ void PersonalMonitorServer::poll_control() {
             handle_control_packet(h, payload, h.payload_size, src, now);
         }
     }
+}
+
+std::vector<DiscoveredMonitorServer> discover_monitor_servers(int timeout_ms, uint16_t discovery_port,
+                                                              bool include_loopback) {
+    std::vector<DiscoveredMonitorServer> out;
+    UdpSocket s;
+    if (!s.open()) return out;
+    s.set_broadcast(true);
+    if (!s.bind("0.0.0.0", 0)) return out;
+    s.set_nonblocking(true);
+
+    const uint8_t* req = reinterpret_cast<const uint8_t*>(kMonitorDiscoveryReq);
+    const size_t req_len = std::strlen(kMonitorDiscoveryReq);
+
+    auto send_probe = [&](const char* ip) {
+        Endpoint ep{};
+        if (Endpoint::parse(ip, discovery_port, ep)) {
+            s.send_to(req, req_len, ep);
+        }
+    };
+    send_probe("255.255.255.255");
+    if (include_loopback) send_probe("127.0.0.1");
+
+    const size_t pfx_len = std::strlen(kMonitorDiscoveryRespPrefix);
+    const uint64_t deadline = now_us() + uint64_t(std::clamp(timeout_ms, 50, 3000)) * 1000ull;
+    uint8_t buf[512];
+    Endpoint from{};
+    while (now_us() < deadline) {
+        const int n = s.recv_from(buf, sizeof(buf) - 1, from);
+        if (n > int(pfx_len) && std::memcmp(buf, kMonitorDiscoveryRespPrefix, pfx_len) == 0) {
+            buf[n] = '\0';
+            const char* body = reinterpret_cast<const char*>(buf + pfx_len);
+            unsigned port = 0, ch = 8;
+            char name[96] = {};
+            if (std::sscanf(body, "%u|%u|%95[^\r\n]", &port, &ch, name) >= 2 && port > 0 && port <= 65535) {
+                std::string ip_full = from.to_string();
+                const auto colon = ip_full.rfind(':');
+                const std::string ip = (colon != std::string::npos) ? ip_full.substr(0, colon) : ip_full;
+                bool dup = false;
+                for (const auto& existing : out) {
+                    if (existing.ip == ip && existing.port == uint16_t(port)) { dup = true; break; }
+                }
+                if (!dup) {
+                    out.push_back({name[0] ? std::string(name) : "LanVid Studio", ip, uint16_t(port), uint8_t(ch)});
+                }
+            }
+            continue;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return out;
 }
 
 void PersonalMonitorServer::process_and_send(const float* const* in_planes, int num_in_ch, uint32_t frames) {

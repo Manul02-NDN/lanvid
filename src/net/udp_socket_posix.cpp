@@ -269,4 +269,10 @@ int UdpSocket::recv_batch(RecvDatagram* msgs, int max_count) const {
 #endif
 }
 
+bool UdpSocket::set_broadcast(bool enable) {
+    if (!is_open()) return false;
+    int opt = enable ? 1 : 0;
+    return ::setsockopt(fd_, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt)) == 0;
+}
+
 }  // namespace lv

@@ -3,6 +3,7 @@
 // quality / buffer changes (incl. Lossless), keepalive, stereo audio - plus the "_lanvid._udp" mDNS
 // announcement LanVid Studio publishes (Bonjour browse + resolve on Apple platforms).
 #include "mini_test.hpp"
+#include "audio/personal_monitor_bus.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -222,4 +223,73 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
     CHECK(mdns_port == port);
     CHECK(mdns_role == "monitor");
 #endif
+}
+
+TEST(monitor_discovery_and_handshake_across_interfaces) {
+    using namespace lv;
+
+    // 1. Start PersonalMonitorServer bound to 0.0.0.0 with ephemeral monitor + discovery ports
+    PersonalMonitorServer srv(48000);
+    srv.set_studio_name("LanVid Studio (Diag-PC)");
+    srv.set_channel_name(0, "Lead Vox");
+    srv.set_channel_name(1, "Guitar");
+    REQUIRE(srv.start(0, "0.0.0.0", 0));
+    const uint16_t mon_port = srv.bound_port();
+    const uint16_t disc_port = srv.discovery_port();
+    REQUIRE(mon_port != 0);
+    REQUIRE(disc_port != 0);
+
+    // Poll server on a background thread (just like LanVidStudioApp::render_frame())
+    std::atomic<bool> stop_srv{false};
+    std::thread srv_thread([&]() {
+        std::vector<float> ch0(240, 0.25f), ch1(240, -0.20f);
+        const float* planes[2] = {ch0.data(), ch1.data()};
+        while (!stop_srv.load(std::memory_order_relaxed)) {
+            srv.poll_control();
+            srv.process_and_send(planes, 2, 240);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    // 2. Discover studio via UDP LAN Broadcast Discovery (works even when mDNS/Bonjour is disabled)
+    const auto found = discover_monitor_servers(400, disc_port, /*include_loopback=*/true);
+    CHECK(!found.empty());
+    bool matched = false;
+    for (const auto& f : found) {
+        if (f.port == mon_port && f.name == "LanVid Studio (Diag-PC)") matched = true;
+    }
+    CHECK(matched);
+    CHECK(srv.discovery_replies() >= 1);
+
+    // 3. Direct kHello -> kSyncMetaResp handshake + audio streaming
+    PersonalMonitorClient cli(48000);
+    REQUIRE(cli.connect("127.0.0.1", mon_port, "iPhone-Diag", 256, 15));
+    for (int i = 0; i < 40 && (cli.meta_packets_rx() == 0 || cli.audio_packets_rx() < 5); ++i) {
+        cli.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(cli.meta_packets_rx() >= 1);
+    CHECK(cli.audio_packets_rx() >= 5);
+    CHECK(srv.total_control_rx() >= 1);
+
+    // 4. Reconnect regression test: client reconnects on a brand-new ephemeral UDP port!
+    cli.disconnect();
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    const uint64_t prev_audio = cli.audio_packets_rx();
+    REQUIRE(cli.connect("127.0.0.1", mon_port, "iPhone-Diag", 256, 15));
+    for (int i = 0; i < 40 && cli.audio_packets_rx() <= prev_audio + 5; ++i) {
+        cli.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(cli.audio_packets_rx() > prev_audio + 5);
+
+    std::printf("    [monitor discovery+handshake] found=%zu disc_replies=%llu ctrl_rx=%llu audio_rx=%llu (reconnect OK)\n",
+                found.size(), static_cast<unsigned long long>(srv.discovery_replies()),
+                static_cast<unsigned long long>(srv.total_control_rx()),
+                static_cast<unsigned long long>(cli.audio_packets_rx()));
+
+    cli.disconnect();
+    stop_srv.store(true);
+    srv_thread.join();
+    srv.stop();
 }

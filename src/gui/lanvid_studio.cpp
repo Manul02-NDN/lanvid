@@ -605,10 +605,31 @@ void LanVidStudioApp::init() {
     if (monitors_.empty() && cfg_.source_type == LV_SOURCE_SCREEN) {
         cfg_.source_type = LV_SOURCE_PATTERN;
     }
+
+    // Auto-start Personal Monitor Server (UDP :5020 + LAN Broadcast Discovery :5021 + mDNS)
+    // so smartphones running LanVid Monitor discover and connect immediately on launch.
+    const std::string studio_label = "LanVid Studio (" + local_host_name() + ")";
+    monitor_server_.set_studio_name(studio_label);
+    bool mon_ok = monitor_server_.start(kDefaultMonitorPort, "0.0.0.0", kDefaultMonitorDiscoveryPort);
+    if (!mon_ok) {
+        for (uint16_t p = 5023; p <= 5030 && !mon_ok; ++p) {
+            mon_ok = monitor_server_.start(p, "0.0.0.0", kDefaultMonitorDiscoveryPort);
+        }
+        if (!mon_ok) mon_ok = monitor_server_.start(0, "0.0.0.0", kDefaultMonitorDiscoveryPort);
+    }
+    if (mon_ok) {
+        monitor_mdns_.start(studio_label, monitor_server_.bound_port(),
+                            {{"role", "monitor"}, {"ver", LANVID_VERSION_STRING},
+                             {"ch", std::to_string(cfg_.aoip_channels)}});
+    }
+
     start_lan_scan();
 }
 
 void LanVidStudioApp::shutdown() {
+    monitor_mdns_.stop();
+    monitor_server_.stop();
+    tally_intercom_.stop();
     audio_matrix_.stop();
     stop_sender();
     stop_receiver();
@@ -1793,14 +1814,20 @@ void LanVidStudioApp::draw_mobile_monitor_section() {
     }
     ImGui::SameLine();
     if (monitor_server_.is_running()) {
-        ImGui::TextColored(kColGreen, "Активний (UDP :%u)", unsigned(monitor_server_.bound_port()));
+        ImGui::TextColored(kColGreen, "Активний  %s:%u",
+                           local_lan_ip_.c_str(), unsigned(monitor_server_.bound_port()));
     } else {
         ImGui::TextDisabled("Вимкнено (до 8 смартфонів, DSP на ПК)");
     }
 
     if (monitor_server_.is_running()) {
-        monitor_server_.poll_control();
         const auto phones = monitor_server_.clients();
+        ImGui::TextDisabled("  Адреса ПК: %s:%u  |  Пошук: %s + UDP :%u  |  RX: %llu  |  Disc: %llu",
+                            local_lan_ip_.c_str(), unsigned(monitor_server_.bound_port()),
+                            monitor_mdns_.running() ? "mDNS" : "Broadcast",
+                            unsigned(monitor_server_.discovery_port()),
+                            static_cast<unsigned long long>(monitor_server_.total_control_rx()),
+                            static_cast<unsigned long long>(monitor_server_.discovery_replies()));
         if (phones.empty()) {
             ImGui::TextDisabled("  Очікування підключення смартфонів (%s:%u)...",
                                 local_lan_ip_.c_str(), unsigned(monitor_server_.bound_port()));
@@ -4699,6 +4726,8 @@ void LanVidStudioApp::draw_patchbay_tab() {
 }
 
 void LanVidStudioApp::render_frame() {
+    if (monitor_server_.is_running()) monitor_server_.poll_control();
+    if (tally_intercom_.is_running()) tally_intercom_.poll();
     poll_telemetry_and_frames();
 
     // Global hotkeys (F11 fullscreen toggle, ESC exit fullscreen)

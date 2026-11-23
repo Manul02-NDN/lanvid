@@ -43,6 +43,8 @@ object MonitorEngine {
     private val peaks = ByteArray(64)
     private val tel = DoubleArray(10)
     private var lastPackets = 0L
+    private var connectStartedMs = 0L
+    private var handshakeConfirmed = false
 
     fun init(context: Context) {
         if (handle != 0L) return
@@ -68,6 +70,8 @@ object MonitorEngine {
             return
         }
         lastError = if (rc == -2) "Підключено, але аудіовихід AAudio не відкрився" else null
+        connectStartedMs = System.currentTimeMillis()
+        handshakeConfirmed = false
         connected = studio
         prefs.edit().putString("lastHost", studio.host).putInt("lastPort", studio.port).apply()
         pushDsp()
@@ -215,6 +219,15 @@ object MonitorEngine {
         }
         while (channels.size > n) channels.removeAt(channels.size - 1)
         val packets = tel[4].toLong()
+        if (n > 0 || packets > 0L) {
+            handshakeConfirmed = true
+            if (lastError?.startsWith("Немає відповіді") == true) lastError = null
+        } else if (!handshakeConfirmed && System.currentTimeMillis() - connectStartedMs > 3500L) {
+            val s = connected
+            if (s != null) {
+                lastError = "Немає відповіді від ${s.host}:${s.port} — перевірте Wi-Fi, LanVid Studio на ПК та Firewall (UDP 5020)"
+            }
+        }
         telemetry = Telemetry(
             gainReductionDb = tel[1].toFloat(), mixPeakDbfs = tel[2].toFloat(), bufferMs = tel[3],
             audioPackets = packets, receiving = packets > lastPackets,

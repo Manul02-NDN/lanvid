@@ -157,12 +157,15 @@ if ($ConfigureFirewall -and -not $CheckOnly) {
     try {
         Remove-NetFirewallRule -DisplayName "LanVid Studio (UDP In)" -ErrorAction SilentlyContinue
         Remove-NetFirewallRule -DisplayName "LanVid Studio (UDP Out)" -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName "LanVid Monitor & Discovery (UDP Ports)" -ErrorAction SilentlyContinue
         New-NetFirewallRule -DisplayName "LanVid Studio (UDP In)" -Direction Inbound -Action Allow `
-            -Protocol UDP -Program $appExe -Profile Private,Public -ErrorAction Stop | Out-Null
+            -Protocol UDP -Program $appExe -Profile Domain,Private,Public -ErrorAction Stop | Out-Null
         New-NetFirewallRule -DisplayName "LanVid Studio (UDP Out)" -Direction Outbound -Action Allow `
-            -Protocol UDP -Program $appExe -Profile Private,Public -ErrorAction Stop | Out-Null
+            -Protocol UDP -Program $appExe -Profile Domain,Private,Public -ErrorAction Stop | Out-Null
+        New-NetFirewallRule -DisplayName "LanVid Monitor & Discovery (UDP Ports)" -Direction Inbound -Action Allow `
+            -Protocol UDP -LocalPort 5000,5020,5021,5022,5099,5353 -Profile Domain,Private,Public -ErrorAction Stop | Out-Null
         $report.FirewallOk = $true
-        Write-Host "[PREFLIGHT] Windows Defender Firewall UDP rules configured."
+        Write-Host "[PREFLIGHT] Windows Defender Firewall UDP rules configured (Domain/Private/Public + ports 5020/5021/5022/5353)."
     } catch {
         Write-Host "[PREFLIGHT] Firewall rule requires Administrator privileges (skipped in per-user mode)."
     }
