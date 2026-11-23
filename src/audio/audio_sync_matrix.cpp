@@ -191,8 +191,13 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
         if (frac < 1e-9) return x0;
         float xm1 = x0, x1 = x0, x2 = x0;
         sample_at(*r, i0 - 1, xm1);
-        if (!sample_at(*r, i0 + 1, x1)) x1 = x0;
-        if (!sample_at(*r, i0 + 2, x2)) x2 = x1;
+        // The look-ahead samples must exist: substituting a missing one would give THIS channel a
+        // slightly different value than the others (a silent inter-channel phase error). Treat it as
+        // late data instead (gap -> concealment + underrun counter), like a missing x0.
+        if (!sample_at(*r, i0 + 1, x1) || !sample_at(*r, i0 + 2, x2)) {
+            ok = false;
+            return 0.0f;
+        }
         return hermite4(xm1, x0, x1, x2, float(frac));
     };
 
