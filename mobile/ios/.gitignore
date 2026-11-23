@@ -1,3 +1,8 @@
 build/
 *.xcodeproj/
 DerivedData/
+fastlane/report.xml
+fastlane/test_output/
+*.ipa
+*.p8
+*.dSYM.zip

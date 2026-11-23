@@ -15,6 +15,9 @@ final class MonitorEngine: ObservableObject {
     @Published private(set) var telemetry = MonitorTelemetry()
     @Published private(set) var audioStatus = ""
     @Published var lastError: String?
+    /// Demo Studio Preview: a simulated 8-channel studio, no network and no audio - lets everyone (App Review
+    /// included) explore every screen without a PC running LanVid Studio.
+    @Published private(set) var isDemo = false
 
     @Published var quality: StreamQuality = .k256 { didSet { if quality != oldValue { pushStream(); save() } } }
     @Published var buffer: MonitorBuffer = .ms10 { didSet { if buffer != oldValue { pushStream(); save() } } }
@@ -29,6 +32,8 @@ final class MonitorEngine: ObservableObject {
     private let scratchFrames = 8192
     private let scratch: UnsafeMutablePointer<Float>
     private var observers: [NSObjectProtocol] = []
+    private var demoTask: Task<Void, Never>?
+    static let demoStudio = StudioEndpoint(name: "Demo Studio", host: "demo", port: 0)
 
     init() {
         scratch = .allocate(capacity: 8192 * 2)
@@ -51,13 +56,17 @@ final class MonitorEngine: ObservableObject {
     // MARK: - Connection
 
     func connect(to studio: StudioEndpoint) {
+        if studio == Self.demoStudio { startDemo(); return }
         disconnect()
-        guard let h = lv_monitor_client_create(48000) else { lastError = "Не вдалося створити клієнт"; return }
+        guard let h = lv_monitor_client_create(48000) else {
+            lastError = tr("Не вдалося створити клієнт", "Could not create the monitor client")
+            return
+        }
         let rc = lv_monitor_client_connect(h, studio.host, studio.port, String(clientName.prefix(15)),
                                            quality.wireKbps, UInt16(buffer.rawValue))
         guard rc == 0 else {
             lv_monitor_client_destroy(h)
-            lastError = "Немає з'єднання з \(studio.host):\(studio.port)"
+            lastError = tr("Немає з'єднання з ", "Cannot connect to ") + "\(studio.host):\(studio.port)"
             return
         }
         cli = h
@@ -72,6 +81,7 @@ final class MonitorEngine: ObservableObject {
     }
 
     func disconnect() {
+        if isDemo { stopDemo(); return }
         stopAudio()
         io.running = false
         ioThread = nil
@@ -83,6 +93,90 @@ final class MonitorEngine: ObservableObject {
         cli = nil
         connected = nil
         telemetry = MonitorTelemetry()
+    }
+
+    // MARK: - Demo Studio Preview
+
+    private static let demoChannels = ["Kick", "Snare", "Bass", "Guitar L", "Guitar R", "Keys", "Vocal", "Click"]
+
+    func startDemo() {
+        if connected != nil { disconnect() }
+        isDemo = true
+        lastError = nil
+        let saved = loadMix()
+        channels = Self.demoChannels.enumerated().map { i, n in
+            var s = saved[i] ?? ChannelStrip(id: i, name: n)
+            s.name = n
+            return s
+        }
+        connected = Self.demoStudio
+        audioStatus = tr("Демо · без звуку", "Demo · no audio")
+        let t0 = Date()
+        demoTask?.cancel()
+        demoTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.tickDemo(Date().timeIntervalSince(t0))
+                try? await Task.sleep(nanoseconds: 66_000_000)
+            }
+        }
+    }
+
+    /// Mix + processing used for the App Store screenshots (launch argument -LVMarketing).
+    func applyMarketingPreset() {
+        guard isDemo else { return }
+        let gains: [Float] = [0, -2, -1, -6, -6, -4, 2.5, -12]
+        let pans: [Float] = [0, 0.1, 0, -0.55, 0.55, 0.3, 0, 0]
+        for i in channels.indices {
+            channels[i].gainDb = gains[i]
+            channels[i].pan = pans[i]
+            channels[i].mute = (i == 7)  // the click track is muted
+            channels[i].solo = false
+        }
+        var d = DspSettings()
+        d.hpf = .hz80
+        d.eqOn = true
+        d.eqLowDb = 2; d.eqMidDb = -3; d.eqMidHz = 2500; d.eqHighDb = 1.5
+        d.compOn = true; d.compThresholdDb = -26; d.compRatio = 4; d.compMakeupDb = 3
+        d.masterVolumeDb = -3
+        dsp = d
+        quality = .k256
+        buffer = .ms5
+    }
+
+    func stopDemo() {
+        demoTask?.cancel()
+        demoTask = nil
+        isDemo = false
+        connected = nil
+        channels = []
+        telemetry = MonitorTelemetry()
+        audioStatus = ""
+    }
+
+    /// Deterministic, musical-looking levels: every channel breathes at its own rate.
+    private func tickDemo(_ t: Double) {
+        var mix = -120.0
+        var level = [Double](repeating: -120, count: channels.count)
+        for i in channels.indices {
+            let f = 0.6 + 0.37 * Double(i)
+            let env = 0.5 + 0.5 * sin(t * f * 2 + Double(i) * 1.7)
+            let hit = pow(max(0, sin(t * (1.1 + 0.2 * Double(i)) * 3.1)), 3)
+            level[i] = -34 + 30 * (0.55 * env + 0.45 * hit)
+            channels[i].peakDbfs = Float(level[i])
+            let ch = channels[i]
+            let audible = !ch.mute && (!channels.contains { $0.solo } || ch.solo)
+            if audible { mix = max(mix, level[i] + Double(ch.gainDb) + 3 * Double(abs(ch.pan) < 0.01 ? 0 : 1)) }
+        }
+        let master = mix + Double(dsp.masterVolumeDb) + (dsp.compOn ? Double(dsp.compMakeupDb) : 0)
+        var gr = 0.0
+        if dsp.compOn {
+            let over = max(0, mix - Double(dsp.compThresholdDb))
+            gr = -min(24, over * (1 - 1 / Double(max(1, dsp.compRatio))))
+        }
+        let out = dsp.masterMute ? -120 : min(-0.5, master + gr)
+        telemetry = MonitorTelemetry(gainReductionDb: Float(gr), mixPeakDbfs: Float(out),
+                                     bufferMs: Double(buffer.rawValue) + 0.8, audioPackets: UInt64(t * 200),
+                                     receiving: true)
     }
 
     // MARK: - Mixer (sent instantly as kMonitorControl; the PC re-mixes the phone's stereo bus)
@@ -218,7 +312,7 @@ final class MonitorEngine: ObservableObject {
             try session.setPreferredIOBufferDuration(0.005)  // 240 frames @ 48 kHz
             try session.setActive(true)
         } catch {
-            lastError = "Аудіосесія: \(error.localizedDescription)"
+            lastError = tr("Аудіосесія: ", "Audio session: ") + error.localizedDescription
         }
         let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
         let scratch = self.scratch
@@ -242,10 +336,10 @@ final class MonitorEngine: ObservableObject {
         do {
             try engine.start()
         } catch {
-            lastError = "Аудіо: \(error.localizedDescription)"
+            lastError = tr("Аудіо: ", "Audio: ") + error.localizedDescription
         }
-        audioStatus = String(format: "%.0f кГц · буфер %.1f мс", session.sampleRate / 1000,
-                             session.ioBufferDuration * 1000)
+        audioStatus = String(format: tr("%.0f кГц · буфер %.1f мс", "%.0f kHz · buffer %.1f ms"),
+                             session.sampleRate / 1000, session.ioBufferDuration * 1000)
     }
 
     private func stopAudio() {
@@ -291,6 +385,7 @@ final class MonitorEngine: ObservableObject {
     private struct SavedStrip: Codable { var gainDb: Float; var pan: Float; var mute: Bool; var solo: Bool }
 
     private func saveMix() {
+        if isDemo { return }  // the simulated studio never overwrites the real mix
         var m: [String: SavedStrip] = [:]
         for c in channels { m[String(c.id)] = SavedStrip(gainDb: c.gainDb, pan: c.pan, mute: c.mute, solo: c.solo) }
         if let data = try? JSONEncoder().encode(m) { UserDefaults.standard.set(data, forKey: "mix") }

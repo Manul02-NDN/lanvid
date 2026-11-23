@@ -1,0 +1,36 @@
+name: iOS App Store screenshots (LanVid Monitor)
+
+# Renders the real app (Demo Studio) in the iOS Simulator and publishes the composed App Store screenshots
+# (EN + UK, 6.9" 1320x2868 and 6.7" 1290x2796) as the artifact "appstore-screenshots".
+# Copy them into mobile/ios/fastlane/screenshots/ (or: gh run download <id> -n appstore-screenshots).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  screenshots:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          brew install cmake ninja xcodegen
+          python3 -m pip install --user --break-system-packages Pillow || python3 -m pip install --user Pillow
+      - name: Boot-check the available simulators
+        run: xcrun simctl list devices available | head -40
+      - name: Build core, render the 4 screens x 2 languages, compose
+        run: |
+          chmod +x mobile/ios/scripts/*.sh
+          ./mobile/ios/scripts/build_core.sh
+          ./mobile/ios/scripts/make_screenshots.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appstore-screenshots
+          path: mobile/ios/fastlane/screenshots/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: raw-simulator-captures
+          path: mobile/ios/build/screenshots-raw/
+          if-no-files-found: warn

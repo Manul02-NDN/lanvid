@@ -1,0 +1,46 @@
+name: Publish Pages (Privacy Policy & Support)
+
+# Publishes docs/privacy-policy.html, docs/support.html and docs/index.html to
+#   https://manul02-ndn.github.io/lanvid/privacy-policy.html
+#   https://manul02-ndn.github.io/lanvid/support.html
+# One-time owner setup: Repository -> Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/privacy-policy.html'
+      - 'docs/support.html'
+      - 'docs/index.html'
+      - 'docs/lanvid-monitor-icon.png'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage the public pages only
+        run: |
+          mkdir -p _site
+          cp docs/index.html docs/privacy-policy.html docs/support.html docs/lanvid-monitor-icon.png _site/
+          touch _site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

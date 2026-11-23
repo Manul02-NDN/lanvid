@@ -1,0 +1,6 @@
+Version 2.6.0
+• First App Store release of LanVid Monitor
+• Automatic LanVid Studio discovery, 64-channel personal mixer with live meters
+• Server-side HPF, 3-band EQ, compressor and limiter
+• Stream quality up to Lossless, 5–20 ms buffer
+• Demo Studio to explore the app without a computer

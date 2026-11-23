@@ -1,0 +1,105 @@
+name: iOS App Store / TestFlight (LanVid Monitor)
+
+# Manual run only: Actions -> "iOS App Store / TestFlight (LanVid Monitor)" -> Run workflow.
+#   target = testflight  builds a signed .ipa and uploads it to TestFlight
+#   target = appstore    uploads the build + screenshots + metadata to App Store Connect
+#   submit_for_review    (appstore only) also submits the version to App Review
+# Needs three repository secrets (see mobile/ios/APPSTORE_SETUP.md):
+#   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_API_KEY_BASE64
+# Optional secret: APPLE_TEAM_ID (only if the team cannot be detected from the bundle ID).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Where to upload'
+        type: choice
+        options:
+          - testflight
+          - appstore
+        default: testflight
+      submit_for_review:
+        description: 'Submit for App Review (appstore only)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ios-appstore
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    name: Build & upload (${{ inputs.target }})
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      REVIEW_FIRST_NAME: ${{ secrets.REVIEW_FIRST_NAME }}
+      REVIEW_LAST_NAME: ${{ secrets.REVIEW_LAST_NAME }}
+      REVIEW_EMAIL: ${{ secrets.REVIEW_EMAIL }}
+      REVIEW_PHONE: ${{ secrets.REVIEW_PHONE }}
+      LC_ALL: en_US.UTF-8
+      LANG: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          missing=""
+          for v in APP_STORE_CONNECT_API_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_API_KEY_BASE64; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing GitHub Secrets:$missing - see mobile/ios/APPSTORE_SETUP.md"
+            exit 1
+          fi
+
+      - name: Restore the App Store Connect API key (.p8)
+        run: |
+          KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY"
+          chmod 600 "$KEY"
+          echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+
+      - name: Install tools
+        run: brew install cmake ninja xcodegen
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: mobile/ios
+
+      - name: Build LanVidCore.xcframework (libopus included)
+        run: |
+          chmod +x mobile/ios/scripts/build_core.sh
+          ./mobile/ios/scripts/build_core.sh
+
+      - name: Generate the Xcode project
+        working-directory: mobile/ios
+        run: xcodegen generate
+
+      - name: Fastlane beta (TestFlight)
+        if: ${{ inputs.target == 'testflight' }}
+        working-directory: mobile/ios
+        run: bundle exec fastlane beta
+
+      - name: Fastlane release (App Store Connect)
+        if: ${{ inputs.target == 'appstore' }}
+        working-directory: mobile/ios
+        run: bundle exec fastlane release submit:${{ inputs.submit_for_review }}
+
+      - name: Remove the API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+      - name: Keep the signed .ipa
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanVidMonitor-ipa
+          path: mobile/ios/build/ipa/*.ipa
+          if-no-files-found: ignore

@@ -1,0 +1,27 @@
+LanVid Monitor turns your iPhone into a personal monitor mixer for rehearsals, recording sessions and live stages. It connects to LanVid Studio running on a computer in the same Wi-Fi network and plays your own private stereo mix in your headphones.
+
+Requires LanVid Studio (Windows, macOS or Linux) on a computer in the same local network. No studio at hand? Open the built-in Demo Studio to explore every screen.
+
+FIND YOUR STUDIO IN ONE TAP
+• LanVid Studio appears automatically on your Wi-Fi (Bonjour). Or connect by IP address.
+
+YOUR OWN MIX, 64 CHANNELS
+• Live channel names and level meters from the studio
+• Vertical faders, L/R pan, Mute and Solo for every channel
+• Every change reaches the computer instantly — the mix is made on the computer and only the finished stereo sound is sent to your phone
+
+MONITOR FX — PROCESSING ON THE SERVER
+• High-pass filter (40 / 80 / 120 Hz)
+• 3-band equalizer with selectable mid frequency
+• Compressor with threshold, ratio, makeup gain and a Gain Reduction meter
+• Master limiter and headphone volume to protect your hearing
+
+LOW LATENCY, YOUR CHOICE
+• Buffer of 5, 10, 15 or 20 ms — the buffer you pick is the delay you hear
+• Stream quality from 128 kbit/s to Lossless
+• Sound keeps playing in your headphones when the screen is locked
+
+PRIVATE BY DESIGN
+• Works only on your local network. No account, no ads, no tracking, no data leaves your network.
+
+LanVid Monitor is part of the LanVid project: ultra-low-latency audio and video over your LAN.

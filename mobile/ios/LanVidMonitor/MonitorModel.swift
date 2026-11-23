@@ -6,7 +6,10 @@ enum StreamQuality: Int, CaseIterable, Identifiable, Codable {
     case k128 = 128, k192 = 192, k256 = 256, lossless = 0
     var id: Int { rawValue }
     var label: String { self == .lossless ? "Lossless" : "\(rawValue)" }
-    var detail: String { self == .lossless ? "24-bit PCM ≈ 2.3 Мбіт/с" : "\(rawValue) кбіт/с на канал" }
+    var detail: String {
+        self == .lossless ? tr("24-bit PCM ≈ 2.3 Мбіт/с", "24-bit PCM ≈ 2.3 Mbit/s")
+                          : tr("\(rawValue) кбіт/с на канал", "\(rawValue) kbit/s per channel")
+    }
     /// kHello value: total stereo kbps (2 x per channel) or LV_MONITOR_BITRATE_LOSSLESS.
     var wireKbps: UInt16 { self == .lossless ? UInt16(LV_MONITOR_BITRATE_LOSSLESS) : UInt16(rawValue * 2) }
 }
@@ -30,7 +33,7 @@ struct ChannelStrip: Identifiable, Equatable {
 enum HpfMode: Int, CaseIterable, Identifiable, Codable {
     case off = 0, hz40 = 40, hz80 = 80, hz120 = 120
     var id: Int { rawValue }
-    var label: String { self == .off ? "Off" : "\(rawValue) Гц" }
+    var label: String { self == .off ? "Off" : "\(rawValue) " + tr("Гц", "Hz") }
 }
 
 /// Server-side DSP of this phone's personal monitor bus (runs on the PC, PersonalMonitorBus).

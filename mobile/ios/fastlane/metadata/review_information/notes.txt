@@ -1,0 +1,18 @@
+LanVid Monitor is a companion app for LanVid Studio, a desktop application (Windows / macOS / Linux) that streams audio over a local network. The app finds the studio on the same Wi-Fi network and plays a personal stereo monitor mix.
+
+NO ACCOUNT OR LOGIN IS REQUIRED.
+
+HOW TO REVIEW WITHOUT A STUDIO (recommended):
+1. Launch the app. On the first screen (Connect) tap "Open Demo Studio".
+2. The Demo Studio is a simulated 8-channel studio (no network, no audio). Open the tabs:
+   - Mixer: faders, pan, Mute/Solo, live level meters, stream quality and buffer.
+   - Monitor FX: high-pass filter, 3-band EQ, compressor with Gain Reduction meter, limiter and volume.
+   - Settings: device name, Privacy Policy and Support links, version, "Leave Demo Studio".
+3. Tap "Disconnect" on the Connect tab or "Leave Demo Studio" in Settings to return to the normal screen.
+
+LOCAL NETWORK PERMISSION: on the Connect screen the app browses for the Bonjour service _lanvid._udp to find LanVid Studio on the user's Wi-Fi, so iOS shows the Local Network permission prompt (NSLocalNetworkUsageDescription). Denying it does not block the app: the Demo Studio and connecting by IP address stay available.
+
+BACKGROUND AUDIO: the app declares the "audio" background mode so the monitor mix keeps playing in headphones while the screen is locked (it plays a live audio stream received from the studio).
+
+PRIVACY: the app collects no data, has no accounts, no ads and no third-party SDKs; all traffic stays on the local network. Privacy Policy: https://manul02-ndn.github.io/lanvid/privacy-policy.html
+Encryption: only standard OS networking is used; no custom encryption (ITSAppUsesNonExemptEncryption = NO).

@@ -1,0 +1,184 @@
+# LanVid Monitor - App Store / TestFlight automation.
+#
+#   bundle exec fastlane beta                       build a signed .ipa and upload it to TestFlight
+#   bundle exec fastlane release                    build + upload .ipa, screenshots and metadata to App Store Connect
+#   bundle exec fastlane release submit:true        ... and submit the version for App Review
+#   bundle exec fastlane metadata                   metadata + screenshots only (no new build)
+#
+# Authentication: App Store Connect API key from the environment (GitHub Secrets):
+#   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_ISSUER_ID and the .p8 key as either
+#   APP_STORE_CONNECT_API_KEY_PATH (file) or APP_STORE_CONNECT_API_KEY_BASE64 (base64 of the .p8 file).
+# Signing: Xcode automatic signing with -allowProvisioningUpdates (the API key creates / downloads the
+#   distribution certificate and profile). Team ID: TEAM_ID if set, otherwise read from the bundle ID record.
+
+default_platform(:ios)
+
+BUNDLE_ID = (ENV["APP_IDENTIFIER"] || "com.manul02.lanvid.monitor").freeze
+SCHEME = "LanVidMonitor".freeze
+PROJECT = "LanVidMonitor.xcodeproj".freeze
+
+platform :ios do
+  # ---------------------------------------------------------------------------------------------
+  # Helpers
+  # ---------------------------------------------------------------------------------------------
+
+  def require_env!(*names)
+    missing = names.select { |n| ENV[n].nil? || ENV[n].strip.empty? }
+    return if missing.empty?
+    UI.user_error!("Missing #{missing.join(', ')}. Add them as GitHub Secrets / environment variables " \
+                   "(see mobile/ios/APPSTORE_SETUP.md).")
+  end
+
+  # Path of the .p8 key (decoded from APP_STORE_CONNECT_API_KEY_BASE64 when no file is given).
+  def api_key_path
+    return ENV["APP_STORE_CONNECT_API_KEY_PATH"] if ENV["APP_STORE_CONNECT_API_KEY_PATH"].to_s != ""
+    require_env!("APP_STORE_CONNECT_API_KEY_BASE64")
+    path = File.join(Dir.tmpdir, "AuthKey_#{ENV['APP_STORE_CONNECT_API_KEY_ID']}.p8")
+    File.write(path, Base64.decode64(ENV["APP_STORE_CONNECT_API_KEY_BASE64"]))
+    path
+  end
+
+  def connect_api_key
+    require_env!("APP_STORE_CONNECT_API_KEY_ID", "APP_STORE_CONNECT_ISSUER_ID")
+    app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_API_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_filepath: api_key_path,
+      in_house: false
+    )
+  end
+
+  # Developer team: TEAM_ID, or the team prefix (seedId) of the app's bundle ID. The bundle ID is registered
+  # through the API when it does not exist yet (needs a key with the Admin or App Manager role).
+  def resolve_team_id
+    team = ENV["TEAM_ID"].to_s.strip
+    return team unless team.empty?
+    begin
+      bundle = Spaceship::ConnectAPI::BundleId.find(BUNDLE_ID)
+      if bundle.nil?
+        UI.message("Registering bundle ID #{BUNDLE_ID}")
+        bundle = Spaceship::ConnectAPI::BundleId.create(name: "LanVid Monitor", platform: "IOS", identifier: BUNDLE_ID)
+      end
+      team = bundle.seed_id.to_s
+    rescue StandardError => e
+      UI.important("Could not read the team ID from App Store Connect: #{e.message}")
+    end
+    UI.user_error!("Team ID unknown. Set the TEAM_ID environment variable / GitHub Secret APPLE_TEAM_ID " \
+                   "(10 characters, developer.apple.com -> Membership details).") if team.empty?
+    UI.message("Using team #{team}")
+    team
+  end
+
+  def build_number
+    (ENV["GITHUB_RUN_NUMBER"] || ENV["BUILD_NUMBER"] || Time.now.strftime("%y%m%d%H%M")).to_s
+  end
+
+  # ---------------------------------------------------------------------------------------------
+  # Lanes
+  # ---------------------------------------------------------------------------------------------
+
+  desc "Build a signed App Store .ipa (automatic signing through the App Store Connect API key)"
+  lane :build_ipa do
+    key = connect_api_key
+    team = resolve_team_id
+    auth = ["-allowProvisioningUpdates",
+            "-authenticationKeyPath #{api_key_path}",
+            "-authenticationKeyID #{ENV['APP_STORE_CONNECT_API_KEY_ID']}",
+            "-authenticationKeyIssuerID #{ENV['APP_STORE_CONNECT_ISSUER_ID']}"].join(" ")
+    build_app(
+      project: PROJECT,
+      scheme: SCHEME,
+      configuration: "Release",
+      clean: true,
+      output_directory: "build/ipa",
+      output_name: "LanVidMonitor.ipa",
+      export_method: "app-store",
+      export_team_id: team,
+      export_options: { signingStyle: "automatic", teamID: team, manageAppVersionAndBuildNumber: false },
+      xcargs: "#{auth} DEVELOPMENT_TEAM=#{team} CODE_SIGN_STYLE=Automatic CURRENT_PROJECT_VERSION=#{build_number}",
+      export_xcargs: auth,
+      skip_profile_detection: true
+    )
+    key
+  end
+
+  desc "Build and upload to TestFlight"
+  lane :beta do
+    key = build_ipa
+    notes = File.join(__dir__, "metadata", "en-US", "release_notes.txt")
+    upload_to_testflight(
+      api_key: key,
+      ipa: lane_context[SharedValues::IPA_OUTPUT_PATH],
+      changelog: File.exist?(notes) ? File.read(notes) : nil,
+      skip_waiting_for_build_processing: true,
+      distribute_external: false
+    )
+  end
+
+  desc "Upload build, screenshots and metadata to App Store Connect (option submit:true submits for review)"
+  lane :release do |options|
+    submit = options[:submit].to_s == "true" || ENV["SUBMIT_FOR_REVIEW"].to_s == "true"
+    verify_review_contact! if submit
+    key = build_ipa
+    deliver_to_store(key, lane_context[SharedValues::IPA_OUTPUT_PATH], submit)
+  end
+
+  desc "Upload only screenshots and metadata (no new binary)"
+  lane :metadata do |options|
+    submit = options[:submit].to_s == "true"
+    verify_review_contact! if submit
+    deliver_to_store(connect_api_key, nil, submit)
+  end
+
+  # App Review needs a real contact person: first/last name, e-mail and phone in
+  # fastlane/metadata/review_information/*.txt (or REVIEW_* environment variables).
+  def review_information
+    dir = File.join(__dir__, "metadata", "review_information")
+    read = lambda do |file, env|
+      v = ENV[env].to_s.strip
+      v = File.read(File.join(dir, file)).strip if v.empty? && File.exist?(File.join(dir, file))
+      v
+    end
+    {
+      first_name: read.call("first_name.txt", "REVIEW_FIRST_NAME"),
+      last_name: read.call("last_name.txt", "REVIEW_LAST_NAME"),
+      email_address: read.call("email_address.txt", "REVIEW_EMAIL"),
+      phone_number: read.call("phone_number.txt", "REVIEW_PHONE"),
+      demo_user: "",
+      demo_password: "",
+      notes: read.call("notes.txt", "REVIEW_NOTES")
+    }
+  end
+
+  def verify_review_contact!
+    info = review_information
+    bad = [:first_name, :last_name, :email_address, :phone_number].select do |k|
+      info[k].empty? || info[k].start_with?("FILL_IN")
+    end
+    return if bad.empty?
+    UI.user_error!("App Review contact is not filled in (#{bad.join(', ')}). Edit " \
+                   "mobile/ios/fastlane/metadata/review_information/*.txt or set REVIEW_FIRST_NAME, REVIEW_LAST_NAME, " \
+                   "REVIEW_EMAIL, REVIEW_PHONE before submitting for review.")
+  end
+
+  def deliver_to_store(key, ipa, submit)
+    upload_to_app_store(
+      api_key: key,
+      ipa: ipa,
+      skip_binary_upload: ipa.nil?,
+      metadata_path: File.join(__dir__, "metadata"),
+      screenshots_path: File.join(__dir__, "screenshots"),
+      app_rating_config_path: File.join(__dir__, "age_rating.json"),
+      app_review_information: review_information,
+      submission_information: { export_compliance_uses_encryption: false, add_id_info_uses_idfa: false },
+      languages: %w[en-US uk],
+      overwrite_screenshots: true,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      run_precheck_before_submit: false,
+      automatic_release: false,
+      submit_for_review: submit,
+      reject_if_possible: false
+    )
+  end
+end

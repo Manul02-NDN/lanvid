@@ -41,8 +41,8 @@ struct VerticalFader: View {
         }
         .frame(width: 44, height: height)
         .accessibilityElement()
-        .accessibilityLabel("Гучність")
-        .accessibilityValue(String(format: "%.1f дБ", valueDb))
+        .accessibilityLabel(tr("Гучність", "Volume"))
+        .accessibilityValue(String(format: tr("%.1f дБ", "%.1f dB"), valueDb))
         .accessibilityAdjustableAction { dir in
             valueDb = min(max(valueDb + (dir == .increment ? 1 : -1), range.lowerBound), range.upperBound)
         }
@@ -133,7 +133,7 @@ struct ParamSlider: View {
     @Binding var value: Float
     var range: ClosedRange<Float>
     var step: Float = 0.5
-    var format: String = "%.1f дБ"
+    var format: String = tr("%.1f дБ", "%.1f dB")
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {

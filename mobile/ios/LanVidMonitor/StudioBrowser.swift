@@ -15,15 +15,23 @@ final class StudioBrowser: ObservableObject {
 
     func start() {
         stop()
+        // Screenshot builds only (-LVFakeStudios): show two discovered studios instead of browsing.
+        if CommandLine.arguments.contains("-LVFakeStudios") {
+            studios = [StudioEndpoint(name: "Studio PC — LanVid Studio", host: "192.168.1.20", port: 5020),
+                       StudioEndpoint(name: "MacBook Pro — LanVid Studio", host: "192.168.1.34", port: 5020)]
+            status = ""
+            return
+        }
+        if CommandLine.arguments.contains("-LVDemo") { return }  // no Local Network prompt over the demo run
         let params = NWParameters.udp
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: "_lanvid._udp", domain: nil), using: params)
         b.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 switch state {
-                case .ready: self?.status = "Пошук LanVid Studio у Wi-Fi мережі…"
-                case .failed(let e): self?.status = "Пошук недоступний: \(e.localizedDescription)"
-                case .waiting(let e): self?.status = "Дозвольте доступ до локальної мережі (\(e.localizedDescription))"
+                case .ready: self?.status = tr("Пошук LanVid Studio у Wi-Fi мережі…", "Searching for LanVid Studio on your Wi-Fi…")
+                case .failed(let e): self?.status = tr("Пошук недоступний: ", "Search unavailable: ") + e.localizedDescription
+                case .waiting(let e): self?.status = tr("Дозвольте доступ до локальної мережі", "Allow Local Network access") + " (\(e.localizedDescription))"
                 default: break
                 }
             }

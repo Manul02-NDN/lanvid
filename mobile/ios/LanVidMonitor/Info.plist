@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>LanVid Monitor</string>
 	<key>CFBundleExecutable</key>
@@ -12,6 +12,11 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>uk</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -27,7 +32,7 @@
 		<string>_lanvid._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>LanVid Monitor шукає LanVid Studio у вашій Wi-Fi мережі та отримує від неї персональний моніторинговий мікс.</string>
+	<string>LanVid Monitor connects to LanVid Studio on your local Wi-Fi network to find it and to receive your personal monitor mix.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

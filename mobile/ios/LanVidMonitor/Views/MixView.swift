@@ -5,23 +5,24 @@ struct MixView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            Card(title: "Моніторинговий стереопотік") {
+            Card(title: tr("Моніторинговий стереопотік", "Monitor stereo stream")) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Якість").font(.caption).foregroundStyle(Theme.muted)
+                    Text(tr("Якість", "Quality")).font(.caption).foregroundStyle(Theme.muted)
                     SegmentRow(items: StreamQuality.allCases, selection: $engine.quality) { $0.label }
                     Text(engine.quality.detail).font(.caption2).foregroundStyle(Theme.muted)
-                    Text("Буфер").font(.caption).foregroundStyle(Theme.muted)
-                    SegmentRow(items: MonitorBuffer.allCases, selection: $engine.buffer) { "\($0.rawValue) мс" }
+                    Text(tr("Буфер", "Buffer")).font(.caption).foregroundStyle(Theme.muted)
+                    SegmentRow(items: MonitorBuffer.allCases, selection: $engine.buffer) { "\($0.rawValue) " + tr("мс", "ms") }
                 }
             }
             if engine.connected == nil {
                 Spacer()
-                Text("Підключіться до LanVid Studio на вкладці «Підключення».")
+                Text(tr("Підключіться до LanVid Studio на вкладці «Підключення» або відкрийте Demo Studio.",
+                         "Connect to LanVid Studio on the Connect tab, or open the Demo Studio."))
                     .foregroundStyle(Theme.muted).multilineTextAlignment(.center).padding()
                 Spacer()
             } else if engine.channels.isEmpty {
                 Spacer()
-                ProgressView("Отримання каналів…").tint(Theme.accent2).foregroundStyle(Theme.muted)
+                ProgressView(tr("Отримання каналів…", "Receiving channels…")).tint(Theme.accent2).foregroundStyle(Theme.muted)
                 Spacer()
             } else {
                 ScrollView(.horizontal, showsIndicators: true) {
@@ -33,10 +34,10 @@ struct MixView: View {
                     .padding(.horizontal)
                 }
                 HStack {
-                    Text("Мікс виконується на ПК — у телефон надходить готове стерео.")
+                    Text(tr("Мікс виконується на ПК — у телефон надходить готове стерео.", "Mixing runs on the PC — the phone receives the finished stereo."))
                         .font(.caption2).foregroundStyle(Theme.muted)
                     Spacer()
-                    Button("Скинути") { engine.resetMix() }.font(.caption).tint(Theme.accent2)
+                    Button(tr("Скинути", "Reset")) { engine.resetMix() }.font(.caption).tint(Theme.accent2)
                 }
                 .padding(.horizontal)
             }

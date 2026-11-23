@@ -1,9 +1,9 @@
 # XcodeGen spec for LanVid Monitor (iOS). Generate the project:
-#   ../../mobile/ios/scripts/build_core.sh   # LanVidCore.xcframework (once / after core changes)
+#   ./scripts/build_core.sh                 # LanVidCore.xcframework (once / after core changes)
 #   xcodegen generate                        # -> LanVidMonitor.xcodeproj
 name: LanVidMonitor
 options:
-  bundleIdPrefix: com.lanvid
+  bundleIdPrefix: com.manul02
   deploymentTarget:
     iOS: "16.0"
   createIntermediateGroups: true
@@ -11,6 +11,7 @@ settings:
   base:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "2.6.0"
+    # Build number: Fastlane / CI passes CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER (unique per upload)
     CURRENT_PROJECT_VERSION: "260"
 targets:
   LanVidMonitor:
@@ -30,10 +31,12 @@ targets:
       - sdk: CoreVideo.framework
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.lanvid.monitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.manul02.lanvid.monitor
         PRODUCT_NAME: LanVid Monitor
         OTHER_LDFLAGS: ["-lc++"]
-        TARGETED_DEVICE_FAMILY: "1,2"
+        # iPhone only (no iPad screenshots / multitasking requirements at submission)
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
     info:
       path: LanVidMonitor/Info.plist
@@ -45,7 +48,10 @@ targets:
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, uk]
         UIBackgroundModes: [audio]
-        NSLocalNetworkUsageDescription: "LanVid Monitor шукає LanVid Studio у вашій Wi-Fi мережі та отримує від неї персональний моніторинговий мікс."
+        # Localized variants live in LanVidMonitor/Resources/{en,uk}.lproj/InfoPlist.strings
+        NSLocalNetworkUsageDescription: "LanVid Monitor connects to LanVid Studio on your local Wi-Fi network to find it and to receive your personal monitor mix."
         NSBonjourServices: [_lanvid._udp]
         ITSAppUsesNonExemptEncryption: false
