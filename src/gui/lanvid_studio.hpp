@@ -66,6 +66,9 @@ private:
     void scan_aoip_nodes();
 
     void draw_top_bar();
+    void draw_sidebar();
+    void draw_studio_config_panel();
+    void draw_segmented_vu(float dbfs, float width, float height);
     void draw_sender_tab();
     void draw_receiver_tab();
     void draw_fullscreen_receiver();
@@ -154,6 +157,7 @@ private:
     int matrix_dst_slot_ = 0;  // default Virtual Bus (DAW)
     int matrix_src_page_ = 0;  // 0..3 (blocks of 16 channels)
     int matrix_dst_page_ = 0;  // 0..3 (blocks of 16 channels)
+    int matrix_active_preset_ = 0;  // 0, 1, 2, or -1 (custom)
     float matrix_new_gain_db_ = 0.0f;
 
     // UI status / toast notifications
