@@ -100,18 +100,18 @@ fun BroadcastScreen(
     LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
         if (ui.mode == BroadcastMode.SENDER && ui.senderActive && ui.destIp.isNotBlank()) {
             LanVidNative.nativeTallyConnect(ui.destIp, 5022, 1, proState.cameraLabel)
-            LanVidNative.nativeIntercomSetState(proState.pttActive, proState.latchActive, proState.ifbEnabled, proState.ifbGain)
+            LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
             while (true) {
                 delay(100)
-                val raw = LanVidNative.nativeTallyPollJson(battery.coerceAtLeast(0), 34, ui.senderActive)
+                val raw = LanVidNative.nativeTallyPollJson(battery.coerceAtLeast(0), 34)
                 if (raw.isNotEmpty()) {
                     runCatching {
                         val obj = JSONObject(raw)
                         val tVal = obj.optInt("tally", 0)
                         val tState = when (tVal) {
-                            2 -> TallyState.PROGRAM
-                            1 -> TallyState.PREVIEW
-                            else -> TallyState.STANDBY
+                            2 -> TallyStatus.PROGRAM
+                            1 -> TallyStatus.PREVIEW
+                            else -> TallyStatus.STANDBY
                         }
                         proState = proState.copy(
                             tally = tState,
@@ -125,7 +125,7 @@ fun BroadcastScreen(
             }
         } else {
             LanVidNative.nativeTallyDisconnect()
-            proState = proState.copy(tally = TallyState.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
+            proState = proState.copy(tally = TallyStatus.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
         }
     }
 
@@ -312,9 +312,9 @@ fun BroadcastScreen(
 
     val tally = when {
         ui.mode == BroadcastMode.SENDER && ui.senderActive -> when (proState.tally) {
-            TallyState.PROGRAM -> TallyVisual.PROGRAM
-            TallyState.PREVIEW -> TallyVisual.PREVIEW
-            TallyState.STANDBY -> TallyVisual.OFF
+            TallyStatus.PROGRAM -> TallyVisual.PROGRAM
+            TallyStatus.PREVIEW -> TallyVisual.PREVIEW
+            TallyStatus.STANDBY -> TallyVisual.OFF
         }
         ui.receiverActive -> TallyVisual.PREVIEW
         else -> TallyVisual.OFF
@@ -394,8 +394,8 @@ fun BroadcastScreen(
             ProCameraHudOverlay(
                 state = proState,
                 onStateChange = { proState = it },
-                onIntercomChanged = { ptt, latch, ifb, gain ->
-                    LanVidNative.nativeIntercomSetState(ptt, latch, ifb, gain)
+                onIntercomChanged = { talk, listenMuted, rxGain ->
+                    LanVidNative.nativeIntercomSetState(talk, listenMuted, rxGain, 0f)
                 },
                 modifier = Modifier
                     .fillMaxSize()
