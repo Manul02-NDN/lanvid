@@ -120,7 +120,8 @@ TEST(hal_driver_bundle_loads_and_streams) {
     host.host_write_rx(rxpp.data(), 64, kN);
 
     std::vector<float> io(size_t(64) * kN);
-    (*g_drv)->DoIOOperation(g_drv, 2, 3, 1, kAudioServerPlugInIOOperationReadInput, kN, nullptr, io.data(), nullptr);
+    AudioServerPlugInIOCycleInfo cycle{};  // the HAL always passes a (non-null) cycle info
+    (*g_drv)->DoIOOperation(g_drv, 2, 3, 1, kAudioServerPlugInIOOperationReadInput, kN, &cycle, io.data(), nullptr);
     int bad_in = 0;
     for (UInt32 i = 0; i < kN; ++i)
         for (int c = 0; c < 64; ++c)
@@ -129,7 +130,7 @@ TEST(hal_driver_bundle_loads_and_streams) {
     // DAW output -> TX -> host: channel c carries -(c + i/1000)
     for (UInt32 i = 0; i < kN; ++i)
         for (int c = 0; c < 64; ++c) io[size_t(i) * 64 + c] = -(float(c) + float(i) / 1000.0f);
-    (*g_drv)->DoIOOperation(g_drv, 2, 4, 1, kAudioServerPlugInIOOperationWriteMix, kN, nullptr, io.data(), nullptr);
+    (*g_drv)->DoIOOperation(g_drv, 2, 4, 1, kAudioServerPlugInIOOperationWriteMix, kN, &cycle, io.data(), nullptr);
     CHECK(host.driver_connected());
     CHECK(host.header()->buffer_size.load() == kN);
     CHECK(std::string(host.header()->driver_name) == "CoreAudio HAL");

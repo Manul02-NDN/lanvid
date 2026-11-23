@@ -203,13 +203,55 @@ struct MidiInputPort::Impl {
         const uint64_t ts = now_us();
         const MIDIPacket* pkt = &list->packet[0];
         for (UInt32 i = 0; i < list->numPackets; ++i) {
-            if (pkt->length >= 1) {
-                const uint8_t st = pkt->data[0];
-                const uint8_t d1 = pkt->length >= 2 ? pkt->data[1] : 0;
-                const uint8_t d2 = pkt->length >= 3 ? pkt->data[2] : 0;
-                self->cb(st, d1, d2, ts);
-            }
+            self->parse_packet(pkt->data, pkt->length, ts);
             pkt = MIDIPacketNext(pkt);
+        }
+    }
+
+    // A MIDIPacket may hold SEVERAL messages (CoreMIDI coalesces events sent close together),
+    // with running status, interleaved real-time bytes and SysEx. Deliver every short message.
+    static int data_len(uint8_t st) {
+        if (st < 0xF0) {
+            const uint8_t hi = st & 0xF0;
+            return (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
+        }
+        if (st == 0xF1 || st == 0xF3) return 1;  // MTC quarter frame, song select
+        if (st == 0xF2) return 2;                // song position
+        return 0;                                // F6 tune request, F8..FF real-time
+    }
+    void parse_packet(const Byte* d, UInt16 len, uint64_t ts) {
+        uint8_t running = 0;
+        UInt16 i = 0;
+        while (i < len) {
+            const uint8_t b = d[i];
+            if (b >= 0xF8) {  // real-time: single byte, may appear anywhere
+                cb(b, 0, 0, ts);
+                ++i;
+                continue;
+            }
+            if (b == 0xF0) {  // SysEx: not a short message -> skip to EOX
+                while (i < len && d[i] != 0xF7) ++i;
+                ++i;
+                running = 0;
+                continue;
+            }
+            uint8_t st;
+            if (b & 0x80) {
+                st = b;
+                running = (b < 0xF0) ? b : 0;
+                ++i;
+            } else if (running) {
+                st = running;  // running status: data bytes follow directly
+            } else {
+                ++i;  // stray data byte
+                continue;
+            }
+            const int n = data_len(st);
+            if (i + n > len) break;
+            const uint8_t d1 = n >= 1 ? d[i] : 0;
+            const uint8_t d2 = n >= 2 ? d[i + 1] : 0;
+            cb(st, d1, d2, ts);
+            i = UInt16(i + n);
         }
     }
 };
