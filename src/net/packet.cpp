@@ -398,14 +398,19 @@ bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload&
 }
 
 size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t num_channels,
-                          const MonitorMetaChannel* channels) {
+                          const MonitorMetaChannel* channels, const MonitorBusTelemetry* bus) {
     const uint8_t n = num_channels > kMaxAudioChannels ? uint8_t(kMaxAudioChannels) : num_channels;
     const size_t total = 8 + size_t(n) * 17;
     if (cap < total) return 0;
     out[0] = uint8_t(MonitorControlOp::kSyncMetaResp);
     out[1] = n;
     out[2] = 0;
-    out[3] = 0;
+    out[3] = uint8_t(int8_t(-120));
+    if (bus) {
+        const float gr = bus->gain_reduction_db < 0.0f ? -bus->gain_reduction_db : 0.0f;
+        out[2] = uint8_t(gr * 4.0f >= 255.0f ? 255 : int(gr * 4.0f + 0.5f));
+        out[3] = uint8_t(bus->mix_peak_dbfs);
+    }
     store_le32(out + 4, client_id);
     for (uint8_t i = 0; i < n; ++i) {
         uint8_t* dst = out + 8 + size_t(i) * 17;
@@ -422,11 +427,15 @@ size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t 
 }
 
 bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint8_t& num_channels,
-                        MonitorMetaChannel* out_channels, uint8_t max_channels) {
+                        MonitorMetaChannel* out_channels, uint8_t max_channels, MonitorBusTelemetry* bus) {
     if (len < 8 || in[0] != uint8_t(MonitorControlOp::kSyncMetaResp)) return false;
     const uint8_t n = in[1];
     if (n > kMaxAudioChannels || len < 8 + size_t(n) * 17) return false;
     client_id = load_le32(in + 4);
+    if (bus) {
+        bus->gain_reduction_db = -float(in[2]) / 4.0f;
+        bus->mix_peak_dbfs = int8_t(in[3]);
+    }
     num_channels = n;
     const uint8_t copy_n = (n < max_channels) ? n : max_channels;
     for (uint8_t i = 0; i < copy_n; ++i) {

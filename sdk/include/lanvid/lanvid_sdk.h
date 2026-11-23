@@ -293,6 +293,35 @@ LV_API int lv_monitor_client_set_dsp(LvMonitorClientHandle* cli, const LV_Monito
 LV_API void lv_monitor_client_poll(LvMonitorClientHandle* cli);
 LV_API void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames);
 
+/* ---- Mobile monitor app helpers (additive) ---- */
+/* bitrate_kbps for connect / set_stream: total stereo kbps (128..512 = 64..256 per channel, ADPCM) or: */
+#define LV_MONITOR_BITRATE_LOSSLESS 0xFFFF /* 24-bit PCM, ~2.3 Mbps stereo */
+
+typedef struct LV_MonitorMetaChannel {
+    char name[16];     /* channel name from LanVid Studio (null-terminated) */
+    int8_t peak_dbfs;  /* live input VU, -120..0 dBFS */
+    uint8_t reserved[3];
+} LV_MonitorMetaChannel;
+
+typedef struct LV_MonitorTelemetry {
+    int32_t connected;
+    int32_t num_channels;           /* active channels on the PC */
+    float bus_gain_reduction_db;    /* this phone's compressor + limiter GR, <= 0 dB */
+    float bus_peak_dbfs;            /* peak of the stereo mix the PC sends to this phone */
+    double buffer_ms;               /* measured playout buffer on the phone */
+    uint64_t audio_packets_rx;
+    uint64_t meta_packets_rx;
+} LV_MonitorTelemetry;
+
+/* Copies the last channel list (names + VU) received from the PC; returns the channel count (may exceed
+ * max_channels). `tel` (optional) receives bus telemetry. Call lv_monitor_client_request_meta() ~10-20x/s. */
+LV_API int lv_monitor_client_get_meta(LvMonitorClientHandle* cli, LV_MonitorMetaChannel* out, int max_channels,
+                                      LV_MonitorTelemetry* tel);
+/* Live change of stream quality / buffer without reconnecting (also re-registers with the PC). */
+LV_API int lv_monitor_client_set_stream(LvMonitorClientHandle* cli, uint16_t bitrate_kbps, uint16_t latency_ms);
+/* Keepalive: the PC drops phones it has not heard from for 15 s. Call every 1-3 s. */
+LV_API int lv_monitor_client_keepalive(LvMonitorClientHandle* cli);
+
 /* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
 typedef struct LV_ControlSyncState {
     uint64_t revision;           /* monotonic version (anti-loop / dedup) */

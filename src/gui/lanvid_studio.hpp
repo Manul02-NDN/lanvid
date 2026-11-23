@@ -10,6 +10,7 @@
 
 #include "audio/multi_device_matrix.hpp"
 #include "audio/personal_monitor_bus.hpp"
+#include "net/mdns_advertiser.hpp"
 #include "audio/shm_audio_host.hpp"
 #include "midi/midi_device_manager.hpp"
 #include "gui/app_config.hpp"
@@ -212,6 +213,7 @@ private:
     // Multi-Device Audio Matrix (64x64 across up to 8 slots)
     MultiDeviceAudioMatrix audio_matrix_;
     PersonalMonitorServer monitor_server_{48000};
+    MdnsAdvertiser monitor_mdns_;  // "_lanvid._udp" so LanVid Monitor phones find this studio in one tap
     std::atomic<bool> matrix_has_net_tx_routes_{false};
     double dpx_tx_mbps_ = 0.0;
     double dpx_rx_mbps_ = 0.0;

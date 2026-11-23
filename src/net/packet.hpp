@@ -345,6 +345,8 @@ enum class MonitorControlOp : uint8_t {
 };
 
 constexpr size_t kMonitorControlSize = 64;
+// kHello.bitrate_kbps value requesting a lossless monitor stream (24-bit PCM, ~2.3 Mbps stereo).
+constexpr uint16_t kMonitorBitrateLossless = 0xFFFF;
 
 struct MonitorControlPayload {
     MonitorControlOp op = MonitorControlOp::kHello;
@@ -379,14 +381,24 @@ void write_monitor_control(uint8_t* out, const MonitorControlPayload& mc);
 bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload& mc);
 
 // Metadata + VU packet (kSyncMetaResp): up to 64 channels (16B name + 1B VU int8 dBFS each).
+// Header bytes 2..3 (formerly reserved, 0) carry this client's bus telemetry: byte 2 = compressor+limiter
+// gain reduction in quarter dB (0..255 -> 0..63.75 dB), byte 3 = int8 peak dBFS of the stereo mix sent to
+// the phone. Older parsers ignore them; older servers send 0 / 0 (read as 0 dB GR, 0 dBFS -> treat
+// peak 0 together with GR 0 as "unknown" only if needed).
 struct MonitorMetaChannel {
     char name[16] = {};
     int8_t peak_dbfs = -120;  // -120..0 dBFS
 };
 
+struct MonitorBusTelemetry {
+    float gain_reduction_db = 0.0f;  // <= 0 dB
+    int8_t mix_peak_dbfs = -120;
+};
+
 size_t write_monitor_meta(uint8_t* out, size_t cap, uint32_t client_id, uint8_t num_channels,
-                          const MonitorMetaChannel* channels);
+                          const MonitorMetaChannel* channels, const MonitorBusTelemetry* bus = nullptr);
 bool parse_monitor_meta(const uint8_t* in, size_t len, uint32_t& client_id, uint8_t& num_channels,
-                        MonitorMetaChannel* out_channels, uint8_t max_channels);
+                        MonitorMetaChannel* out_channels, uint8_t max_channels,
+                        MonitorBusTelemetry* bus = nullptr);
 
 }  // namespace lv

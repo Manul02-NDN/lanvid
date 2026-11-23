@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">LanVid Monitor</string>
+    <string name="notif_channel">Моніторинг</string>
+    <string name="notif_text">Персональний моніторинг з %1$s</string>
+</resources>

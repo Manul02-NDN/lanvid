@@ -50,6 +50,13 @@ build_slice() {
     -DLANVID_ENABLE_AVX2="$avx2_flag" \
     -DLANVID_ENABLE_NEON="$neon_flag"
   cmake --build "$bdir" --target lanvid_core --parallel "$(sysctl -n hw.ncpu)"
+
+  # liblanvid_core.a only references libopus (AUDIO2 Opus codec): fold it in so the slice is self-contained.
+  local opus_lib
+  opus_lib="$(find "$bdir" -name 'libopus.a' | head -n 1)"
+  if [ -z "$opus_lib" ]; then echo "libopus.a not found in $bdir" >&2; exit 1; fi
+  libtool -static -o "$bdir/liblanvid_core_opus.a" "$bdir/liblanvid_core.a" "$opus_lib"
+  mv "$bdir/liblanvid_core_opus.a" "$bdir/liblanvid_core.a"
 }
 
 # 1. iOS Device (arm64 + NEON)

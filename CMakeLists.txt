@@ -110,6 +110,7 @@ set(LV_CORE_SOURCES
   src/audio/channel_patchbay.cpp
   src/audio/multi_device_matrix.cpp
   src/audio/personal_monitor_bus.cpp
+  src/net/mdns_advertiser.cpp
   src/midi/midi_sync_engine.cpp
   src/midi/midi_dejitter_queue.cpp
   src/midi/midi_device_manager.cpp
@@ -455,6 +456,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_latency_mode.cpp
     tests/test_rate_integrity.cpp
     tests/test_audio_only_toggle.cpp
+    tests/test_monitor_mobile.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

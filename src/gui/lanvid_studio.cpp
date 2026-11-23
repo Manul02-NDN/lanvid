@@ -1776,13 +1776,18 @@ void LanVidStudioApp::draw_mobile_monitor_section() {
     if (studio_toggle("##MonSrvToggle", &srv_on, kColGreen)) {
         if (srv_on) {
             if (monitor_server_.start(kDefaultMonitorPort)) {
+                const bool adv = monitor_mdns_.start(
+                    "LanVid Studio (" + local_host_name() + ")", monitor_server_.bound_port(),
+                    {{"role", "monitor"}, {"ver", LANVID_VERSION_STRING}, {"ch", std::to_string(cfg_.aoip_channels)}});
                 toast_msg_ = "Сервер мобільного моніторингу запущено на UDP :" +
-                             std::to_string(monitor_server_.bound_port());
+                             std::to_string(monitor_server_.bound_port()) +
+                             (adv ? " (автопошук mDNS увімкнено)" : " (підключення за IP)");
             } else {
                 toast_msg_ = "Не вдалося запустити сервер мобільного моніторингу";
             }
             toast_until_us_ = now_us() + 2800000ull;
         } else {
+            monitor_mdns_.stop();
             monitor_server_.stop();
         }
     }
@@ -1806,7 +1811,10 @@ void LanVidStudioApp::draw_mobile_monitor_section() {
                 ImGui::SameLine(0.0f, 5.0f);
                 ImGui::TextColored(kColTextMain, "%s", ph.name.c_str());
                 ImGui::SameLine();
-                ImGui::TextDisabled("%u ms · %u kbps", unsigned(ph.latency_ms), unsigned(ph.bitrate_kbps));
+                if (ph.bitrate_kbps == kMonitorBitrateLossless)
+                    ImGui::TextDisabled("%u ms · Lossless", unsigned(ph.latency_ms));
+                else
+                    ImGui::TextDisabled("%u ms · %u kbps", unsigned(ph.latency_ms), unsigned(ph.bitrate_kbps));
                 ImGui::SameLine();
                 if (ImGui::SmallButton(ph.muted ? "UNMUTE" : "MUTE")) {
                     monitor_server_.set_client_mute(ph.slot, !ph.muted);

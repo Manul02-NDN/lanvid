@@ -1819,6 +1819,45 @@ void lv_monitor_client_poll(LvMonitorClientHandle* cli) {
     if (cli && cli->cli) cli->cli->poll();
 }
 
+int lv_monitor_client_get_meta(LvMonitorClientHandle* cli, LV_MonitorMetaChannel* out, int max_channels,
+                               LV_MonitorTelemetry* tel) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    const auto meta = cli->cli->last_meta();
+    const int n = int(meta.size());
+    if (out && max_channels > 0) {
+        for (int i = 0; i < std::min(n, max_channels); ++i) {
+            std::memset(&out[i], 0, sizeof(out[i]));
+            std::memcpy(out[i].name, meta[size_t(i)].name, sizeof(out[i].name));
+            out[i].name[sizeof(out[i].name) - 1] = '\0';
+            out[i].peak_dbfs = meta[size_t(i)].peak_dbfs;
+        }
+    }
+    if (tel) {
+        std::memset(tel, 0, sizeof(*tel));
+        const auto bt = cli->cli->last_bus_telemetry();
+        tel->connected = cli->cli->is_connected() ? 1 : 0;
+        tel->num_channels = n;
+        tel->bus_gain_reduction_db = bt.gain_reduction_db;
+        tel->bus_peak_dbfs = float(bt.mix_peak_dbfs);
+        tel->buffer_ms = cli->cli->buffer_ms();
+        tel->audio_packets_rx = cli->cli->audio_packets_rx();
+        tel->meta_packets_rx = cli->cli->meta_packets_rx();
+    }
+    return n;
+}
+
+int lv_monitor_client_set_stream(LvMonitorClientHandle* cli, uint16_t bitrate_kbps, uint16_t latency_ms) {
+    if (!cli || !cli->cli || latency_ms < 2 || latency_ms > 500) return LV_ERR_INVALID_ARG;
+    if (bitrate_kbps != LV_MONITOR_BITRATE_LOSSLESS && (bitrate_kbps < 128 || bitrate_kbps > 512))
+        return LV_ERR_INVALID_ARG;
+    return cli->cli->update_stream(bitrate_kbps, latency_ms) ? LV_OK : LV_ERR_NOT_RUNNING;
+}
+
+int lv_monitor_client_keepalive(LvMonitorClientHandle* cli) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    return cli->cli->keepalive() ? LV_OK : LV_ERR_NOT_RUNNING;
+}
+
 void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames) {
     if (cli && cli->cli) cli->cli->pop_stereo(out_interleaved, frames);
 }

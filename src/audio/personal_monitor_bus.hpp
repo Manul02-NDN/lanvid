@@ -170,6 +170,7 @@ public:
 
     void set_channel_name(int ch, const std::string& name);
     void set_client_mute(int slot, bool muted);
+    // bitrate_kbps: total stereo kbps (128..512, i.e. 64..256 per channel) or kMonitorBitrateLossless.
     void set_client_bitrate(int slot, uint16_t bitrate_kbps);
     std::vector<MonitorClientInfo> clients() const;
 
@@ -198,12 +199,14 @@ private:
         std::unique_ptr<PersonalMonitorBus> bus;
         std::unique_ptr<AudioTxEngine> tx;
         uint64_t media_sample = 0;
+        int8_t mix_peak_dbfs = -120;  // peak of the stereo mix last sent to this phone
     };
+    void apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps);
 
     int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep);
     void handle_control_packet(const PacketHeader& h, const uint8_t* payload, size_t len,
                                const Endpoint& src, uint64_t now);
-    void send_meta_response(const Endpoint& dst, uint32_t client_id);
+    void send_meta_response(const Endpoint& dst, uint32_t client_id, int slot);
 
     uint32_t sample_rate_ = 48000;
     uint16_t bound_port_ = 0;
@@ -232,6 +235,10 @@ public:
     bool request_meta();
     bool set_channel_mix(int ch, const PersonalMonitorChannelMix& mix);
     bool set_dsp(const PersonalMonitorDspParams& dsp);
+    // Re-sends kHello with the current name / bitrate / buffer: keepalive (server drops clients unseen for
+    // 15 s) and the way to change stream quality or buffer live, without reconnecting.
+    bool keepalive();
+    bool update_stream(uint16_t bitrate_kbps, uint16_t latency_ms);
 
     // Polls incoming AUDIO2 stereo packets & kSyncMetaResp from PC server.
     void poll();
@@ -240,7 +247,10 @@ public:
     void pop_stereo(float* out_interleaved, uint32_t frames);
 
     std::vector<MonitorMetaChannel> last_meta() const;
+    MonitorBusTelemetry last_bus_telemetry() const;
     uint64_t audio_packets_rx() const { return audio_rx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t meta_packets_rx() const { return meta_rx_pkts_.load(std::memory_order_relaxed); }
+    double buffer_ms() const { return matrix_.current_effective_latency_ms(); }
 
 private:
     bool send_control(const MonitorControlPayload& mc);
@@ -255,7 +265,12 @@ private:
     AudioRxEngine arx_;
     mutable std::mutex meta_mu_;
     std::vector<MonitorMetaChannel> meta_;
+    MonitorBusTelemetry bus_tel_{};
     std::atomic<uint64_t> audio_rx_pkts_{0};
+    std::atomic<uint64_t> meta_rx_pkts_{0};
+    std::string name_;
+    std::atomic<uint16_t> bitrate_kbps_{256};
+    std::atomic<uint16_t> latency_ms_{20};
 };
 
 }  // namespace lv

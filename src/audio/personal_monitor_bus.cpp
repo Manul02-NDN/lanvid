@@ -348,14 +348,20 @@ void PersonalMonitorServer::set_client_mute(int slot, bool muted) {
     slots_[slot].server_muted = muted;
 }
 
+void PersonalMonitorServer::apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps) {
+    if (bitrate_kbps == kMonitorBitrateLossless) {
+        s.bitrate_kbps = kMonitorBitrateLossless;
+        if (s.tx) s.tx->set_codec_profile(AudioCodecProfile::kPcm24);  // lossless 24-bit, ~2.3 Mbps stereo
+        return;
+    }
+    s.bitrate_kbps = std::clamp<uint16_t>(bitrate_kbps, 128, 512);
+    if (s.tx) s.tx->set_codec_profile(audio_codec_profile_from_bitrate(int(s.bitrate_kbps) / 2));
+}
+
 void PersonalMonitorServer::set_client_bitrate(int slot, uint16_t bitrate_kbps) {
     if (slot < 0 || slot >= kMaxMonitorClients) return;
     std::lock_guard<std::mutex> lk(mu_);
-    slots_[slot].bitrate_kbps = std::clamp<uint16_t>(bitrate_kbps, 128, 512);
-    if (slots_[slot].tx) {
-        const int per_ch = int(slots_[slot].bitrate_kbps) / 2;
-        slots_[slot].tx->set_codec_profile(audio_codec_profile_from_bitrate(per_ch));
-    }
+    apply_bitrate_locked(slots_[slot], bitrate_kbps);
 }
 
 std::vector<MonitorClientInfo> PersonalMonitorServer::clients() const {
@@ -424,15 +430,21 @@ int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const E
     return -1;
 }
 
-void PersonalMonitorServer::send_meta_response(const Endpoint& dst, uint32_t client_id) {
+void PersonalMonitorServer::send_meta_response(const Endpoint& dst, uint32_t client_id, int slot) {
     MonitorMetaChannel meta[kMonitorMaxInputChannels]{};
     uint8_t n = active_in_channels_ ? active_in_channels_ : 8;
     for (uint8_t i = 0; i < n; ++i) {
         std::snprintf(meta[i].name, sizeof(meta[i].name), "%s", ch_names_[i].c_str());
         meta[i].peak_dbfs = ch_peaks_dbfs_[i];
     }
+    MonitorBusTelemetry tel{};
+    if (slot >= 0 && slot < kMaxMonitorClients) {
+        const auto& s = slots_[slot];
+        if (s.bus) tel.gain_reduction_db = s.bus->last_comp_gr_db();
+        tel.mix_peak_dbfs = s.mix_peak_dbfs;
+    }
     uint8_t body[8 + kMonitorMaxInputChannels * 17];
-    const size_t blen = write_monitor_meta(body, sizeof(body), client_id, n, meta);
+    const size_t blen = write_monitor_meta(body, sizeof(body), client_id, n, meta, &tel);
     if (blen == 0) return;
     PacketHeader ph{};
     ph.type = PacketType::kMonitorControl;
@@ -459,18 +471,16 @@ void PersonalMonitorServer::handle_control_packet(const PacketHeader&, const uin
     switch (mc.op) {
         case MonitorControlOp::kHello:
             if (mc.client_name[0] != '\0') s.name = mc.client_name;
-            if (mc.bitrate_kbps >= 128 && mc.bitrate_kbps <= 512) {
-                s.bitrate_kbps = mc.bitrate_kbps;
-                if (s.tx) s.tx->set_codec_profile(audio_codec_profile_from_bitrate(int(mc.bitrate_kbps) / 2));
-            }
+            if ((mc.bitrate_kbps >= 128 && mc.bitrate_kbps <= 512) || mc.bitrate_kbps == kMonitorBitrateLossless)
+                apply_bitrate_locked(s, mc.bitrate_kbps);
             if (mc.target_latency_ms >= 2 && mc.target_latency_ms <= 500) {
                 s.latency_ms = mc.target_latency_ms;
                 if (s.tx) s.tx->set_latency_ms(mc.target_latency_ms);
             }
-            send_meta_response(src, s.client_id);
+            send_meta_response(src, s.client_id, idx);
             break;
         case MonitorControlOp::kSyncMetaReq:
-            send_meta_response(src, s.client_id);
+            send_meta_response(src, s.client_id, idx);
             break;
         case MonitorControlOp::kSetChannelMix:
             if (s.bus && mc.channel_index < kMonitorMaxInputChannels) {
@@ -568,6 +578,9 @@ void PersonalMonitorServer::process_and_send(const float* const* in_planes, int 
         } else {
             s.bus->process_block(in_planes, ch_n, tmp_l_.data(), tmp_r_.data(), frames);
         }
+        float pk = 0.0f;
+        for (uint32_t k = 0; k < frames; ++k) pk = std::max(pk, std::max(std::fabs(tmp_l_[k]), std::fabs(tmp_r_[k])));
+        s.mix_peak_dbfs = lin_to_dbfs_i8(pk);
         s.tx->push_channel(0, tmp_l_.data(), frames, AudioFormat2::kFloat32, s.media_sample, wc_us);
         s.tx->push_channel(1, tmp_r_.data(), frames, AudioFormat2::kFloat32, s.media_sample, wc_us);
         s.media_sample += frames;
@@ -604,17 +617,31 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
         return false;
     }
     arx_.set_latency_ms(latency_ms);
-    arx_.set_adaptive_jitter_enabled(true);
+    // In-ear monitoring: the buffer the musician picks (5 / 10 / 15 / 20 ms) is the buffer they get.
+    // Adaptive growth (up to 200 ms on Wi-Fi bursts) would put a slap-back echo on their own instrument.
+    arx_.set_adaptive_jitter_enabled(false);
+    name_ = client_name.empty() ? "Smartphone" : client_name;
+    bitrate_kbps_.store(bitrate_kbps, std::memory_order_relaxed);
+    latency_ms_.store(latency_ms, std::memory_order_relaxed);
     connected_.store(true, std::memory_order_release);
+    return keepalive();
+}
 
+bool PersonalMonitorClient::keepalive() {
     MonitorControlPayload hello{};
     hello.op = MonitorControlOp::kHello;
     hello.client_id = client_id_;
-    hello.bitrate_kbps = bitrate_kbps;
-    hello.target_latency_ms = latency_ms;
-    std::snprintf(hello.client_name, sizeof(hello.client_name), "%s",
-                  client_name.empty() ? "Smartphone" : client_name.c_str());
+    hello.bitrate_kbps = bitrate_kbps_.load(std::memory_order_relaxed);
+    hello.target_latency_ms = latency_ms_.load(std::memory_order_relaxed);
+    std::snprintf(hello.client_name, sizeof(hello.client_name), "%s", name_.c_str());
     return send_control(hello);
+}
+
+bool PersonalMonitorClient::update_stream(uint16_t bitrate_kbps, uint16_t latency_ms) {
+    bitrate_kbps_.store(bitrate_kbps, std::memory_order_relaxed);
+    latency_ms_.store(latency_ms, std::memory_order_relaxed);
+    arx_.set_latency_ms(std::clamp<uint16_t>(latency_ms, 2, 2000));  // local playout buffer, live
+    return keepalive();                                               // server: codec + its jitter profile
 }
 
 void PersonalMonitorClient::disconnect() {
@@ -699,9 +726,12 @@ void PersonalMonitorClient::poll() {
             uint32_t cid = 0;
             uint8_t nch = 0;
             MonitorMetaChannel tmp[kMonitorMaxInputChannels]{};
-            if (parse_monitor_meta(payload, h.payload_size, cid, nch, tmp, kMonitorMaxInputChannels)) {
+            MonitorBusTelemetry tel{};
+            if (parse_monitor_meta(payload, h.payload_size, cid, nch, tmp, kMonitorMaxInputChannels, &tel)) {
                 std::lock_guard<std::mutex> lk(meta_mu_);
                 meta_.assign(tmp, tmp + nch);
+                bus_tel_ = tel;
+                meta_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
             }
         }
     }
@@ -715,6 +745,11 @@ void PersonalMonitorClient::pop_stereo(float* out_interleaved, uint32_t frames) 
 std::vector<MonitorMetaChannel> PersonalMonitorClient::last_meta() const {
     std::lock_guard<std::mutex> lk(meta_mu_);
     return meta_;
+}
+
+MonitorBusTelemetry PersonalMonitorClient::last_bus_telemetry() const {
+    std::lock_guard<std::mutex> lk(meta_mu_);
+    return bus_tel_;
 }
 
 }  // namespace lv

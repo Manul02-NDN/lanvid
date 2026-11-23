@@ -1,0 +1,51 @@
+# XcodeGen spec for LanVid Monitor (iOS). Generate the project:
+#   ../../mobile/ios/scripts/build_core.sh   # LanVidCore.xcframework (once / after core changes)
+#   xcodegen generate                        # -> LanVidMonitor.xcodeproj
+name: LanVidMonitor
+options:
+  bundleIdPrefix: com.lanvid
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "2.5.0"
+    CURRENT_PROJECT_VERSION: "250"
+targets:
+  LanVidMonitor:
+    type: application
+    platform: iOS
+    sources:
+      - path: LanVidMonitor
+    dependencies:
+      - framework: build/LanVidCore.xcframework
+        embed: false
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: Network.framework
+      - sdk: CoreMIDI.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lanvid.monitor
+        PRODUCT_NAME: LanVid Monitor
+        OTHER_LDFLAGS: ["-lc++"]
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: LanVidMonitor/Info.plist
+      properties:
+        CFBundleDisplayName: LanVid Monitor
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIBackgroundModes: [audio]
+        NSLocalNetworkUsageDescription: "LanVid Monitor шукає LanVid Studio у вашій Wi-Fi мережі та отримує від неї персональний моніторинговий мікс."
+        NSBonjourServices: [_lanvid._udp]
+        ITSAppUsesNonExemptEncryption: false
