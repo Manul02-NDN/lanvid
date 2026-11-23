@@ -80,6 +80,35 @@ void host_set_fs(void* ctx, bool fs) {
 lv::gui::IGpuTexture* host_create_tex(void*) { return new GlDynamicTexture(); }
 void host_destroy_tex(void*, lv::gui::IGpuTexture* tex) { delete tex; }
 
+// Glyphs used by the UI beyond Cyrillic/Latin-1: dashes and quotes (U+2010..), bullets/ellipsis,
+// arrows, minus, and geometric shapes such as the status dot U+25CF. Missing ones render as '?'.
+const ImWchar* studio_glyph_ranges(ImGuiIO& io) {
+    static ImVector<ImWchar> ranges;
+    if (ranges.empty()) {
+        static const ImWchar extra[] = {0x2010, 0x2027, 0x2030, 0x203A, 0x2190, 0x21FF, 0x2212, 0x2212,
+                                        0x2500, 0x25FF, 0x2600, 0x26FF, 0x2713, 0x2717, 0};
+        ImFontGlyphRangesBuilder b;
+        b.AddRanges(io.Fonts->GetGlyphRangesCyrillic());
+        b.AddRanges(extra);
+        b.BuildRanges(&ranges);
+    }
+    return ranges.Data;
+}
+
+// Merges a symbol font for glyphs the main UI font lacks (ImGui keeps glyphs already present).
+void merge_symbol_font(ImGuiIO& io, float size, const char* const* candidates, size_t n) {
+    static const ImWchar sym[] = {0x2010, 0x2027, 0x2030, 0x203A, 0x2190, 0x21FF, 0x2212, 0x2212,
+                                  0x2500, 0x25FF, 0x2600, 0x26FF, 0x2713, 0x2717, 0};
+    for (size_t i = 0; i < n; ++i) {
+        if (std::filesystem::exists(candidates[i])) {
+            ImFontConfig cfg;
+            cfg.MergeMode = true;
+            io.Fonts->AddFontFromFileTTF(candidates[i], size, &cfg, sym);
+            return;
+        }
+    }
+}
+
 void load_cyrillic_font(ImGuiIO& io) {
     const char* candidates[] = {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -91,7 +120,15 @@ void load_cyrillic_font(ImGuiIO& io) {
     };
     for (const char* p : candidates) {
         if (std::filesystem::exists(p)) {
-            io.Fonts->AddFontFromFileTTF(p, 16.5f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+            io.Fonts->AddFontFromFileTTF(p, 16.5f, nullptr, studio_glyph_ranges(io));
+            static const char* const sym_fonts[] = {
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/System/Library/Fonts/Apple Symbols.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+            };
+            merge_symbol_font(io, 16.5f, sym_fonts, sizeof(sym_fonts) / sizeof(sym_fonts[0]));
             return;
         }
     }

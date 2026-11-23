@@ -728,7 +728,16 @@ void LanVidStudioApp::draw_segmented_vu(float dbfs, float width, float height) {
 void LanVidStudioApp::draw_sidebar() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, kColSidebar);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 12.0f));
-    ImGui::BeginChild("##Sidebar", ImVec2(138.0f, 0), true, ImGuiWindowFlags_NoScrollbar);
+    // Width follows the longest "ICON LABEL" entry so nothing is clipped with any font / DPI.
+    float sidebar_w = 138.0f;
+    {
+        const char* longest[][2] = {{"TX", "SENDER"}, {"RX", "RECEIVER"}, {"DX", "DUPLEX"}, {"MX", "AUDIO MATRIX"}};
+        for (const auto& it : longest) {
+            const float need = 10.0f + ImGui::CalcTextSize(it[0]).x + 8.0f + ImGui::CalcTextSize(it[1]).x + 14.0f + 20.0f;
+            sidebar_w = std::max(sidebar_w, need);
+        }
+    }
+    ImGui::BeginChild("##Sidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
 
 #ifndef LANVID_VERSION_STRING
 #define LANVID_VERSION_STRING "2.4.0"
@@ -781,7 +790,8 @@ void LanVidStudioApp::draw_sidebar() {
         const ImU32 txt_col = selected ? ImGui::ColorConvertFloat4ToU32(kColTextMain)
                                        : ImGui::ColorConvertFloat4ToU32(kColTextMuted);
         dl->AddText(ImVec2(pos.x + 10.0f, pos.y + 12.0f), icon_col, item.icon);
-        dl->AddText(ImVec2(pos.x + 32.0f, pos.y + 12.0f), txt_col, item.label);
+        const float label_x = pos.x + 10.0f + ImGui::CalcTextSize(item.icon).x + 8.0f;
+        dl->AddText(ImVec2(label_x, pos.y + 12.0f), txt_col, item.label);
     }
 
     // Bottom connection & latency indicator pinned to bottom of sidebar
