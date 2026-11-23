@@ -8,8 +8,12 @@
 //     T_playout = T_master_now - TargetLatencySamples
 //
 // so streams arriving with different network delays leave the matrix aligned to the sample. A single
-// shared +/-100 ppm Hermite micro-resampler tracks the audio device clock drift versus the master
-// clock; because the ratio is common to all channels, inter-channel phase is never disturbed.
+// shared Hermite micro-resampler, hard-limited to +/-500 ppm (ratio 0.9995 .. 1.0005), tracks the audio
+// device clock drift versus the master clock; because the ratio is common to all channels, inter-channel
+// phase is never disturbed. Errors it cannot absorb are re-anchored once with a crossfade.
+//
+// Exactly ONE consumer may render from a matrix: every pop advances the shared cursor, so two pullers
+// (e.g. a meter pump and a device mixer) would play it at double speed and fight the re-anchor.
 
 #include <atomic>
 #include <cstdint>
@@ -51,9 +55,9 @@ public:
     //   Fixed mode    (adaptive off, wired Ethernet / live monitoring): the playout delay is held at exactly
     //                 target_latency_ms; only the +/-100 ppm device-clock drift is tracked.
     //   Adaptive mode (Wi-Fi 6): the delay grows within [target_latency_ms .. max_ms] (default 200 ms) as
-    //                 soon as the measured network jitter needs more headroom (up to +/-0.5% time-stretch,
-    //                 identical for all channels), and after the burst it returns to the target slowly through
-    //                 +/-0.05% micro-resampling - no reanchor, no click.
+    //                 soon as the measured network jitter needs more headroom (small steps via +/-0.05%
+    //                 micro-resampling, steps > 10 ms via one crossfaded re-anchor), and after the burst it
+    //                 returns to the target slowly through +/-0.05% micro-resampling - no click.
     void set_target_latency_ms(uint32_t ms);
     uint32_t target_latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
     // Delay the buffer is currently steering towards (== target in Fixed mode, >= target in Adaptive mode).

@@ -417,6 +417,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_coremidi_ports.cpp
     tests/test_udp_e2e_audio_midi.cpp
     tests/test_latency_mode.cpp
+    tests/test_rate_integrity.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)

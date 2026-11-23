@@ -78,6 +78,12 @@ private:
     void start_vdev_tx();
     void stop_vdev_tx();
     void apply_receiver_output();
+    // Exactly one consumer per playout matrix and one producer per sender stream (see enforce_audio_ownership).
+    void enforce_audio_ownership(uint64_t now);
+    enum class RxConsumer { kNone, kMeterPump, kVirtualDevice, kAudioMatrix };
+    RxConsumer rx_consumer_ = RxConsumer::kNone;
+    uint64_t ownership_us_ = 0;
+    bool matrix_net_rx_ = false, matrix_net_tx_ = false, matrix_vbus_ = false;
     void draw_vdev_status(const ShmHostStatus& st, bool tx_side);
     void draw_duplex_tab();
     void draw_patchbay_block();

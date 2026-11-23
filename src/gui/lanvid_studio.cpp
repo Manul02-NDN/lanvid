@@ -822,8 +822,18 @@ void LanVidStudioApp::stop_vdev_tx() { vdev_tx_.stop(); }
 void LanVidStudioApp::apply_receiver_output() {
     if (!receiver_) return;
     vdev_rx_.stop();
+    rx_consumer_ = RxConsumer::kNone;
     if (!receiver_running_) return;
-    if (cfg_.aoip_output == 1) {
+    if (matrix_net_rx_) {
+        // The Audio Matrix network slot pulls the playout matrix (npop): it must be the ONLY consumer.
+        // A second puller (meter pump / virtual-device bridge) would advance the shared playout cursor
+        // twice per block - audio at double speed, constantly re-anchored: crackling AND slowed down.
+        lv_receiver_set_multichannel_audio_callback(receiver_, nullptr, nullptr);
+        rx_consumer_ = RxConsumer::kAudioMatrix;
+        return;
+    }
+    if (cfg_.aoip_output == 1 && !matrix_vbus_) {
+        rx_consumer_ = RxConsumer::kVirtualDevice;
         // The bridge becomes the single consumer of the playout matrix (it also drives the meters).
         lv_receiver_set_multichannel_audio_callback(receiver_, nullptr, nullptr);
         ShmAudioHost::Config hc;
@@ -836,7 +846,44 @@ void LanVidStudioApp::apply_receiver_output() {
         });
     } else {
         lv_receiver_set_multichannel_audio_callback(receiver_, &noop_bus_callback, nullptr);
+        rx_consumer_ = RxConsumer::kMeterPump;
     }
+}
+
+void LanVidStudioApp::enforce_audio_ownership(uint64_t now) {
+    if (now - ownership_us_ < 100000ull) return;  // 10 Hz
+    ownership_us_ = now;
+    bool net_rx = false, net_tx = false, vbus = false;
+    if (audio_matrix_.is_running()) {
+        for (const auto& sl : audio_matrix_.slots()) {
+            if (!sl.active) continue;
+            if (sl.type == MatrixSlotType::kNetworkAoip) {
+                if (sl.role != MatrixSlotRole::kOutput) net_rx = true;  // matrix pulls the receiver
+                if (sl.role != MatrixSlotRole::kInput) net_tx = true;   // matrix feeds the sender
+            } else if (sl.type == MatrixSlotType::kVirtualBus) {
+                vbus = true;  // matrix owns both LanVidAudioBus_v1 rings
+            }
+        }
+    }
+    const bool changed = net_rx != matrix_net_rx_ || net_tx != matrix_net_tx_ || vbus != matrix_vbus_;
+    matrix_net_rx_ = net_rx;
+    matrix_net_tx_ = net_tx;
+    matrix_vbus_ = vbus;
+    // Sender stream: one producer. The matrix network slot (npush), the test tone and the DAW TX bridge
+    // all use LV_MEDIA_TS_AUTO - two of them would interleave blocks and run the media clock 2x.
+    if ((net_tx || vbus) && vdev_tx_.running()) stop_vdev_tx();
+    if (net_tx && tone_thread_.joinable()) stop_tone();
+    if (!net_tx && !vbus && sender_running_ && changed) {  // matrix released the stream: restore sources
+        if (cfg_.aoip_source == 1 && !vdev_tx_.running()) start_vdev_tx();
+        if (cfg_.aoip_source == 0 && cfg_.aoip_tone && !tone_thread_.joinable()) start_tone();
+    }
+    // Receiver playout matrix: one consumer.
+    RxConsumer want = RxConsumer::kNone;
+    if (receiver_running_) {
+        want = net_rx ? RxConsumer::kAudioMatrix
+                      : (cfg_.aoip_output == 1 && !vbus ? RxConsumer::kVirtualDevice : RxConsumer::kMeterPump);
+    }
+    if (want != rx_consumer_ || (vbus && vdev_rx_.running())) apply_receiver_output();
 }
 
 void LanVidStudioApp::draw_vdev_status(const ShmHostStatus& st, bool tx_side) {
@@ -1169,8 +1216,10 @@ void LanVidStudioApp::init_audio_matrix() {
             if (receiver_ && receiver_running_) {
                 static thread_local std::vector<float> tmp;
                 tmp.resize(size_t(ch) * frames);
-                lv_receiver_pop_audio_multichannel(receiver_, tmp.data(), uint16_t(ch), frames,
-                                                   LV_AUDIO_LAYOUT_PLANAR);
+                // Never hand out a stale block (the previous one would be replayed as a buzz).
+                if (lv_receiver_pop_audio_multichannel(receiver_, tmp.data(), uint16_t(ch), frames,
+                                                       LV_AUDIO_LAYOUT_PLANAR) < 0)
+                    std::fill(tmp.begin(), tmp.end(), 0.0f);
                 for (uint32_t c = 0; c < ch; ++c) {
                     std::copy(tmp.begin() + size_t(c) * frames, tmp.begin() + size_t(c + 1) * frames, planes[c]);
                 }
@@ -2296,6 +2345,7 @@ void LanVidStudioApp::stop_receiver() {
 
 void LanVidStudioApp::poll_telemetry_and_frames() {
     const uint64_t now = now_us();
+    enforce_audio_ownership(now);
 
     // Fetch latest GPU preview frame from Sender
     if (sender_ && sender_running_ && !cfg_.audio_only && sender_tex_) {

@@ -94,8 +94,13 @@ public:
     static constexpr uint64_t kAutoMediaTs = UINT64_MAX;
     int push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
                            AudioFormat2 fmt, uint64_t media_ts);
-    // Next contiguous timestamp for a multi-channel push (anchored to the master clock on first use).
+    // Next contiguous timestamp for a multi-channel push. Frames are counted per channel (one step =
+    // num_samples, never num_samples x channels). The count stays contiguous while the producer keeps
+    // pace with the MasterClock; if it drifts more than max(20 ms, 3 blocks) - a stalled device/DAW, a
+    // suspended thread, a device crystal far off - it re-anchors to "now", so a stall can never become
+    // a permanent delay that pushes every later sample past its playout time.
     uint64_t next_auto_media_ts(uint32_t num_samples) const;
+    uint64_t auto_ts_reanchors() const { return auto_reanchors_.load(std::memory_order_relaxed); }
     void set_next_auto_media_ts(uint64_t ts) { for (auto& n : next_auto_ts_) n.store(ts, std::memory_order_relaxed); }
     AudioReliabilityProfile audio2_profile() const {
         return atx_ ? atx_->profile(AudioFormat2::kPcm16)
@@ -172,6 +177,8 @@ private:
     std::unique_ptr<AudioTxEngine> atx_;
     AudioCodecProfile audio_codec_ = AudioCodecProfile::kPcm32F;
     std::atomic<uint64_t> next_auto_ts_[kMaxAudioChannels]{};
+    mutable std::atomic<uint64_t> auto_reanchors_{0};
+    uint64_t resolve_auto_ts(uint64_t next, uint32_t num_samples) const;
     Endpoint dst_{};
     UdpSocket sock_;
     ThreadPool pool_;

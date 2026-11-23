@@ -9,6 +9,8 @@
 
 #include "common/clock.hpp"
 #include "common/rt_thread.hpp"
+#include "audio/device_rate_adapter.hpp"
+#include "audio/planar_ring.hpp"
 #include "audio/stream_resampler.hpp"
 #include "midi/midi_device_manager.hpp"
 #if defined(__APPLE__)
@@ -45,7 +47,6 @@ namespace lv {
 
 namespace {
 
-constexpr uint32_t kRingCap = 16384;  // power of two (~341 ms @ 48 kHz)
 
 float linear_to_dbfs(float peak) {
     if (peak <= 1e-6f) return -120.0f;
@@ -56,84 +57,6 @@ float db_to_linear(float db) {
     if (db <= -96.0f) return 0.0f;
     return std::pow(10.0f, db / 20.0f);
 }
-
-// Lock-free SPSC atomic multi-channel frame-block ring buffer (interleaved [frame][ch], up to 64 ch x kRingCap).
-// Guarantees whole multi-channel frames are published/consumed atomically so even/odd channels never skew on underrun.
-class LockFreePlanarRing {
-public:
-    void configure(int channels) {
-        channels_ = std::clamp(channels, 1, kMatrixMaxChannels);
-        data_.assign(size_t(kRingCap) * size_t(channels_), 0.0f);
-        wr_.store(0, std::memory_order_relaxed);
-        rd_.store(0, std::memory_order_relaxed);
-        xruns_.store(0, std::memory_order_relaxed);
-    }
-
-    int channels() const { return channels_; }
-
-    uint32_t available() const {
-        const uint64_t w = wr_.load(std::memory_order_acquire);
-        const uint64_t r = rd_.load(std::memory_order_relaxed);
-        return w > r ? uint32_t(std::min<uint64_t>(w - r, kRingCap)) : 0u;
-    }
-
-    uint32_t write(const float* const* planes, uint32_t ch, uint32_t frames) {
-        if (data_.empty() || frames == 0) return 0;
-        const uint64_t w = wr_.load(std::memory_order_relaxed);
-        const uint64_t r = rd_.load(std::memory_order_acquire);
-        const uint32_t free_n = uint32_t(kRingCap - std::min<uint64_t>(w - r, kRingCap));
-        uint32_t n = frames;
-        if (n > free_n) {
-            n = free_n;
-            xruns_.fetch_add(1, std::memory_order_relaxed);
-        }
-        const int copy_ch = std::min(int(ch), channels_);
-        for (uint32_t i = 0; i < n; ++i) {
-            float* frame_dst = data_.data() + size_t((w + i) & (kRingCap - 1)) * size_t(channels_);
-            for (int c = 0; c < channels_; ++c) {
-                frame_dst[c] = (c < copy_ch && planes && planes[c]) ? planes[c][i] : 0.0f;
-            }
-        }
-        // Single atomic release publishes all `channels_` for all `n` frames together.
-        wr_.store(w + n, std::memory_order_release);
-        return n;
-    }
-
-    uint32_t read(float* const* planes, uint32_t ch, uint32_t frames, bool zero_pad = true) {
-        if (data_.empty() || frames == 0) return 0;
-        const uint64_t w = wr_.load(std::memory_order_acquire);
-        const uint64_t r = rd_.load(std::memory_order_relaxed);
-        const uint32_t avail = w > r ? uint32_t(std::min<uint64_t>(w - r, kRingCap)) : 0u;
-        const uint32_t n = std::min(frames, avail);
-        if (n < frames) {
-            xruns_.fetch_add(1, std::memory_order_relaxed);
-        }
-        const int out_ch = int(ch);
-        for (uint32_t i = 0; i < n; ++i) {
-            const float* frame_src = data_.data() + size_t((r + i) & (kRingCap - 1)) * size_t(channels_);
-            for (int c = 0; c < out_ch; ++c) {
-                if (planes && planes[c]) planes[c][i] = (c < channels_) ? frame_src[c] : 0.0f;
-            }
-        }
-        if (zero_pad && n < frames) {
-            for (int c = 0; c < out_ch; ++c) {
-                if (planes && planes[c]) std::memset(planes[c] + n, 0, size_t(frames - n) * sizeof(float));
-            }
-        }
-        // Single atomic release advances all `channels_` together by `n` whole frames.
-        rd_.store(r + n, std::memory_order_release);
-        return n;
-    }
-
-    uint64_t xruns() const { return xruns_.load(std::memory_order_relaxed); }
-
-private:
-    int channels_ = 2;
-    std::vector<float> data_;
-    alignas(64) std::atomic<uint64_t> wr_{0};
-    alignas(64) std::atomic<uint64_t> rd_{0};
-    std::atomic<uint64_t> xruns_{0};
-};
 
 #if defined(_WIN32)
 std::string wide_to_utf8(const wchar_t* ws) {
@@ -160,8 +83,9 @@ public:
     ~WasapiSlotBackend() { stop(); }
 
     bool start(MatrixSlotRole role, int device_index, const std::string& device_name, int channels,
-               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring) {
+               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring, uint32_t mix_block) {
         stop();
+        mix_block_.store(mix_block, std::memory_order_relaxed);
         role_ = role;
         device_index_ = device_index;
         device_name_ = device_name;
@@ -182,6 +106,11 @@ public:
 
     bool connected() const { return connected_.load(std::memory_order_acquire); }
     uint32_t sample_rate() const { return dev_rate_.load(std::memory_order_acquire); }
+    void set_mix_block(uint32_t frames) {
+        mix_block_.store(frames, std::memory_order_relaxed);
+        adapter_.set_mix_block(frames);
+    }
+    uint32_t capture_prime() const { return adapter_.target_fill(double(dev_rate_.load(std::memory_order_relaxed))); }
 
 private:
     IMMDevice* pick_device(IMMDeviceEnumerator* en, EDataFlow flow) {
@@ -304,55 +233,34 @@ private:
         connected_.store(true, std::memory_order_release);
         timeBeginPeriod(1);
 
-        // Linear resampler state between 48000 Hz matrix and dev_sr (handles 44.1 kHz / 96 kHz + drift)
-        std::vector<std::vector<float>> tmp_planes(dev_ch, std::vector<float>(2048, 0.0f));
+        // The shared-mode mix format decides the device rate (often 44.1 kHz). DeviceRateAdapter converts
+        // to/from the 48 kHz matrix with exact block-to-block continuity and a +/-500 ppm drift trim, so
+        // a 44.1 kHz endpoint is resampled - never fed 48 kHz samples at 44.1 kHz.
+        const uint32_t max_block = std::max<uint32_t>(buf_frames, 1024);
+        adapter_.configure(int(dev_ch), max_block, mix_block_.load(std::memory_order_relaxed));
+        std::vector<std::vector<float>> planes(dev_ch, std::vector<float>(max_block, 0.0f));
         std::vector<float*> ptrs(dev_ch);
-        for (uint32_t c = 0; c < dev_ch; ++c) ptrs[c] = tmp_planes[c].data();
-
-        double phase = 0.0;
-        std::vector<float> prev_samp(dev_ch, 0.0f);
+        std::vector<const float*> cptrs(dev_ch);
+        for (uint32_t c = 0; c < dev_ch; ++c) {
+            ptrs[c] = planes[c].data();
+            cptrs[c] = planes[c].data();
+        }
 
         while (!stop_.load(std::memory_order_acquire)) {
             if (!is_capture && render_cli && out_ring_) {
                 UINT32 pad = 0;
                 if (FAILED(client->GetCurrentPadding(&pad))) break;
-                const UINT32 avail_out = buf_frames > pad ? (buf_frames - pad) : 0;
+                const UINT32 avail_out = std::min<UINT32>(buf_frames > pad ? (buf_frames - pad) : 0, max_block);
                 if (avail_out >= 64) {
                     BYTE* dst = nullptr;
                     if (SUCCEEDED(render_cli->GetBuffer(avail_out, &dst)) && dst) {
-                        // Adaptive drift trim (±0.05%) around 512-frame target fill in out_ring_
-                        const uint32_t ring_fill = out_ring_->available();
-                        double drift = 1.0;
-                        if (ring_fill > 1536) drift = 1.0005;
-                        else if (ring_fill < 256) drift = 0.9995;
-                        const double step = (double(kMatrixSampleRate) / double(dev_sr)) * drift;
-
-                        const uint32_t need_in = std::min<uint32_t>(
-                            2040, uint32_t(std::ceil(phase + double(avail_out) * step)) + 2);
-                        const uint32_t got = out_ring_->read(ptrs.data(), dev_ch, need_in, true);
-                        (void)got;
-
+                        adapter_.render(*out_ring_, ptrs.data(), int(dev_ch), avail_out, double(dev_sr));
                         for (UINT32 i = 0; i < avail_out; ++i) {
-                            const uint32_t idx0 = uint32_t(phase);
-                            const float frac = float(phase - double(idx0));
-                            const uint32_t idx1 = std::min(idx0 + 1, need_in - 1);
                             for (uint32_t c = 0; c < dev_ch; ++c) {
-                                const float s0 = (idx0 < need_in) ? tmp_planes[c][idx0] : prev_samp[c];
-                                const float s1 = (idx1 < need_in) ? tmp_planes[c][idx1] : s0;
-                                const float v = std::clamp(s0 + (s1 - s0) * frac, -1.0f, 1.0f);
-                                if (is_float) {
-                                    reinterpret_cast<float*>(dst)[size_t(i) * dev_ch + c] = v;
-                                } else {
-                                    reinterpret_cast<int16_t*>(dst)[size_t(i) * dev_ch + c] =
-                                        int16_t(std::lrint(v * 32767.0f));
-                                }
+                                const float v = std::clamp(planes[c][i], -1.0f, 1.0f);
+                                if (is_float) reinterpret_cast<float*>(dst)[size_t(i) * dev_ch + c] = v;
+                                else reinterpret_cast<int16_t*>(dst)[size_t(i) * dev_ch + c] = int16_t(std::lrint(v * 32767.0f));
                             }
-                            phase += step;
-                        }
-                        const uint32_t consumed = uint32_t(phase);
-                        phase -= double(consumed);
-                        if (consumed > 0 && consumed <= need_in) {
-                            for (uint32_t c = 0; c < dev_ch; ++c) prev_samp[c] = tmp_planes[c][consumed - 1];
                         }
                         render_cli->ReleaseBuffer(avail_out, 0);
                     }
@@ -365,34 +273,22 @@ private:
                     DWORD flags = 0;
                     if (FAILED(cap_cli->GetBuffer(&src, &nframes, &flags, nullptr, nullptr))) break;
                     const bool silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-                    const double step = double(dev_sr) / double(kMatrixSampleRate);
-                    const uint32_t out_n = std::min<uint32_t>(2040, uint32_t(double(nframes) / step));
-                    for (uint32_t i = 0; i < out_n; ++i) {
-                        const double pos = double(i) * step;
-                        const uint32_t i0 = std::min<uint32_t>(uint32_t(pos), nframes > 0 ? nframes - 1 : 0);
-                        const uint32_t i1 = std::min<uint32_t>(i0 + 1, nframes > 0 ? nframes - 1 : 0);
-                        const float frac = float(pos - double(i0));
-                        for (uint32_t c = 0; c < dev_ch; ++c) {
-                            float v = 0.0f;
-                            if (!silent && src) {
-                                if (is_float) {
-                                    const auto* fp = reinterpret_cast<const float*>(src);
-                                    const float s0 = fp[size_t(i0) * dev_ch + c];
-                                    const float s1 = fp[size_t(i1) * dev_ch + c];
-                                    v = s0 + (s1 - s0) * frac;
-                                } else {
-                                    const auto* sp = reinterpret_cast<const int16_t*>(src);
-                                    const float s0 = float(sp[size_t(i0) * dev_ch + c]) / 32768.0f;
-                                    const float s1 = float(sp[size_t(i1) * dev_ch + c]) / 32768.0f;
-                                    v = s0 + (s1 - s0) * frac;
+                    for (UINT32 off = 0; off < nframes;) {  // packets larger than max_block are split
+                        const UINT32 cnt = std::min<UINT32>(nframes - off, max_block);
+                        for (UINT32 i = 0; i < cnt; ++i) {
+                            for (uint32_t c = 0; c < dev_ch; ++c) {
+                                float v = 0.0f;
+                                if (!silent && src) {
+                                    const size_t k = size_t(off + i) * dev_ch + c;
+                                    v = is_float ? reinterpret_cast<const float*>(src)[k]
+                                                 : float(reinterpret_cast<const int16_t*>(src)[k]) / 32768.0f;
                                 }
+                                planes[c][i] = v;
                             }
-                            tmp_planes[c][i] = v;
                         }
+                        adapter_.capture(*in_ring_, cptrs.data(), int(dev_ch), cnt, double(dev_sr));
+                        off += cnt;
                     }
-                    std::vector<const float*> cptrs(dev_ch);
-                    for (uint32_t c = 0; c < dev_ch; ++c) cptrs[c] = tmp_planes[c].data();
-                    in_ring_->write(cptrs.data(), dev_ch, out_n);
                     cap_cli->ReleaseBuffer(nframes);
                 }
             }
@@ -418,6 +314,8 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> connected_{false};
     std::atomic<uint32_t> dev_rate_{kMatrixSampleRate};
+    std::atomic<uint32_t> mix_block_{256};
+    DeviceRateAdapter adapter_;
 };
 
 // ---- Windows External ASIO Host Backend (loads any installed 64-bit ASIO driver via COM) ----
@@ -426,9 +324,10 @@ public:
     ~ExternalAsioSlotBackend() { stop(); }
 
     bool start(const std::string& driver_name, int channels, int buffer_size,
-               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring) {
+               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring, uint32_t mix_block) {
         stop();
         if (driver_name.empty()) return false;
+        mix_block_.store(mix_block, std::memory_order_relaxed);
         // Find CLSID in HKLM\SOFTWARE\ASIO\<driver_name>
         const std::wstring sub = L"SOFTWARE\\ASIO\\" + utf8_to_wide(driver_name);
         HKEY hk = nullptr;
@@ -464,6 +363,12 @@ public:
 
     bool connected() const { return connected_.load(std::memory_order_acquire); }
     uint32_t sample_rate() const { return dev_rate_.load(std::memory_order_acquire); }
+    void set_mix_block(uint32_t frames) {
+        mix_block_.store(frames, std::memory_order_relaxed);
+        ad_in_.set_mix_block(frames);
+        ad_out_.set_mix_block(frames);
+    }
+    uint32_t capture_prime() const { return ad_in_.target_fill(sr_); }
 
 private:
     static inline ExternalAsioSlotBackend* s_active_ = nullptr;
@@ -499,11 +404,12 @@ private:
                     for (uint32_t i = 0; i < n; ++i) dst[i] = float(double(s32[i]) / 2147483648.0);
                 }
             }
-            in_ring_->write(in_ptrs_.data(), uint32_t(in_ch_), n);
+            // Driver rate -> 48 kHz (resampled when the driver refused 48 kHz; drift-trimmed either way).
+            ad_in_.capture(*in_ring_, in_ptrs_.data(), int(in_ch_), n, sr_);
         }
         // Outputs from matrix out_ring_ -> external ASIO
         if (out_ch_ > 0 && out_ring_) {
-            out_ring_->read(out_ptrs_.data(), uint32_t(out_ch_), n, true);
+            ad_out_.render(*out_ring_, out_ptrs_.data(), int(out_ch_), n, sr_);
             for (long c = 0; c < out_ch_; ++c) {
                 void* dst = buf_infos_[size_t(in_ch_ + c)].buffers[idx];
                 const float* src = scratch_out_[size_t(c)].data();
@@ -543,7 +449,10 @@ private:
         ASIOSampleRate sr = 48000.0;
         if (asio->canSampleRate(48000.0) == ASE_OK) asio->setSampleRate(48000.0);
         asio->getSampleRate(&sr);
-        dev_rate_.store(uint32_t(sr), std::memory_order_release);
+        // If the driver stays at 44.1 kHz (canSampleRate/setSampleRate refused), the adapters resample:
+        // 48 kHz samples are never handed to a 44.1 kHz device as-is (that plays 8.8 % slow).
+        sr_ = sr > 1000.0 ? double(sr) : 48000.0;
+        dev_rate_.store(uint32_t(sr_ + 0.5), std::memory_order_release);
 
         buf_infos_.assign(size_t(in_ch_ + out_ch_), ASIOBufferInfo{});
         in_types_.assign(size_t(in_ch_), ASIOSTInt32LSB);
@@ -552,6 +461,8 @@ private:
         scratch_out_.assign(size_t(out_ch_), std::vector<float>(size_t(buf_size_), 0.0f));
         in_ptrs_.resize(size_t(in_ch_));
         out_ptrs_.resize(size_t(out_ch_));
+        ad_in_.configure(int(std::max<long>(in_ch_, 1)), uint32_t(buf_size_), mix_block_.load(std::memory_order_relaxed));
+        ad_out_.configure(int(std::max<long>(out_ch_, 1)), uint32_t(buf_size_), mix_block_.load(std::memory_order_relaxed));
 
         for (long c = 0; c < in_ch_; ++c) {
             buf_infos_[size_t(c)].isInput = ASIOTrue;
@@ -602,6 +513,9 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> connected_{false};
     std::atomic<uint32_t> dev_rate_{kMatrixSampleRate};
+    std::atomic<uint32_t> mix_block_{256};
+    double sr_ = 48000.0;
+    DeviceRateAdapter ad_in_, ad_out_;
 };
 #endif
 
@@ -684,7 +598,7 @@ public:
 
     // `uid` empty = current default device for the role. Duplex opens both directions of one device.
     bool start(MatrixSlotRole role, const std::string& uid, int channels, int buffer_size,
-               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring) {
+               LockFreePlanarRing* in_ring, LockFreePlanarRing* out_ring, uint32_t mix_block) {
         stop();
         role_ = role;
         want_out_ = role != MatrixSlotRole::kInput;
@@ -704,11 +618,13 @@ public:
         const double r = ca_device_rate(dev_);
         rate_.store(r > 1000.0 ? r : 48000.0, std::memory_order_release);
 
-        // Preallocate everything the IOProc needs.
-        for (auto& v : tmp_a_) v.assign(kMaxBlock * 3, 0.0f);
-        for (auto& v : tmp_b_) v.assign(kMaxBlock * 3, 0.0f);
-        rs_out_.configure(ch_, kMaxBlock * 3);
-        rs_in_.configure(ch_, kMaxBlock * 3);
+        // Preallocate everything the IOProc needs. The device keeps its own nominal rate (44.1 kHz is
+        // common for headphones / built-in output): the adapters resample to and from the 48 kHz matrix
+        // instead of changing a system-wide setting other apps depend on.
+        for (auto& v : tmp_a_) v.assign(kMaxBlock, 0.0f);
+        for (auto& v : tmp_b_) v.assign(kMaxBlock, 0.0f);
+        ad_out_.configure(ch_, kMaxBlock, mix_block);
+        ad_in_.configure(ch_, kMaxBlock, mix_block);
 
         UInt32 bs = block_;
         AudioObjectPropertyAddress ba{kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal,
@@ -776,28 +692,14 @@ private:
         return noErr;
     }
 
-    // matrix (48 kHz) -> device
+    // matrix (48 kHz) -> device (device rate, interleaved per buffer)
     void render(AudioBufferList* out) {
         const UInt32 nc0 = std::max<UInt32>(1, out->mBuffers[0].mNumberChannels);
         const uint32_t n = std::min<uint32_t>(kMaxBlock, out->mBuffers[0].mDataByteSize / (sizeof(float) * nc0));
-        double ratio = double(kMatrixSampleRate) / rate_.load(std::memory_order_relaxed);
-        // Drift trim: keep the matrix->device ring around 2 blocks.
-        const uint32_t fill = out_ring_ ? out_ring_->available() : 0;
-        if (fill > 3 * block_) ratio *= 1.0005;
-        else if (fill < block_ / 2) ratio *= 0.9995;
         float* a[kMatrixMaxChannels];
-        float* b[kMatrixMaxChannels];
-        for (int c = 0; c < ch_; ++c) { a[c] = tmp_a_[c].data(); b[c] = tmp_b_[c].data(); }
-        const uint32_t need = rs_out_.needed_for(n, ratio);
-        if (rs_out_.buffered() < need && out_ring_) {
-            const uint32_t pull = std::min<uint32_t>(need - rs_out_.buffered(), rs_out_.space());
-            out_ring_->read(a, uint32_t(ch_), pull, true);  // zero-padded on underrun
-            const float* ca[kMatrixMaxChannels];
-            for (int c = 0; c < ch_; ++c) ca[c] = a[c];
-            rs_out_.push(ca, ch_, pull);
-        }
-        const uint32_t got = rs_out_.produce(b, ch_, n, ratio);
-        for (int c = 0; c < ch_; ++c) if (got < n) std::memset(b[c] + got, 0, size_t(n - got) * sizeof(float));
+        for (int c = 0; c < ch_; ++c) a[c] = tmp_a_[c].data();
+        if (out_ring_) ad_out_.render(*out_ring_, a, ch_, n, rate_.load(std::memory_order_relaxed));
+        else for (int c = 0; c < ch_; ++c) std::memset(a[c], 0, size_t(n) * sizeof(float));
         // Scatter into the device's buffers (interleaved per buffer); extra device channels get silence.
         int dev_ch = 0;
         for (UInt32 bi = 0; bi < out->mNumberBuffers; ++bi) {
@@ -807,25 +709,22 @@ private:
             if (!d || nc == 0) continue;
             const uint32_t frames = std::min<uint32_t>(n, ab.mDataByteSize / (sizeof(float) * nc));
             for (UInt32 k = 0; k < nc; ++k, ++dev_ch) {
-                const float* src = dev_ch < ch_ ? b[dev_ch] : nullptr;
+                const float* src = dev_ch < ch_ ? a[dev_ch] : nullptr;
                 for (uint32_t i = 0; i < frames; ++i) d[size_t(i) * nc + k] = src ? src[i] : 0.0f;
             }
         }
     }
 
-    // device -> matrix (48 kHz)
+    // device (device rate) -> matrix (48 kHz)
     void capture(const AudioBufferList* in) {
         const UInt32 nc0 = std::max<UInt32>(1, in->mBuffers[0].mNumberChannels);
         const uint32_t n = std::min<uint32_t>(kMaxBlock, in->mBuffers[0].mDataByteSize / (sizeof(float) * nc0));
         float* a[kMatrixMaxChannels];
-        float* b[kMatrixMaxChannels];
         for (int c = 0; c < ch_; ++c) {
-            a[c] = tmp_a_[c].data() + kMaxBlock;  // separate region from render()'s use
-            b[c] = tmp_b_[c].data() + kMaxBlock;
+            a[c] = tmp_b_[c].data();
+            std::memset(a[c], 0, size_t(n) * sizeof(float));
         }
-        // Gather slot channels from the device's (possibly several) interleaved buffers.
         int dev_ch = 0;
-        for (int c = 0; c < ch_; ++c) std::memset(a[c], 0, size_t(n) * sizeof(float));
         for (UInt32 bi = 0; bi < in->mNumberBuffers; ++bi) {
             const AudioBuffer& ab = in->mBuffers[bi];
             const float* d = static_cast<const float*>(ab.mData);
@@ -839,19 +738,18 @@ private:
         }
         const float* ca[kMatrixMaxChannels];
         for (int c = 0; c < ch_; ++c) ca[c] = a[c];
-        rs_in_.push(ca, ch_, n);
-        double ratio = rate_.load(std::memory_order_relaxed) / double(kMatrixSampleRate);
-        const uint32_t fill = in_ring_ ? in_ring_->available() : 0;
-        if (fill > 4 * block_) ratio *= 1.0005;       // mixer is slower than the device: emit less
-        else if (fill < block_) ratio *= 0.9995;      // mixer is faster: emit a little more
-        const uint32_t got = rs_in_.produce(b, ch_, kMaxBlock, ratio);
-        if (got && in_ring_) {
-            const float* cb[kMatrixMaxChannels];
-            for (int c = 0; c < ch_; ++c) cb[c] = b[c];
-            in_ring_->write(cb, uint32_t(ch_), got);
-        }
+        if (in_ring_) ad_in_.capture(*in_ring_, ca, ch_, n, rate_.load(std::memory_order_relaxed));
     }
 
+public:
+    void set_mix_block(uint32_t frames) {
+        ad_out_.set_mix_block(frames);
+        ad_in_.set_mix_block(frames);
+    }
+    uint64_t underruns() const { return ad_out_.underruns(); }
+    uint32_t capture_prime() const { return ad_in_.target_fill(rate_.load(std::memory_order_relaxed)); }
+
+private:
     MatrixSlotRole role_ = MatrixSlotRole::kOutput;
     bool want_out_ = true, want_in_ = false;
     int ch_ = 2;
@@ -866,7 +764,7 @@ private:
     std::atomic<double> rate_{48000.0};
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> callbacks_{0};
-    StreamResampler rs_out_, rs_in_;
+    DeviceRateAdapter ad_out_, ad_in_;
     std::array<std::vector<float>, kMatrixMaxChannels> tmp_a_, tmp_b_;
 };
 #endif  // LV_MATRIX_COREAUDIO
@@ -979,6 +877,8 @@ struct MultiDeviceAudioMatrix::Impl {
     NetworkPopFn net_pop;
 
     std::thread mix_thread;
+    std::atomic<uint64_t> frames_mixed{0};
+    std::atomic<uint64_t> clock_resets{0};
     std::atomic<bool> stop_flag{false};
     std::atomic<bool> running{false};
 
@@ -1013,17 +913,18 @@ struct MultiDeviceAudioMatrix::Impl {
         if (st.cfg.type == MatrixSlotType::kSystemAudio) {
             st.wasapi = std::make_unique<WasapiSlotBackend>();
             st.wasapi->start(st.cfg.role, st.cfg.device_index, st.cfg.device_id, st.cfg.channels,
-                             &st.in_ring, &st.out_ring);
+                             &st.in_ring, &st.out_ring, uint32_t(buffer_size));
         } else if (st.cfg.type == MatrixSlotType::kExternalAsio) {
             st.asio = std::make_unique<ExternalAsioSlotBackend>();
-            st.asio->start(st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size, &st.in_ring, &st.out_ring);
+            st.asio->start(st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size, &st.in_ring, &st.out_ring,
+                           uint32_t(buffer_size));
         }
 #endif
 #if LV_MATRIX_COREAUDIO
         if (st.cfg.type == MatrixSlotType::kSystemAudio) {
             st.coreaudio = std::make_unique<CoreAudioSlotBackend>();
             st.coreaudio->start(st.cfg.role, st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size,
-                                &st.in_ring, &st.out_ring);
+                                &st.in_ring, &st.out_ring, uint32_t(buffer_size));
         }
 #endif
     }
@@ -1039,6 +940,20 @@ struct MultiDeviceAudioMatrix::Impl {
 #ifdef LV_HAVE_SHM_BUS
         if (st.shm_bus) { st.shm_bus->close(); st.shm_bus.reset(); }
 #endif
+    }
+
+    // Frames a device input ring must hold before the mixer starts (or restarts) reading it: one matrix
+    // block plus one device callback at 48 kHz, i.e. exactly what the capture drift loop steers to.
+    uint32_t input_prime(SlotState& st, uint32_t frames) {
+        uint32_t p = 0;
+#if LV_MATRIX_COREAUDIO
+        if (st.coreaudio) p = st.coreaudio->capture_prime();
+#endif
+#if defined(_WIN32)
+        if (st.wasapi) p = st.wasapi->capture_prime();
+        else if (st.asio) p = st.asio->capture_prime();
+#endif
+        return std::max(p, frames);
     }
 
     void process_block(uint32_t frames) {
@@ -1084,7 +999,8 @@ struct MultiDeviceAudioMatrix::Impl {
                 }
 #endif
                 else {
-                    slots[s].in_ring.read(ptrs, uint32_t(ch), frames, true);
+                    // Primed read: never a click per block when device and mixer phases differ.
+                    slots[s].in_ring.read_primed(ptrs, uint32_t(ch), frames, input_prime(slots[s], frames));
                 }
             }
             float peak = 0.0f;
@@ -1349,6 +1265,16 @@ void MultiDeviceAudioMatrix::set_network_io(NetworkPushFn push_tx, NetworkPopFn 
 void MultiDeviceAudioMatrix::set_buffer_size(int frames) {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->buffer_size = (frames <= 128) ? 128 : (frames <= 256 ? 256 : 512);
+    for (auto& st : impl_->slots) {  // device drift loops steer around the new block
+#if LV_MATRIX_COREAUDIO
+        if (st.coreaudio) st.coreaudio->set_mix_block(uint32_t(impl_->buffer_size));
+#endif
+#if defined(_WIN32)
+        if (st.wasapi) st.wasapi->set_mix_block(uint32_t(impl_->buffer_size));
+        if (st.asio) st.asio->set_mix_block(uint32_t(impl_->buffer_size));
+#endif
+        (void)st;
+    }
 }
 
 int MultiDeviceAudioMatrix::buffer_size() const {
@@ -1375,17 +1301,23 @@ bool MultiDeviceAudioMatrix::start() {
 #if defined(_WIN32)
         timeBeginPeriod(1);
 #endif
-        uint64_t next = now_us();
+        // Exactly 48000 frames per second of wall time: the deadline accumulates in fractional
+        // microseconds (an integer period truncates 128 frames to 2666 us = +250 ppm, 256 to +62 ppm),
+        // and waits on an absolute deadline (mach_wait_until / high-resolution waitable timer), so
+        // wake-up jitter never accumulates. A late block is caught up, not skipped: skipping time
+        // would silently drop audio from every downstream timeline.
+        double next = double(now_us());
         while (!impl_->stop_flag.load(std::memory_order_acquire)) {
             const uint32_t blk = uint32_t(buffer_size());
-            const uint64_t period_us = uint64_t(blk) * 1000000ull / kMatrixSampleRate;
-            next += period_us;
+            next += double(blk) * 1e6 / double(kMatrixSampleRate);
             impl_->process_block(blk);
+            impl_->frames_mixed.fetch_add(blk, std::memory_order_relaxed);
             const uint64_t now = now_us();
-            if (next > now) {
-                sleep_until_us(next, [] {});
-            } else if (now - next > period_us * 4) {
-                next = now;
+            if (next > double(now)) {
+                sleep_until_us(uint64_t(next), [] {});
+            } else if (double(now) - next > 100000.0) {  // > 100 ms stall (system suspend etc.): re-anchor
+                next = double(now);
+                impl_->clock_resets.fetch_add(1, std::memory_order_relaxed);
             }
         }
 #if defined(_WIN32)
@@ -1404,6 +1336,8 @@ void MultiDeviceAudioMatrix::stop() {
         if (impl_->slots[i].used) impl_->stop_slot_backend(impl_->slots[i]);
     }
 }
+
+uint64_t MultiDeviceAudioMatrix::frames_mixed() const { return impl_->frames_mixed.load(std::memory_order_relaxed); }
 
 bool MultiDeviceAudioMatrix::is_running() const {
     return impl_->running.load(std::memory_order_acquire);

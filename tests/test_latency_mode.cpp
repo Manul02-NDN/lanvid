@@ -127,31 +127,37 @@ TEST(audio_latency_mode_fixed_vs_adaptive_wifi) {
     CHECK(grown_target > kTargetMs + 10 && grown_target <= lv::AudioSyncMatrix::kAdaptiveMaxMs);
     CHECK(std::fabs(grown_actual - double(grown_target)) < 2.0);
     CHECK(adaptive_settled_underruns == 0);
-    CHECK(s.mat.resync_count() == resync0);  // grown by time-stretch, not by a jump
+    // Grown by at most a few crossfaded re-anchors (steps > 10 ms), never by > +/-500 ppm stretch.
+    const uint64_t grow_resyncs = s.mat.resync_count() - resync0;
+    CHECK(grow_resyncs >= 1 && grow_resyncs <= 3);
+    const uint64_t resync1 = s.mat.resync_count();
 
     // 4) Calm again: holds, then glides back to the target through +/-0.05 % micro-resampling.
-    double max_fast_ppm = 0.0;
+    double max_fast_ppm = 0.0, min_ppm = 0.0;
     const uint64_t u2 = s.underruns();
     for (int i = 0; i < 200 * 120; ++i) {  // up to 120 s
         s.step(1.0, 2.0, 200);
         max_fast_ppm = std::max(max_fast_ppm, s.mat.resample_ppm());
+        min_ppm = std::min(min_ppm, s.mat.resample_ppm());
         if (s.mat.effective_latency_ms() == kTargetMs && std::fabs(s.mat.current_effective_latency_ms() - kTargetMs) < 1.0)
             break;
     }
     CHECK(s.mat.effective_latency_ms() == kTargetMs);
     CHECK(std::fabs(s.mat.current_effective_latency_ms() - double(kTargetMs)) < 1.0);
     CHECK(max_fast_ppm <= 500.0 + 1e-6);         // never faster than +0.05 %
-    CHECK(s.mat.resync_count() == resync0);      // smooth return, no reanchor
+    CHECK(min_ppm >= -500.0 - 1e-6);             // never slower than -0.05 % (ratio >= 0.9995)
+    CHECK(s.mat.resync_count() == resync1);      // smooth return, no reanchor
     CHECK(s.underruns() - u2 == 0);
 
     // 5) Grow again, then switch to Fixed while grown: one crossfaded re-anchor to exactly the target.
     s.run(8.0, 2.0, 32.0, 12000);
     CHECK(s.mat.effective_latency_ms() > kTargetMs + 10);
+    const uint64_t resync2 = s.mat.resync_count();
     s.mat.set_adaptive_jitter_enabled(false);
     s.run(0.1, 1.0, 2.0, 200);
     CHECK(s.mat.effective_latency_ms() == kTargetMs);
     CHECK(std::fabs(s.mat.current_effective_latency_ms() - double(kTargetMs)) < 1.0);
-    CHECK(s.mat.resync_count() == resync0 + 1);
+    CHECK(s.mat.resync_count() == resync2 + 1);
 
     // No clicks anywhere: a 220 Hz tone at 0.5 amplitude moves < 0.015 per sample; crossfades and
     // time-stretch must keep every step well below a hard jump.

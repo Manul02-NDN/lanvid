@@ -152,7 +152,7 @@ without restarting the stream:
 | Mode | Use | Behaviour |
 |---|---|---|
 | **Fixed (Ethernet)** | wired LAN, live monitoring | delay held at exactly `latency_ms`; only +/-100 ppm device-clock drift is tracked. Late packets are dropped, the buffer never floats. |
-| **Adaptive (Wi-Fi)** — default | Wi-Fi 6, shared links | delay grows within `[latency_ms .. 200 ms]` to `max(arrival-lag envelope + render block + 2 ms, 3 x RFC 3550 jitter + 2 ms)`. Growth uses up to 0.5 % time-stretch (identical for all channels, so phase lock is kept); after a 3 s hold the delay glides back at 0.4 ms/s through +/-0.05 % micro-resampling. |
+| **Adaptive (Wi-Fi)** — default | Wi-Fi 6, shared links | delay grows within `[latency_ms .. 200 ms]` to `max(arrival-lag envelope + render block + 2 ms, 3 x RFC 3550 jitter + 2 ms)`. Small growth steps use +/-0.05 % micro-resampling, steps > 10 ms one crossfaded re-anchor; after a 3 s hold the delay glides back at 0.4 ms/s through +/-0.05 % micro-resampling. The resampling ratio is hard-limited to 0.9995 .. 1.0005 in both modes. |
 
 The arrival lag is `MasterClock position at arrival - end of the block's samples`, measured per directly
 received AUDIO2 packet (envelope: instant attack, 4 s release). Steps larger than 40 ms, a switch from a

@@ -56,6 +56,8 @@ private:
     double x_off_ = 0.0, x_skew_ = 0.0;
     double p00_ = 0.0, p01_ = 0.0, p11_ = 0.0;
     uint64_t t_ref_ = 0;
+    uint64_t t_first_ = 0;          // first accepted exchange (skew needs a long baseline)
+    uint32_t anchor_rtt_ = 0;       // RTT of the exchange the offset was last (re)initialised from
     std::deque<uint32_t> rtt_window_;
 
     mutable std::atomic<uint32_t> seq_{0};

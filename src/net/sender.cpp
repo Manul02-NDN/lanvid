@@ -329,9 +329,24 @@ uint64_t UdpSender::master_samples_now() const {
     return (us / 1000000) * cfg_.audio_sample_rate + (us % 1000000) * cfg_.audio_sample_rate / 1000000;
 }
 
+uint64_t UdpSender::resolve_auto_ts(uint64_t next, uint32_t num_samples) const {
+    const uint64_t now = master_samples_now();
+    const uint64_t ideal = now > num_samples ? now - num_samples : 0;  // block just captured ends "now"
+    if (next == 0) return ideal;                                       // anchor on first push
+    const int64_t drift = int64_t(ideal) - int64_t(next);              // > 0: producer behind the clock
+    // Behind: re-anchor after max(20 ms, 3 blocks). Ahead (pushing faster than real time, e.g. a file
+    // pre-buffer) is legal up to 1 s - the receiver ring holds 2.5 s - and only then re-anchored.
+    const int64_t behind_tol = std::max<int64_t>(int64_t(cfg_.audio_sample_rate) / 50, 3 * int64_t(num_samples));
+    const int64_t ahead_tol = int64_t(cfg_.audio_sample_rate);
+    if (drift > behind_tol || drift < -ahead_tol) {
+        auto_reanchors_.fetch_add(1, std::memory_order_relaxed);
+        return ideal;
+    }
+    return next;
+}
+
 uint64_t UdpSender::next_auto_media_ts(uint32_t num_samples) const {
-    const uint64_t n = next_auto_ts_[0].load(std::memory_order_relaxed);
-    return n ? n : master_samples_now() - num_samples;
+    return resolve_auto_ts(next_auto_ts_[0].load(std::memory_order_relaxed), num_samples);
 }
 
 int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
@@ -342,10 +357,7 @@ int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_
         if (lk.owns_lock()) service_control();
     }
     auto& next = next_auto_ts_[channel];
-    if (media_ts == kAutoMediaTs) {
-        media_ts = next.load(std::memory_order_relaxed);
-        if (media_ts == 0) media_ts = master_samples_now() - num_samples;  // anchor on first push
-    }
+    if (media_ts == kAutoMediaTs) media_ts = resolve_auto_ts(next.load(std::memory_order_relaxed), num_samples);
     next.store(media_ts + num_samples, std::memory_order_relaxed);
     return atx_->push_channel(channel, samples, num_samples, fmt, media_ts, now_us32());
 }

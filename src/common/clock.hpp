@@ -7,6 +7,8 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach_time.h>
 #endif
 
 namespace lv {
@@ -44,6 +46,15 @@ inline void sleep_until_us(uint64_t target_us, Fn&& idle_cb) {
                     continue;
                 }
             }
+#elif defined(__APPLE__)
+            // Absolute Mach deadline: no rounding-up of relative sleeps on the audio/mixer threads.
+            static const mach_timebase_info_data_t tb = [] {
+                mach_timebase_info_data_t t{};
+                mach_timebase_info(&t);
+                return t;
+            }();
+            mach_wait_until(mach_absolute_time() + chunk_us * 1000ull * tb.denom / tb.numer);
+            continue;
 #endif
             std::this_thread::sleep_for(std::chrono::microseconds(chunk_us));
         } else if (rem > 150) {

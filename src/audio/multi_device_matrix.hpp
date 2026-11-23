@@ -190,6 +190,8 @@ public:
     uint32_t extract_slot_output(int slot_id, float* const* planes, uint32_t channels, uint32_t frames);
     // Runs one deterministic mixing block synchronously (does not require start()).
     void process_block_sync(uint32_t frames);
+    // Frames rendered by the real-time mix thread since construction (exactly 48000 per second of wall time).
+    uint64_t frames_mixed() const;
 
     // ---- MIDI Slots & Routing (up to 16 MIDI devices, many-to-1 merge & 1-to-many split) ----
     using MidiOutSinkFn = std::function<void(int dst_slot_id, uint8_t status, uint8_t d1, uint8_t d2,

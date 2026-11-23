@@ -8,9 +8,8 @@ namespace lv {
 
 namespace {
 constexpr uint32_t kCrossfadeSamples = 96;
-constexpr double kMaxRatioOffset = 100e-6;          // +/-100 ppm (standard LAN)
-constexpr double kAdaptiveMaxRatioOffset = 500e-6;  // +/-0.05% (+/-500 ppm for Wi-Fi jitter absorption)
-constexpr double kAdaptiveGrowRatioOffset = 5000e-6; // +/-0.5% while the buffer grows (Wi-Fi burst)
+constexpr double kRatioLimit = 500e-6;              // hard limit: ratio always within 0.9995 .. 1.0005
+constexpr double kGrowJumpSec = 0.010;              // adaptive growth beyond 10 ms: one crossfaded re-anchor
 constexpr double kDeadbandSamples = 1.5;
 // Adaptive sizing: headroom = 3 x RFC 3550 jitter envelope + 2 ms guard.
 constexpr double kJitterMarginFactor = 3.0;
@@ -297,13 +296,13 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     }
 
     const double err = double(desired) - cursor_;
-    // In adaptive Wi-Fi jitter mode, absorb spikes up to 250 ms via smooth +/-0.05% micro-resampling
-    // instead of triggering audible hard reanchors.
-    // Both modes re-anchor (crossfaded) beyond 40 ms: a growth step that large (severe Wi-Fi burst) is
-    // applied at once, and a consumer stall can never leave the buffer far deeper than intended.
-    // Smaller errors are absorbed by the resampler (time-stretch while growing, micro-resampling back).
+    // The micro-resampler only ever corrects up to +/-500 ppm (0.9995 .. 1.0005): it can never lock into
+    // an audible slow-down. Anything it cannot absorb is re-anchored once with a 96-sample crossfade:
+    //  * |error| > 40 ms in either mode (consumer stall, clock jump, latency change),
+    //  * Adaptive growth > 10 ms (a Wi-Fi burst needs the deeper buffer now, not after a minute of stretch).
     const double hard = double(rate_) * 0.040;
-    if (dirty || std::fabs(err) > hard) {
+    const bool grow_jump = adaptive && err < -double(rate_) * kGrowJumpSec;
+    if (dirty || grow_jump || std::fabs(err) > hard) {
         p.seek = true;
         p.old_cursor = cursor_;
         cursor_ = double(desired);
@@ -319,13 +318,11 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     const double alpha = std::min(1.0, double(frames) / (double(rate_) * 0.5));
     err_filt_ += (err - err_filt_) * alpha;
 
-    // Adaptive: growing the buffer (cursor must slow down, err < 0) may stretch by up to 0.5% so a
-    // Wi-Fi burst is absorbed within seconds; returning to the target is limited to +/-0.05%.
-    const double max_slow = adaptive ? kAdaptiveGrowRatioOffset : kMaxRatioOffset;
-    const double max_fast = adaptive ? kAdaptiveMaxRatioOffset : kMaxRatioOffset;
+    // Both modes track the consumer's clock (DAW / device crystal vs MasterClock, typically < 200 ppm)
+    // within +/-500 ppm; Adaptive reacts faster (1.5 s gain vs 4 s).
     double off = 0.0;
     if (std::fabs(err_filt_) > kDeadbandSamples) {
-        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -max_slow, max_fast);
+        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -kRatioLimit, kRatioLimit);
     }
     p.cursor = cursor_;
     p.ratio = 1.0 + off;

@@ -53,7 +53,10 @@ void UdpReceiver::on_frame_internal(const CompletedFrame& cf) {
 
 void UdpReceiver::maybe_send_ping(uint64_t now) {
     if (!cfg_.enable_clock_sync || !has_sender_) return;
-    if (last_ping_us_ != 0 && (now - last_ping_us_) < cfg_.ping_interval_us) return;
+    // Fast pings (100 ms) until the MasterClock has a well-converged minimum-RTT set, then the normal rate.
+    const uint64_t interval = mclock_.accepted_samples() < 20 ? std::min<uint64_t>(cfg_.ping_interval_us, 100000)
+                                                              : cfg_.ping_interval_us;
+    if (last_ping_us_ != 0 && (now - last_ping_us_) < interval) return;
     last_ping_us_ = now;
 
     PingPongPayload pp;

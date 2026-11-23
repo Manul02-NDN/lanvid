@@ -9,6 +9,10 @@ namespace lv {
 namespace {
 constexpr size_t kRttWindow = 64;
 constexpr double kSkewLimit = 500e-6;  // crystals never differ by more than a few hundred ppm
+// Skew is only estimated over a baseline long enough that RTT-asymmetry noise (tens of us) cannot pose
+// as drift: 50 us over 5 s is 10 ppm, the same 50 us over 0.5 s would be 100 ppm of wrong playout speed.
+constexpr uint64_t kSkewMinBaselineUs = 5'000'000;
+constexpr uint64_t kSkewMinSamples = 8;
 }  // namespace
 
 MasterClock::Snapshot MasterClock::read() const {
@@ -32,6 +36,8 @@ void MasterClock::publish(const Snapshot& s) {
 
 void MasterClock::reset() {
     init_ = false;
+    t_first_ = 0;
+    anchor_rtt_ = 0;
     rtt_window_.clear();
     synced_.store(false, std::memory_order_release);
     min_rtt_us_.store(0, std::memory_order_relaxed);
@@ -77,7 +83,12 @@ void MasterClock::on_exchange(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4
     const double sigma_m = 20.0 + 0.5 * excess + 0.05 * double(min_rtt);
     const double R = sigma_m * sigma_m;
 
-    if (!init_) {
+    // A new minimum RTT far below the one the offset was anchored on means every earlier sample carried
+    // (asymmetric) queueing bias - typically a sender that answered PINGs late during start-up. Re-anchor
+    // the offset on the better sample instead of letting the filter "learn" the bias as clock drift.
+    const bool better_anchor = init_ && double(delta) + gate < double(anchor_rtt_);
+
+    if (!init_ || better_anchor) {
         init_ = true;
         x_off_ = theta;
         x_skew_ = 0.0;
@@ -85,6 +96,9 @@ void MasterClock::on_exchange(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4
         p01_ = 0.0;
         p11_ = (30e-6) * (30e-6);
         t_ref_ = t_meas;
+        t_first_ = t_meas;
+        anchor_rtt_ = uint32_t(delta);
+        accepted_.store(0, std::memory_order_relaxed);
     } else {
         const double dt = double(int64_t(t_meas) - int64_t(t_ref_));
         // Predict.
@@ -98,14 +112,18 @@ void MasterClock::on_exchange(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4
         const double innov = theta - x_off_;
         const double S = p00 + R;
         const double k0 = p00 / S;
-        const double k1 = p01 / S;
+        // Offset-only tracking until the baseline is long enough for a trustworthy skew.
+        const bool skew_ok = t_meas - t_first_ >= kSkewMinBaselineUs &&
+                             accepted_.load(std::memory_order_relaxed) >= kSkewMinSamples;
+        const double k1 = skew_ok ? p01 / S : 0.0;
         x_off_ += k0 * innov;
         x_skew_ += k1 * innov;
         x_skew_ = std::clamp(x_skew_, -kSkewLimit, kSkewLimit);
         p00_ = (1.0 - k0) * p00;
-        p01_ = (1.0 - k0) * p01;
-        p11_ = p11 - k1 * p01;
+        p01_ = skew_ok ? (1.0 - k0) * p01 : 0.0;
+        p11_ = skew_ok ? p11 - k1 * p01 : p11_;
         t_ref_ = t_meas;
+        anchor_rtt_ = std::min<uint32_t>(anchor_rtt_, uint32_t(delta));
     }
 
     Snapshot s;
