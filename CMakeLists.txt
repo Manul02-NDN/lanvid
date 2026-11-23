@@ -27,8 +27,29 @@ endif()
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(FetchContent)
 include(cmake/CompilerFlags.cmake)
 find_package(Threads REQUIRED)
+
+# ---------------------------------------------------------------- libopus (CELT 2.5 ms low-latency audio)
+find_package(Opus QUIET)
+if(NOT Opus_FOUND)
+  set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    opus
+    GIT_REPOSITORY https://github.com/xiph/opus.git
+    GIT_TAG        v1.5.2
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(opus)
+  if(TARGET opus AND NOT TARGET Opus::opus)
+    add_library(Opus::opus ALIAS opus)
+  endif()
+endif()
 
 # ---------------------------------------------------------------- build options
 option(LANVID_SDK_CORE_ONLY "Build pure C ABI SDK core without OS capture/GUI dependencies" OFF)
@@ -268,7 +289,8 @@ target_include_directories(lanvid_core PUBLIC
 if(LV_SIMD_DEFS)
   target_compile_definitions(lanvid_core PRIVATE ${LV_SIMD_DEFS})
 endif()
-target_link_libraries(lanvid_core PUBLIC ${LV_PLATFORM_LIBS})
+target_compile_definitions(lanvid_core PRIVATE LV_HAVE_OPUS=1)
+target_link_libraries(lanvid_core PUBLIC ${LV_PLATFORM_LIBS} $<BUILD_INTERFACE:Opus::opus>)
 lanvid_set_flags(lanvid_core)
 
 # ---------------------------------------------------------------- shared C ABI SDK library (DLL/.so/.dylib)
@@ -293,10 +315,10 @@ if(LANVID_BUILD_SHARED)
     ${LV_PLATFORM_INCLUDES}
   )
   target_compile_definitions(lanvid_core_shared
-    PRIVATE LANVID_BUILD_SHARED ${LV_SIMD_DEFS}
+    PRIVATE LANVID_BUILD_SHARED LV_HAVE_OPUS=1 ${LV_SIMD_DEFS}
     INTERFACE LANVID_USE_SHARED=1
   )
-  target_link_libraries(lanvid_core_shared PRIVATE ${LV_PLATFORM_LIBS})
+  target_link_libraries(lanvid_core_shared PRIVATE ${LV_PLATFORM_LIBS} $<BUILD_INTERFACE:Opus::opus>)
   lanvid_set_flags(lanvid_core_shared)
 endif()
 

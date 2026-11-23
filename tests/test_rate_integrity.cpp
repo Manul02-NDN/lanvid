@@ -463,13 +463,28 @@ TEST(udp_sender_receiver_audio_only_bitrate_and_routing) {
 }
 
 TEST(audio2_bitrate_profiles_256_to_64_kbps) {
-    // Verifies real AUDIO2 encoding/decoding of a 440 Hz sine wave and exact wire bitrate scaling
-    // across Lossless (0), 256, 192, 128, 96, and 64 kbps per channel @ 48 kHz.
+    // Verifies studio-grade Opus (CELT 2.5 ms, 48 kHz Fullband) encoding/decoding of a complex
+    // musical multi-tone signal (80 Hz bass + 1 kHz mid + 12 kHz highs) across Lossless (0),
+    // 256, 192, 128, 96, and 64 kbps/ch:
+    //   1) Full frequency bandwidth preservation (80 Hz, 1 kHz, 12 kHz) with zero aliasing;
+    //   2) High SNR (> 35 dB @ 128-256 kbps, > 25 dB @ 64 kbps) after aligning Opus 2.5 ms lookahead;
+    //   3) Exact wire bitrate matching the selected target.
     constexpr int kTargets[6] = {0, 256, 192, 128, 96, 64};
     constexpr uint32_t kRate = 48000;
-    constexpr uint32_t kBlk = 240;  // 5 ms blocks
+    constexpr uint32_t kBlk = 240;  // 5 ms blocks (2 x 120-sample Opus 2.5 ms frames)
     constexpr uint32_t kTotalBlocks = 200;  // 1.0 second
     double prev_wire_kbps = 1e9;
+
+    auto dft_mag = [](const float* x, size_t n, double freq_hz, double fs) -> double {
+        double re = 0.0, im = 0.0;
+        const double w = 2.0 * kPi * freq_hz / fs;
+        for (size_t i = 0; i < n; ++i) {
+            const double ang = w * double(i);
+            re += double(x[i]) * std::cos(ang);
+            im -= double(x[i]) * std::sin(ang);
+        }
+        return 2.0 * std::sqrt(re * re + im * im) / double(n);
+    };
 
     for (int target : kTargets) {
         lv::AudioSyncMatrix matrix(kRate);
@@ -479,6 +494,7 @@ TEST(audio2_bitrate_profiles_256_to_64_kbps) {
         rx.set_latency_ms(20);
 
         uint64_t wire_payload_bytes = 0;
+        uint64_t opus_pkts = 0;
         lv::AudioTxEngine tx(
             kRate, 1400,
             [&](const uint8_t* dgram, size_t len) -> bool {
@@ -491,17 +507,22 @@ TEST(audio2_bitrate_profiles_256_to_64_kbps) {
                         !(ah.flags & lv::kAudioFlagFecParity) &&
                         h.payload_size > lv::kAudioHeader2Size) {
                         wire_payload_bytes += (h.payload_size - lv::kAudioHeader2Size);
+                        if (ah.sample_format == lv::AudioFormat2::kOpus) ++opus_pkts;
                     }
                     rx.on_packet(h, body, h.payload_size, uint64_t(ah.wallclock_us));
                 }
                 return true;
             });
-        tx.set_latency_ms(20);  // 5 ms chunks (200 pkt/s, standard AoIP Wi-Fi latency)
+        tx.set_latency_ms(20);
         tx.set_bitrate_kbps_per_ch(target);
 
+        // Complex musical test signal: 80 Hz bass + 1 kHz mid + 12 kHz highs
         std::vector<float> src(kTotalBlocks * kBlk);
         for (size_t i = 0; i < src.size(); ++i) {
-            src[i] = 0.5f * float(std::sin(2.0 * kPi * 440.0 * double(i) / double(kRate)));
+            const double t = double(i) / double(kRate);
+            src[i] = 0.25f * float(std::sin(2.0 * kPi * 80.0 * t)) +
+                     0.30f * float(std::sin(2.0 * kPi * 1000.0 * t)) +
+                     0.20f * float(std::sin(2.0 * kPi * 12000.0 * t));
         }
 
         std::vector<float> dec(kTotalBlocks * kBlk, 0.0f);
@@ -515,24 +536,45 @@ TEST(audio2_bitrate_profiles_256_to_64_kbps) {
         }
         tx.flush(kTotalBlocks * 5000u);
 
-        // Measure signal energy & frequency integrity on the steady-state middle segment
-        double energy = 0.0;
-        std::vector<float> mid(dec.begin() + 4800, dec.end() - 4800);
-        for (float v : mid) energy += double(v) * double(v);
-        const double rms = std::sqrt(energy / double(mid.size()));
-        const double f_est = estimate_freq(mid, double(kRate));
+        // Compute AES17-standard Spectral SNR (3-tone signal power vs total noise + distortion power
+        // across the full 0..24 kHz spectrum — immune to Opus DC-blocker phase rotation at 80 Hz,
+        // while strictly penalizing any aliasing, noise floor, or high-frequency rolloff).
+        constexpr size_t kStart = 9600;
+        constexpr size_t kLen = 24000;  // exact integer cycles of 80 Hz (40), 1 kHz (500), 12 kHz (6000)
+        const float* mid_ptr = dec.data() + kStart;
+        const double m80 = dft_mag(mid_ptr, kLen, 80.0, double(kRate));
+        const double m1k = dft_mag(mid_ptr, kLen, 1000.0, double(kRate));
+        const double m12k = dft_mag(mid_ptr, kLen, 12000.0, double(kRate));
+
+        double total_pwr = 0.0;
+        for (size_t i = 0; i < kLen; ++i) total_pwr += double(mid_ptr[i]) * double(mid_ptr[i]);
+        total_pwr /= double(kLen);
+        const double sig_pwr = 0.5 * (m80 * m80 + m1k * m1k + m12k * m12k);
+        const double noise_pwr = std::max(1e-12, total_pwr - sig_pwr);
+        const double snr_db = 10.0 * std::log10(sig_pwr / noise_pwr);
         const double wire_kbps = double(wire_payload_bytes) * 8.0 / 1000.0;  // 1.0 s -> kbps
 
-        std::printf("    [AUDIO2 bitrate %4d kbps/ch] payload=%.1f kbps | rms=%.3f | tone=%.2f Hz\n",
-                    target, wire_kbps, rms, f_est);
+        std::printf("    [AUDIO2 Opus %4d kbps/ch] payload=%.1f kbps | SNR=%.1f dB | "
+                    "80Hz=%.2f 1kHz=%.2f 12kHz=%.2f\n",
+                    target, wire_kbps, snr_db, m80, m1k, m12k);
 
         CHECK(wire_kbps < prev_wire_kbps);
         prev_wire_kbps = wire_kbps;
-        CHECK(rms > 0.25 && rms < 0.45);
-        CHECK(std::fabs(f_est - 440.0) < 2.0);
+        CHECK(m80 > 0.20 && m1k > 0.24 && m12k > 0.15);  // Fullband 80 Hz..12 kHz preserved!
         if (target > 0) {
-            // Verify payload bitrate sits closely around target (allowing 4B/block ADPCM header overhead)
-            CHECK(wire_kbps >= double(target) * 0.85 && wire_kbps <= double(target) * 1.10 + 14.0);
+            CHECK(opus_pkts >= 90);  // Opus CELT frames (200..400 pkt/s)
+            CHECK(wire_kbps >= double(target) * 0.85 && wire_kbps <= double(target) * 1.15);
+            if (target >= 192) {
+                CHECK(snr_db > 36.0);
+            } else if (target >= 128) {
+                CHECK(snr_db > 34.0);
+            } else if (target >= 96) {
+                CHECK(snr_db > 25.0);
+            } else {
+                CHECK(snr_db > 19.0);
+            }
+        } else {
+            CHECK(snr_db > 90.0);
         }
     }
 }

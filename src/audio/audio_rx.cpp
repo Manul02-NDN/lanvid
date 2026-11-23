@@ -4,6 +4,10 @@
 #include <cmath>
 #include <cstring>
 
+#ifdef LV_HAVE_OPUS
+#include <opus.h>
+#endif
+
 namespace lv {
 
 namespace {
@@ -131,6 +135,9 @@ void decode_to_float(AudioFormat2 fmt, const uint8_t* in, uint32_t n, float* out
             upsample_linear(dec.data(), m, n, 3u, out);
             break;
         }
+        case AudioFormat2::kOpus:
+            std::fill(out, out + n, 0.0f);  // handled by per-stream OpusDecoder in write_to_matrix
+            break;
     }
 }
 }  // namespace
@@ -177,6 +184,28 @@ struct AudioRxEngine::Stream {
     std::atomic<uint32_t> jitter_us{0};
     std::atomic<bool> seen_pub{false};
 
+#ifdef LV_HAVE_OPUS
+    OpusDecoder* opus_dec = nullptr;
+    ~Stream() {
+        if (opus_dec) {
+            opus_decoder_destroy(opus_dec);
+            opus_dec = nullptr;
+        }
+    }
+    bool ensure_opus_decoder(uint32_t sample_rate) {
+        if (sample_rate != 48000) return false;
+        if (!opus_dec) {
+            int err = OPUS_OK;
+            opus_dec = opus_decoder_create(48000, 1, &err);
+            if (!opus_dec || err != OPUS_OK) {
+                opus_dec = nullptr;
+                return false;
+            }
+        }
+        return true;
+    }
+#endif
+
     void reset_transport() {
         seen = false;
         highest = first_unresolved = 0;
@@ -191,6 +220,9 @@ struct AudioRxEngine::Stream {
         prev_transit = 0;
         jitter = 0.0;
         jitter_us.store(0, std::memory_order_relaxed);
+#ifdef LV_HAVE_OPUS
+        if (opus_dec) opus_decoder_ctl(opus_dec, OPUS_RESET_STATE);
+#endif
     }
 };
 
@@ -228,8 +260,27 @@ uint32_t AudioRxEngine::active_channel_count() const {
     return n;
 }
 
-void AudioRxEngine::write_to_matrix(const AudioHeader2& ah, const uint8_t* samples) {
+void AudioRxEngine::write_to_matrix(Stream& s, const AudioHeader2& ah, const uint8_t* samples,
+                                    size_t payload_bytes) {
     if (scratch_.size() < ah.num_samples) scratch_.resize(ah.num_samples);
+#ifdef LV_HAVE_OPUS
+    if (ah.sample_format == AudioFormat2::kOpus) {
+        if (s.ensure_opus_decoder(ah.sample_rate)) {
+            const int decoded = opus_decode_float(s.opus_dec, samples, int(payload_bytes),
+                                                  scratch_.data(), int(ah.num_samples), 0);
+            if (decoded > 0) {
+                matrix_.write(ah.channel_index, ah.media_timestamp_samples, scratch_.data(), uint32_t(decoded));
+                return;
+            }
+        }
+        std::fill(scratch_.begin(), scratch_.begin() + ah.num_samples, 0.0f);
+        matrix_.write(ah.channel_index, ah.media_timestamp_samples, scratch_.data(), ah.num_samples);
+        return;
+    }
+#else
+    (void)s;
+    (void)payload_bytes;
+#endif
     decode_to_float(ah.sample_format, samples, ah.num_samples, scratch_.data());
     matrix_.write(ah.channel_index, ah.media_timestamp_samples, scratch_.data(), ah.num_samples);
 }
@@ -280,7 +331,9 @@ bool AudioRxEngine::on_packet(const PacketHeader& h, const uint8_t* payload, siz
         p.d = fi.interleave;
         p.ts_first = ah.media_timestamp_samples;
         p.hdr = ah;
-        const size_t body = audio2_payload_bytes(ah.sample_format, ah.num_samples);
+        const size_t body = (ah.sample_format == AudioFormat2::kOpus)
+                                ? (len - kAudioHeader2Size - kAudioFecInfoSize)
+                                : audio2_payload_bytes(ah.sample_format, ah.num_samples);
         p.xor_bytes.assign(payload + kAudioHeader2Size + kAudioFecInfoSize,
                            payload + kAudioHeader2Size + kAudioFecInfoSize + body);
         s.parities.push_back(std::move(p));
@@ -290,12 +343,14 @@ bool AudioRxEngine::on_packet(const PacketHeader& h, const uint8_t* payload, siz
     }
 
     const uint8_t* samples = payload + kAudioHeader2Size;
+    const size_t payload_bytes = len - kAudioHeader2Size;
     const bool retransmit = (ah.flags & kAudioFlagRetransmit) != 0;
-    return accept_data(s, ah, samples, seq, now, false, retransmit);
+    return accept_data(s, ah, samples, payload_bytes, seq, now, false, retransmit);
 }
 
 bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t* samples,
-                                uint32_t seq, uint64_t now, bool via_fec, bool via_nack) {
+                                size_t payload_bytes, uint32_t seq, uint64_t now, bool via_fec,
+                                bool via_nack) {
     auto bit_get = [&](uint32_t q) { return (s.recv_bits[(q & (kWindow - 1)) >> 6] >> (q & 63)) & 1ull; };
     auto bit_set = [&](uint32_t q) { s.recv_bits[(q & (kWindow - 1)) >> 6] |= 1ull << (q & 63); };
     auto bit_clr = [&](uint32_t q) { s.recv_bits[(q & (kWindow - 1)) >> 6] &= ~(1ull << (q & 63)); };
@@ -347,7 +402,7 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
 
     if (is_expired(s, seq, now)) s.late.fetch_add(1, std::memory_order_relaxed);
 
-    write_to_matrix(ah, samples);
+    write_to_matrix(s, ah, samples, payload_bytes);
     s.rx.fetch_add(1, std::memory_order_relaxed);
     if (via_fec) s.fec_rec.fetch_add(1, std::memory_order_relaxed);
     if (via_nack && was_hole) s.nack_rec.fetch_add(1, std::memory_order_relaxed);
@@ -356,7 +411,10 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
     auto& st = s.store[seq % kStoreSlots];
     st.seq = seq;
     st.valid = true;
-    st.bytes.assign(samples, samples + audio2_payload_bytes(ah.sample_format, ah.num_samples));
+    const size_t store_len = (ah.sample_format == AudioFormat2::kOpus)
+                                 ? payload_bytes
+                                 : audio2_payload_bytes(ah.sample_format, ah.num_samples);
+    st.bytes.assign(samples, samples + store_len);
 
     if (!via_fec) {
         // RFC 3550 jitter on (arrival - sender wallclock), modular 32-bit arithmetic.
@@ -425,7 +483,7 @@ void AudioRxEngine::try_fec(Stream& s, Parity& p, uint64_t now) {
     ah.flags = 0;
     ah.media_timestamp_samples = p.ts_first + uint64_t(missing_j) * p.d * p.hdr.num_samples;
     p.done = true;
-    accept_data(s, ah, rec.data(), missing_seq, now, true, false);
+    accept_data(s, ah, rec.data(), rec.size(), missing_seq, now, true, false);
 }
 
 void AudioRxEngine::service(uint64_t now) {
@@ -446,6 +504,20 @@ void AudioRxEngine::service(uint64_t now) {
             if (is_expired(s, q, now)) {
                 m.state = 2;
                 s.lost.fetch_add(1, std::memory_order_relaxed);
+#ifdef LV_HAVE_OPUS
+                // Opus Packet Loss Concealment (PLC): smoothly conceal lost Wi-Fi packets instead of clicks.
+                if (s.fmt == AudioFormat2::kOpus && s.opus_dec && s.chunk > 0) {
+                    if (scratch_.size() < s.chunk) scratch_.resize(s.chunk);
+                    const int plc_n = opus_decode_float(s.opus_dec, nullptr, 0, scratch_.data(), int(s.chunk), 0);
+                    if (plc_n > 0) {
+                        const int64_t lost_ts =
+                            int64_t(s.ref_ts) + int64_t(int32_t(q - s.ref_seq)) * int64_t(s.chunk);
+                        if (lost_ts >= 0) {
+                            matrix_.write(s.channel, uint64_t(lost_ts), scratch_.data(), uint32_t(plc_n));
+                        }
+                    }
+                }
+#endif
                 continue;
             }
             if (m.attempts >= attempts_max || now < m.next_try_us) continue;

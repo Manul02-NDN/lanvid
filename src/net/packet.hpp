@@ -144,6 +144,7 @@ enum class AudioFormat2 : uint8_t {
     kAdpcm128 = 6,     // 2:1 decimated 5-bit IMA-ADPCM @ 24 kHz (128 kbps/ch)
     kAdpcm96 = 7,      // 2:1 decimated 4-bit IMA-ADPCM @ 24 kHz (96 kbps/ch)
     kAdpcm64 = 8,      // 3:1 decimated 4-bit IMA-ADPCM @ 16 kHz (64 kbps/ch)
+    kOpus = 9,         // libopus CELT 2.5 ms (120 samples @ 48 kHz, fullband 20 Hz - 20 kHz)
 };
 
 enum AudioFlags2 : uint8_t {
@@ -181,6 +182,8 @@ inline size_t audio2_payload_bytes(AudioFormat2 f, uint32_t num_samples) {
             const uint32_t m = (num_samples + 2u) / 3u;
             return 4u + (m > 1 ? (size_t(m - 1) + 1u) / 2u : 0u);
         }
+        case AudioFormat2::kOpus:
+            return 0;  // variable-length Opus packet (determined by datagram payload_size)
     }
     return size_t(num_samples) * 4;
 }

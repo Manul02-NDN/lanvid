@@ -63,12 +63,12 @@ public:
 private:
     struct Stream;
     struct Parity;
-    bool accept_data(Stream& s, const AudioHeader2& ah, const uint8_t* samples, uint32_t seq,
-                     uint64_t now, bool via_fec, bool via_nack);
+    bool accept_data(Stream& s, const AudioHeader2& ah, const uint8_t* samples, size_t payload_bytes,
+                     uint32_t seq, uint64_t now, bool via_fec, bool via_nack);
     void try_fec(Stream& s, Parity& p, uint64_t now);
     void try_fec_for(Stream& s, uint32_t seq, uint64_t now);
     bool is_expired(const Stream& s, uint32_t seq, uint64_t now) const;
-    void write_to_matrix(const AudioHeader2& ah, const uint8_t* samples);
+    void write_to_matrix(Stream& s, const AudioHeader2& ah, const uint8_t* samples, size_t payload_bytes);
 
     AudioSyncMatrix& matrix_;
     MasterClock& clock_;

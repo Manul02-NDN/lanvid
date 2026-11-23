@@ -4,6 +4,10 @@
 #include <cmath>
 #include <cstring>
 
+#ifdef LV_HAVE_OPUS
+#include <opus.h>
+#endif
+
 #include "common/clock.hpp"
 
 namespace lv {
@@ -105,6 +109,20 @@ void decimate_box(const float* in, uint32_t n, uint32_t factor, std::vector<floa
         float sum = 0.0f;
         for (uint32_t j = s0; j < s1; ++j) sum += in[j];
         dec[k] = sum / float(std::max<uint32_t>(1u, s1 - s0));
+    }
+}
+
+constexpr uint32_t kOpusFrameSamples = 120;  // 2.5 ms @ 48 kHz (CELT Restricted Low-Delay)
+
+int opus_bitrate_bps_for_profile(AudioCodecProfile prof) {
+    switch (prof) {
+        case AudioCodecProfile::kBitrate256: return 256000;
+        case AudioCodecProfile::kOpusAdpcm:
+        case AudioCodecProfile::kBitrate192: return 192000;
+        case AudioCodecProfile::kBitrate128: return 128000;
+        case AudioCodecProfile::kBitrate96:  return 96000;
+        case AudioCodecProfile::kBitrate64:  return 64000;
+        default: return 0;
     }
 }
 
@@ -211,6 +229,42 @@ struct AudioTxEngine::Stream {
     std::vector<uint64_t> member_ts;           // ts of the first member of each column
     std::vector<uint32_t> member_seq;
     uint16_t channel = 0;
+
+#ifdef LV_HAVE_OPUS
+    OpusEncoder* opus_enc = nullptr;
+    int opus_bitrate_bps = 0;
+
+    ~Stream() {
+        if (opus_enc) {
+            opus_encoder_destroy(opus_enc);
+            opus_enc = nullptr;
+        }
+    }
+
+    bool ensure_opus_encoder(uint32_t sample_rate, int target_bps) {
+        if (sample_rate != 48000) return false;
+        if (!opus_enc) {
+            int err = OPUS_OK;
+            opus_enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &err);
+            if (!opus_enc || err != OPUS_OK) {
+                opus_enc = nullptr;
+                return false;
+            }
+            opus_encoder_ctl(opus_enc, OPUS_SET_COMPLEXITY(5));
+            opus_encoder_ctl(opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+            opus_encoder_ctl(opus_enc, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
+            opus_encoder_ctl(opus_enc, OPUS_SET_LSB_DEPTH(24));
+            opus_encoder_ctl(opus_enc, OPUS_SET_VBR(1));
+            opus_encoder_ctl(opus_enc, OPUS_SET_VBR_CONSTRAINT(1));  // constrained VBR: tight Wi-Fi rate + optimal SNR
+            opus_bitrate_bps = 0;
+        }
+        if (opus_bitrate_bps != target_bps) {
+            opus_encoder_ctl(opus_enc, OPUS_SET_BITRATE(target_bps));
+            opus_bitrate_bps = target_bps;
+        }
+        return true;
+    }
+#endif
 };
 
 AudioTxEngine::AudioTxEngine(uint32_t sample_rate, size_t mtu, SendFn send)
@@ -279,9 +333,29 @@ void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, ui
     if (fmt == AudioFormat2::kFloat32) {
         const AudioCodecProfile cp = codec_profile();
         if (cp != AudioCodecProfile::kPcm32F) {
-            encode_float32_wire(cp, reinterpret_cast<const float*>(samples), n, wire_fmt, encoded);
-            wire_bytes = encoded.data();
-            body = encoded.size();
+            bool opus_encoded = false;
+#ifdef LV_HAVE_OPUS
+            const int target_bps = opus_bitrate_bps_for_profile(cp);
+            if (target_bps > 0 && rate_ == 48000 &&
+                (n == 120 || n == 240 || n == 480 || n == 960) &&
+                s.ensure_opus_encoder(rate_, target_bps)) {
+                encoded.resize(512);
+                const int nb = opus_encode_float(s.opus_enc, reinterpret_cast<const float*>(samples),
+                                                 int(n), encoded.data(), int(encoded.size()));
+                if (nb > 0) {
+                    encoded.resize(size_t(nb));
+                    wire_fmt = AudioFormat2::kOpus;
+                    wire_bytes = encoded.data();
+                    body = encoded.size();
+                    opus_encoded = true;
+                }
+            }
+#endif
+            if (!opus_encoded) {
+                encode_float32_wire(cp, reinterpret_cast<const float*>(samples), n, wire_fmt, encoded);
+                wire_bytes = encoded.data();
+                body = encoded.size();
+            }
         }
     }
 
@@ -368,6 +442,20 @@ void AudioTxEngine::emit_parity(Stream& s, uint16_t ch, uint32_t col, AudioForma
 
 void AudioTxEngine::flush_stream(Stream& s, uint16_t ch, uint32_t wallclock_us) {
     if (s.stage_samples == 0) return;
+#ifdef LV_HAVE_OPUS
+    if (s.fmt == AudioFormat2::kFloat32 && rate_ == 48000 &&
+        opus_bitrate_bps_for_profile(codec_profile()) > 0 &&
+        s.stage_samples != 120 && s.stage_samples != 240 &&
+        s.stage_samples != 480 && s.stage_samples != 960) {
+        // Zero-pad tail to the nearest valid Opus CELT frame size (120 / 240 / 480 / 960)
+        uint32_t pad_to = 120;
+        if (s.stage_samples > 480) pad_to = 960;
+        else if (s.stage_samples > 240) pad_to = 480;
+        else if (s.stage_samples > 120) pad_to = 240;
+        s.stage.resize(size_t(pad_to) * 4, 0);
+        s.stage_samples = pad_to;
+    }
+#endif
     emit_data(s, ch, s.stage.data(), s.stage_samples, s.fmt, s.stage_ts, wallclock_us, s.prof);
     s.stage_samples = 0;
     s.stage.clear();
@@ -398,18 +486,31 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
     update_loss_estimate();
 
     const size_t bps = audio2_bytes_per_sample(fmt);
+    uint32_t target_chunk = s.prof.chunk_samples;
+#ifdef LV_HAVE_OPUS
+    if (fmt == AudioFormat2::kFloat32 && rate_ == 48000) {
+        const int target_bps = opus_bitrate_bps_for_profile(codec_profile());
+        if (target_bps > 0) {
+            // Opus CELT-only low-delay framing (<= 5 ms guarantees pure CELT Fullband 20 Hz-20 kHz, never SILK):
+            //   - 2.5 ms (120 samples) when latency budget <= 5 ms (ultra-low latency)
+            //   - 5.0 ms (240 samples) at standard 10..2000 ms latency (fullband even at 64 kbps, half Wi-Fi pkt rate)
+            target_chunk = (lat <= 5) ? 120u : 240u;
+        }
+    }
+#endif
+    if (s.stage_samples > target_chunk) flush_stream(s, channel, wallclock_us);
     const uint8_t* src = static_cast<const uint8_t*>(samples);
     uint64_t ts = media_ts;
     uint32_t left = num_samples;
     while (left) {
         if (s.stage_samples == 0) s.stage_ts = ts;
-        const uint32_t take = std::min(left, s.prof.chunk_samples - s.stage_samples);
+        const uint32_t take = std::min(left, target_chunk - s.stage_samples);
         s.stage.insert(s.stage.end(), src, src + size_t(take) * bps);
         s.stage_samples += take;
         src += size_t(take) * bps;
         ts += take;
         left -= take;
-        if (s.stage_samples >= s.prof.chunk_samples) flush_stream(s, channel, wallclock_us);
+        if (s.stage_samples >= target_chunk) flush_stream(s, channel, wallclock_us);
     }
     s.next_ts = ts;
     return 0;
