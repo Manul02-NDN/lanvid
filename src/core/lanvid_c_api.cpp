@@ -1120,22 +1120,26 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     if (!handle->sender) return LV_OK;
 
     const lv::SenderStats st = handle->sender->stats();
+    const lv::AudioTxStats a2 = handle->sender->audio2_stats();
+    const uint64_t total_audio_bytes = st.audio_bytes_sent + a2.bytes_sent;
+    const uint64_t total_audio_pkts = st.audio_packets_sent + a2.packets_sent;
+    const uint64_t total_tx_bytes = st.bytes_sent + total_audio_bytes;
     const uint64_t now = lv::now_us();
 
     std::lock_guard<std::mutex> slk(handle->stats_mu);
     const double dt_s = double(now - handle->win_start_us) / 1e6;
     if (dt_s >= 0.5) {
         const uint64_t df = st.frames_sent - handle->win_prev_frames;
-        const uint64_t db = st.bytes_sent - handle->win_prev_bytes;
-        const uint64_t dab = st.audio_bytes_sent - handle->win_prev_ab;
+        const uint64_t db = total_tx_bytes - handle->win_prev_bytes;
+        const uint64_t dab = total_audio_bytes - handle->win_prev_ab;
         handle->cached_fps = double(df) / dt_s;
         handle->cached_mbps = (double(db) * 8.0 / 1e6) / dt_s;
         handle->cached_audio_kbps = (double(dab) * 8.0 / 1e3) / dt_s;
         handle->cached_enc_ms = handle->enc_ms_cnt ? (handle->enc_ms_sum / double(handle->enc_ms_cnt)) : 0.0;
         handle->win_start_us = now;
         handle->win_prev_frames = st.frames_sent;
-        handle->win_prev_bytes = st.bytes_sent;
-        handle->win_prev_ab = st.audio_bytes_sent;
+        handle->win_prev_bytes = total_tx_bytes;
+        handle->win_prev_ab = total_audio_bytes;
         handle->enc_ms_sum = 0.0;
         handle->enc_ms_cnt = 0;
     }
@@ -1148,8 +1152,8 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     out->encode_ms = handle->cached_enc_ms;
     out->packet_loss_pct = double(st.last_rx_loss_permille) / 10.0;
     out->frames_total = st.frames_sent;
-    out->packets_total = st.packets_sent;
-    out->audio_packets = st.audio_packets_sent;
+    out->packets_total = st.packets_sent + a2.packets_sent;
+    out->audio_packets = total_audio_pkts;
     out->audio_kbps = handle->cached_audio_kbps;
     out->active_codec = int32_t(st.active_codec);
     out->codec_is_hardware = handle->sender->encoder_is_hardware() ? 1 : 0;
@@ -1273,6 +1277,11 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
 
     const auto ast = handle->receiver->assembler_stats();
     const auto aud = handle->receiver->audio_stats();
+    const uint64_t a2_bytes = handle->receiver->audio2_bytes_rx();
+    const uint64_t a2_pkts = handle->receiver->audio2_packets_rx();
+    const uint64_t total_audio_bytes = aud.bytes_rx + a2_bytes;
+    const uint64_t total_audio_pkts = aud.packets_rx + a2_pkts;
+    const uint64_t total_rx_bytes = ast.bytes_total + total_audio_bytes;
     const uint64_t rx_pkts = handle->receiver->seq_tracker().received();
     const uint64_t lost_pkts = handle->receiver->seq_tracker().lost(0);
     const uint64_t now = lv::now_us();
@@ -1280,8 +1289,8 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
     std::lock_guard<std::mutex> slk(handle->stats_mu);
     const double dt_s = double(now - handle->win_start_us) / 1e6;
     if (dt_s >= 0.5) {
-        const uint64_t db = ast.bytes_total - handle->win_prev_bytes;
-        const uint64_t dab = aud.bytes_rx - handle->win_prev_ab;
+        const uint64_t db = total_rx_bytes - handle->win_prev_bytes;
+        const uint64_t dab = total_audio_bytes - handle->win_prev_ab;
         const uint64_t drx = rx_pkts - handle->win_prev_rx;
         const uint64_t dlost = lost_pkts - handle->win_prev_lost;
         handle->cached_fps = double(handle->win_frames) / dt_s;
@@ -1295,8 +1304,8 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
         }
         handle->win_start_us = now;
         handle->win_frames = 0;
-        handle->win_prev_bytes = ast.bytes_total;
-        handle->win_prev_ab = aud.bytes_rx;
+        handle->win_prev_bytes = total_rx_bytes;
+        handle->win_prev_ab = total_audio_bytes;
         handle->win_prev_rx = rx_pkts;
         handle->win_prev_lost = lost_pkts;
     }
@@ -1311,11 +1320,11 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
     out->packet_loss_pct = handle->cached_loss;
     out->frames_total = ast.frames_complete;
     out->frames_concealed = ast.frames_concealed;
-    out->packets_total = ast.datagrams_total;
+    out->packets_total = ast.datagrams_total + a2_pkts;
     out->fec_recovered = ast.fec_recovered_packets;
     out->crc_errors = ast.crc_errors;
     out->late_packets = ast.late_packets;
-    out->audio_packets = aud.packets_rx;
+    out->audio_packets = total_audio_pkts;
     out->audio_kbps = handle->cached_akbps;
     out->audio_buffer_ms = aud.buffered_ms;
     out->active_codec = int32_t(handle->receiver->active_codec());

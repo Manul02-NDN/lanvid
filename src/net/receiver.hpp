@@ -107,6 +107,8 @@ public:
     AudioSyncMatrix& audio_matrix() { return matrix_; }
     const MasterClock& master_clock() const { return mclock_; }
     AudioChannelRxStats audio_channel_rx_stats(uint16_t ch) const { return arx_.channel_stats(ch); }
+    uint64_t audio2_bytes_rx() const { return audio2_bytes_rx_.load(std::memory_order_relaxed); }
+    uint64_t audio2_packets_rx() const { return audio2_packets_rx_.load(std::memory_order_relaxed); }
 
     void set_conceal_mode(ConcealMode m) { assembler_.set_conceal_mode(m); }
     ConcealMode conceal_mode() const { return assembler_.conceal_mode(); }
@@ -157,6 +159,8 @@ private:
     uint64_t feedbacks_sent_ = 0;
     uint64_t plis_sent_ = 0;
     uint64_t video_ignored_ = 0;
+    std::atomic<uint64_t> audio2_bytes_rx_{0};
+    std::atomic<uint64_t> audio2_packets_rx_{0};
 
     // MIDI2 + session epoch
     MidiRxEngine midi_rx_;

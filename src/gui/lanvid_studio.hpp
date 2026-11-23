@@ -198,6 +198,12 @@ private:
 
     // Multi-Device Audio Matrix (64x64 across up to 8 slots)
     MultiDeviceAudioMatrix audio_matrix_;
+    std::atomic<bool> matrix_has_net_tx_routes_{false};
+    double dpx_tx_mbps_ = 0.0;
+    double dpx_rx_mbps_ = 0.0;
+    uint64_t dpx_prev_tx_pkts_ = 0;
+    uint64_t dpx_prev_rx_pkts_ = 0;
+    uint64_t dpx_rate_us_ = 0;
     int matrix_src_slot_ = 1;  // default Network AoIP
     int matrix_dst_slot_ = 0;  // default Virtual Bus (DAW)
     int matrix_src_page_ = 0;  // 0..3 (blocks of 16 channels)

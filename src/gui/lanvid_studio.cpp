@@ -854,17 +854,29 @@ void LanVidStudioApp::enforce_audio_ownership(uint64_t now) {
     if (now - ownership_us_ < 100000ull) return;  // 10 Hz
     ownership_us_ = now;
     bool net_rx = false, net_tx = false, vbus = false;
+    int net_slot_id = -1;
     if (audio_matrix_.is_running()) {
         for (const auto& sl : audio_matrix_.slots()) {
             if (!sl.active) continue;
             if (sl.type == MatrixSlotType::kNetworkAoip) {
+                net_slot_id = sl.id;
                 if (sl.role != MatrixSlotRole::kOutput) net_rx = true;  // matrix pulls the receiver
-                if (sl.role != MatrixSlotRole::kInput) net_tx = true;   // matrix feeds the sender
             } else if (sl.type == MatrixSlotType::kVirtualBus) {
                 vbus = true;  // matrix owns both LanVidAudioBus_v1 rings
             }
         }
+        // Only claim TX producer ownership when at least one unmuted crosspoint actually feeds Network AoIP!
+        // Otherwise let the direct Sender source (DAW bridge / Test Tone / Loopback) feed UdpSender cleanly.
+        if (net_slot_id >= 0) {
+            for (const auto& cp : audio_matrix_.crosspoints()) {
+                if (!cp.mute && cp.dst_slot == net_slot_id) {
+                    net_tx = true;
+                    break;
+                }
+            }
+        }
     }
+    matrix_has_net_tx_routes_.store(net_tx, std::memory_order_relaxed);
     const bool changed = net_rx != matrix_net_rx_ || net_tx != matrix_net_tx_ || vbus != matrix_vbus_;
     matrix_net_rx_ = net_rx;
     matrix_net_tx_ = net_tx;
@@ -873,8 +885,8 @@ void LanVidStudioApp::enforce_audio_ownership(uint64_t now) {
     // all use LV_MEDIA_TS_AUTO - two of them would interleave blocks and run the media clock 2x.
     if ((net_tx || vbus) && vdev_tx_.running()) stop_vdev_tx();
     if (net_tx && tone_thread_.joinable()) stop_tone();
-    if (!net_tx && !vbus && sender_running_ && changed) {  // matrix released the stream: restore sources
-        if (cfg_.aoip_source == 1 && !vdev_tx_.running()) start_vdev_tx();
+    if (!net_tx && sender_running_ && changed) {  // matrix released TX: restore direct Sender source
+        if (cfg_.aoip_source == 1 && !vbus && !vdev_tx_.running()) start_vdev_tx();
         if (cfg_.aoip_source == 0 && cfg_.aoip_tone && !tone_thread_.joinable()) start_tone();
     }
     // Receiver playout matrix: one consumer.
@@ -1207,7 +1219,7 @@ void LanVidStudioApp::init_audio_matrix() {
 
     audio_matrix_.set_network_io(
         [this](const float* const* planes, uint32_t ch, uint32_t frames) {
-            if (sender_ && sender_running_) {
+            if (sender_ && sender_running_ && matrix_has_net_tx_routes_.load(std::memory_order_relaxed)) {
                 lv_sender_push_audio_multichannel(sender_, planes, uint16_t(ch), frames,
                                                   LV_AUDIO_FORMAT_F32, LV_AUDIO_LAYOUT_PLANAR, LV_MEDIA_TS_AUTO);
             }
@@ -1602,8 +1614,7 @@ void LanVidStudioApp::draw_studio_config_panel() {
 
     // ---- LIVE TELEMETRY (3 Donut Ring Gauges on White Cards) ----
     ImGui::TextColored(kColAccentPurp, "LIVE TELEMETRY");
-    const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps +
-                              (tx_stats_.audio_kbps + rx_stats_.audio_kbps) / 1000.0;
+    const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps + dpx_tx_mbps_ + dpx_rx_mbps_;
     const double loss_pct = std::clamp(receiver_running_ ? rx_stats_.loss_pct : tx_stats_.rx_loss_pct, 0.0, 100.0);
     const double health_pct = std::clamp(100.0 - loss_pct, 0.0, 100.0);
     const double est_cap_mbps = std::max(10.0, estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec));
@@ -2407,6 +2418,23 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
                 push_hist(rx_mbps_hist_, kHistLen, float(rx_stats_.rx_mbps));
             }
         }
+        if (duplex_running_ && duplex_) {
+            lv_duplex_get_stats(duplex_, &dpx_stats_);
+            if (dpx_rate_us_ > 0 && now > dpx_rate_us_) {
+                const double dt_s = double(now - dpx_rate_us_) / 1e6;
+                const double bps_per_pkt = estimate_aoip_mbps(1, cfg_.audio_codec) * 1e6 / 200.0;  // ~5 ms pkt
+                const uint64_t dtx = dpx_stats_.tx_packets >= dpx_prev_tx_pkts_ ? (dpx_stats_.tx_packets - dpx_prev_tx_pkts_) : 0;
+                const uint64_t drx = dpx_stats_.rx_packets >= dpx_prev_rx_pkts_ ? (dpx_stats_.rx_packets - dpx_prev_rx_pkts_) : 0;
+                dpx_tx_mbps_ = (double(dtx) * bps_per_pkt) / (dt_s * 1e6);
+                dpx_rx_mbps_ = (double(drx) * bps_per_pkt) / (dt_s * 1e6);
+            }
+            dpx_prev_tx_pkts_ = dpx_stats_.tx_packets;
+            dpx_prev_rx_pkts_ = dpx_stats_.rx_packets;
+            dpx_rate_us_ = now;
+        } else {
+            dpx_tx_mbps_ = dpx_rx_mbps_ = 0.0;
+            dpx_rate_us_ = 0;
+        }
     }
 
     // Auto-save config debounced every 2s when modified
@@ -3164,6 +3192,14 @@ void LanVidStudioApp::draw_connect_tab() {
             else stop_duplex();
         }
     }
+    if (cfg_.connect_role == 0) {
+        ImGui::TextDisabled("Надсилаємо на: %s:%d  (Ваш IP: %s)", ip_buf_, cfg_.dest_port, local_lan_ip_.c_str());
+    } else if (cfg_.connect_role == 1) {
+        ImGui::TextDisabled("Слухаємо UDP порт: %d  (Введіть на відправнику IP: %s)", cfg_.listen_port, local_lan_ip_.c_str());
+    } else {
+        ImGui::TextDisabled("TX -> %s:%d  |  RX <- :%d (Ваш IP: %s)",
+                            dpx_peer_buf_, cfg_.dpx_peer_port, cfg_.dpx_listen_port, local_lan_ip_.c_str());
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -3291,8 +3327,7 @@ void LanVidStudioApp::draw_connect_tab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps +
-                              (tx_stats_.audio_kbps + rx_stats_.audio_kbps) / 1000.0;
+    const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps + dpx_tx_mbps_ + dpx_rx_mbps_;
     const double loss_pct = std::clamp(receiver_running_ ? rx_stats_.loss_pct : tx_stats_.rx_loss_pct, 0.0, 100.0);
     const double health_pct = std::clamp(100.0 - loss_pct, 0.0, 100.0);
     const double est_mbps = estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec);

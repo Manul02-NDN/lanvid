@@ -20,6 +20,7 @@
 #include "audio/multi_device_matrix.hpp"
 #include "audio/planar_ring.hpp"
 #include "common/clock.hpp"
+#include "lanvid_c_api.h"
 #include "lanvid/lanvid_sdk.h"
 
 namespace {
@@ -338,4 +339,123 @@ TEST(audio_device_rate_adapter_44k1_render_capture) {
     CHECK(std::fabs(f_c - kToneHz) < 0.3);
     CHECK(thd_c < -45.0);
     CHECK(cring.reprimes() == 0);
+}
+
+TEST(udp_sender_receiver_audio_only_bitrate_and_routing) {
+    // Verifies real Audio-Only UDP flow:
+    //   TX MultiDeviceAudioMatrix -> Network Audio Tx -> lv_sender_push_audio_multichannel -> UDP ->
+    //   lv_receiver_pop_audio_multichannel -> RX MultiDeviceAudioMatrix
+    // and checks that BOTH TX and RX bitrate/audio_kbps telemetry counters report > 0 Mbps and audio arrives.
+    constexpr uint16_t kPort = 56920;
+    constexpr int kCh = 8;
+    constexpr uint32_t kBlk = 256;
+
+    LvReceiverHandle* rx = lv_receiver_create();
+    LvSenderHandle* tx = lv_sender_create();
+    CHECK(rx != nullptr && tx != nullptr);
+
+    LvReceiverConfig rcfg{};
+    lv_receiver_config_default(&rcfg);
+    rcfg.bind_port = kPort;
+    rcfg.enable_audio = 1;
+    rcfg.enable_discovery = 0;
+    rcfg.audio_only = 1;
+
+    LV_AudioBusConfig bus{};
+    lv_audio_bus_config_default(&bus);
+    bus.num_channels = kCh;
+    bus.latency_ms = 20;
+    lv_receiver_configure_audio_bus(rx, &bus);
+    CHECK(lv_receiver_start(rx, &rcfg) == 1);
+
+    LvSenderConfig scfg{};
+    lv_sender_config_default(&scfg);
+    std::snprintf(scfg.dest_ip, sizeof(scfg.dest_ip), "127.0.0.1");
+    scfg.dest_port = kPort;
+    scfg.audio_only = 1;
+    scfg.audio_codec = 0;  // PCM32F (~12.3 Mbps for 8ch @ 48 kHz)
+    lv_sender_configure_audio_bus(tx, &bus);
+    CHECK(lv_sender_start(tx, &scfg) == 1);
+
+    // TX Matrix: slot 0 (virtual source) -> crosspoints 1:1 -> slot 1 (Network AoIP TX)
+    lv::MultiDeviceAudioMatrix tx_mx;
+    tx_mx.set_buffer_size(kBlk);
+    tx_mx.add_slot({0, lv::MatrixSlotType::kNetworkAoip, lv::MatrixSlotRole::kInput, "Test Src", "", -1, kCh, kBlk, true});
+    tx_mx.add_slot({1, lv::MatrixSlotType::kNetworkAoip, lv::MatrixSlotRole::kOutput, "Net TX", "", -1, kCh, kBlk, true});
+    for (int c = 0; c < kCh; ++c) tx_mx.set_crosspoint(0, c, 1, c, 0.0f, false, true);
+
+    std::atomic<uint64_t> src_phase{0};
+    std::atomic<uint64_t> tx_pushes{0};
+    tx_mx.set_network_io(
+        [&](const float* const* planes, uint32_t ch, uint32_t frames) {
+            lv_sender_push_audio_multichannel(tx, planes, uint16_t(std::min<uint32_t>(ch, kCh)), frames,
+                                              LV_AUDIO_FORMAT_F32, LV_AUDIO_LAYOUT_PLANAR, LV_MEDIA_TS_AUTO);
+            tx_pushes.fetch_add(1, std::memory_order_relaxed);
+        },
+        [&](float* const* planes, uint32_t ch, uint32_t frames) {
+            const uint64_t p0 = src_phase.fetch_add(frames, std::memory_order_relaxed);
+            for (uint32_t c = 0; c < ch; ++c) {
+                for (uint32_t i = 0; i < frames; ++i) {
+                    planes[c][i] = 0.35f * float(std::sin(2.0 * kPi * 440.0 * double(p0 + i) / 48000.0));
+                }
+            }
+        });
+
+    // RX Matrix: slot 0 (Network AoIP RX) -> crosspoints 1:1 -> slot 1 (Monitor Out)
+    lv::MultiDeviceAudioMatrix rx_mx;
+    rx_mx.set_buffer_size(kBlk);
+    rx_mx.add_slot({0, lv::MatrixSlotType::kNetworkAoip, lv::MatrixSlotRole::kInput, "Net RX", "", -1, kCh, kBlk, true});
+    rx_mx.add_slot({1, lv::MatrixSlotType::kNetworkAoip, lv::MatrixSlotRole::kOutput, "Mon Out", "", -1, kCh, kBlk, true});
+    for (int c = 0; c < kCh; ++c) rx_mx.set_crosspoint(0, c, 1, c, 0.0f, false, true);
+
+    std::atomic<float> rx_peak{0.0f};
+    rx_mx.set_network_io(
+        [&](const float* const* planes, uint32_t ch, uint32_t frames) {
+            float pk = 0.0f;
+            for (uint32_t c = 0; c < std::min<uint32_t>(ch, kCh); ++c)
+                for (uint32_t i = 0; i < frames; ++i) pk = std::max(pk, std::fabs(planes[c][i]));
+            float prev = rx_peak.load(std::memory_order_relaxed);
+            while (pk > prev && !rx_peak.compare_exchange_weak(prev, pk, std::memory_order_relaxed)) {}
+        },
+        [&](float* const* planes, uint32_t ch, uint32_t frames) {
+            static thread_local std::vector<float> tmp;
+            const uint32_t nch = std::min<uint32_t>(ch, kCh);
+            tmp.resize(size_t(nch) * frames);
+            if (lv_receiver_pop_audio_multichannel(rx, tmp.data(), uint16_t(nch), frames, LV_AUDIO_LAYOUT_PLANAR) < 0)
+                std::fill(tmp.begin(), tmp.end(), 0.0f);
+            for (uint32_t c = 0; c < nch; ++c)
+                std::copy(tmp.begin() + size_t(c) * frames, tmp.begin() + size_t(c + 1) * frames, planes[c]);
+        });
+
+    CHECK(tx_mx.start());
+    CHECK(rx_mx.start());
+
+    LvSenderStats tx_st{};
+    LvReceiverStats rx_st{};
+    for (int i = 0; i < 14; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        lv_sender_get_stats(tx, &tx_st);
+        lv_receiver_get_stats(rx, &rx_st);
+    }
+
+    tx_mx.stop();
+    rx_mx.stop();
+    lv_sender_stop(tx);
+    lv_receiver_stop(rx);
+    lv_sender_destroy(tx);
+    lv_receiver_destroy(rx);
+
+    std::printf("    [audio-only bitrate] TX=%.2f Mbps (%.0f kbps, pkts=%llu) | RX=%.2f Mbps (%.0f kbps, pkts=%llu) | rx_peak=%.3f\n",
+                tx_st.tx_mbps, tx_st.audio_kbps, (unsigned long long)tx_st.audio_packets_sent,
+                rx_st.rx_mbps, rx_st.audio_kbps, (unsigned long long)rx_st.audio_packets_rx,
+                double(rx_peak.load()));
+
+    CHECK(tx_pushes.load() > 50);
+    CHECK(tx_st.tx_mbps > 1.0);
+    CHECK(tx_st.audio_kbps > 1000.0);
+    CHECK(tx_st.audio_packets_sent > 50);
+    CHECK(rx_st.rx_mbps > 1.0);
+    CHECK(rx_st.audio_kbps > 1000.0);
+    CHECK(rx_st.audio_packets_rx > 50);
+    CHECK(rx_peak.load() > 0.10f);
 }

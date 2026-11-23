@@ -217,6 +217,8 @@ void UdpReceiver::step_once() {
                     sender_ep_ = batch[i].src;
                     has_sender_ = true;
                 }
+                audio2_bytes_rx_.fetch_add(uint64_t(n), std::memory_order_relaxed);
+                audio2_packets_rx_.fetch_add(1, std::memory_order_relaxed);
                 arx_.on_packet(h, payload, h.payload_size, now);
             } else if (h.type == PacketType::kMidiFrame) {
                 if (h.payload_size < 4) continue;
