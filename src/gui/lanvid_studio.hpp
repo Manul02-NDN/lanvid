@@ -36,10 +36,30 @@ public:
     // Renders one Dear ImGui frame covering the entire OS window.
     void render_frame();
 
-    // Applies modern dark studio visual style.
+    // Applies Soft Pastel Lavender / Blue-Purple (Soft Glass / Claymorphic) visual style.
     static void apply_theme();
 
 private:
+    enum class IconKind {
+        kGear,
+        kPlay,
+        kPause,
+        kStop,
+        kPanic,
+        kWaveform,
+        kHeadphones,
+        kMidiPlug,
+        kSend,
+        kReceive,
+        kDuplex,
+        kMatrix
+    };
+
+    static bool draw_gradient_icon_tile(const char* id, IconKind kind, float size = 34.0f, int badge_count = -1,
+                                        bool clickable = false);
+    static void draw_ring_gauge(const char* title, const char* value_str, const char* sub_str, float fraction,
+                                float card_w, float card_h, bool warn = false, bool health_mode = false);
+
     void refresh_devices();
     void start_lan_scan();
     void start_sender();
