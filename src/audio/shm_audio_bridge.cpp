@@ -60,22 +60,34 @@ bool ShmAudioBus::open(const char* name, bool as_driver) {
         if (fd < 0) return false;
         struct stat st{};
         if (fstat(fd, &st) != 0) { ::close(fd); return false; }
-        if (size_t(st.st_size) < size && ftruncate(fd, off_t(size)) != 0) {
-            // An older, smaller layout (e.g. v1 = 4096 frames). POSIX shm cannot grow on macOS, so
-            // replace it — but only if no driver / host is actively using it.
-            bool busy = false;
-            if (size_t(st.st_size) >= sizeof(ShmBusHeader)) {
-                void* hm = mmap(nullptr, sizeof(ShmBusHeader), PROT_READ, MAP_SHARED, fd, 0);
-                if (hm != MAP_FAILED) {
-                    const auto* oh = static_cast<const ShmBusHeader*>(hm);
+        // Another process may have just created the object and not sized it yet: give it a moment.
+        for (int i = 0; i < 10 && st.st_size == 0; ++i) {
+            usleep(5000);
+            if (fstat(fd, &st) != 0) { ::close(fd); return false; }
+        }
+        // Decide from the existing header, not from whether ftruncate can grow the object (Linux can,
+        // macOS cannot): an older layout or an undersized object must be replaced, but never while a
+        // live peer uses it.
+        bool stale = size_t(st.st_size) < size;
+        bool busy = false;
+        if (size_t(st.st_size) >= sizeof(ShmBusHeader)) {
+            void* hm = mmap(nullptr, sizeof(ShmBusHeader), PROT_READ, MAP_SHARED, fd, 0);
+            if (hm != MAP_FAILED) {
+                const auto* oh = static_cast<const ShmBusHeader*>(hm);
+                if (oh->magic.load(std::memory_order_acquire) == kShmBusMagic &&
+                    (oh->version != kShmBusVersion || oh->channels != kShmBusChannels || oh->frames != kShmBusFrames))
+                    stale = true;
+                if (stale) {
                     const uint64_t now = shm_bus_now_ms();
                     const uint64_t dhb = oh->driver_heartbeat_ms.load(std::memory_order_acquire);
                     const uint64_t hhb = oh->host_heartbeat_ms.load(std::memory_order_acquire);
                     const bool driver_live = !as_driver && oh->driver_running.load() && now - dhb < 2000;
                     busy = driver_live || (hhb && now - hhb < 2000);
-                    munmap(hm, sizeof(ShmBusHeader));
                 }
+                munmap(hm, sizeof(ShmBusHeader));
             }
+        }
+        if (stale) {
             ::close(fd);
             if (busy) {
                 std::fprintf(stderr, "LanVidAudioBus: an older bus layout is in use (reinstall/restart the LanVid "
