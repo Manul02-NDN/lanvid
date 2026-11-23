@@ -70,6 +70,7 @@ private:
     PlatformHost host_{};
     AppConfig cfg_{};
     bool config_dirty_ = false;
+    bool initial_tab_applied_ = false;
     uint64_t last_save_us_ = 0;
 
     // Enumerated hardware & network

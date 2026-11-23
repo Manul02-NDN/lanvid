@@ -40,7 +40,10 @@ const CLSID CLSID_LanVidASIO = {0x8b9f1c2d, 0x4e5a, 0x4b7c, {0x9d, 0x1e, 0x6f, 0
 const wchar_t* kClsidStr = L"{8B9F1C2D-4E5A-4B7C-9D1E-6F2A3B4C5D6E}";
 const wchar_t* kDriverName = L"LanVid Virtual ASIO";
 constexpr long kChannels = long(lv::kShmBusChannels);
-constexpr long kBufferSizes[] = {64, 128, 256, 512, 1024};
+constexpr long kMinBufferSize = 64;
+constexpr long kMaxBufferSize = 1024;
+constexpr long kPreferredBufferSize = 256;
+constexpr long kBufferGranularity = 64;
 
 HINSTANCE g_module = nullptr;
 std::atomic<long> g_objects{0};
@@ -95,9 +98,13 @@ public:
         }
         return ASIOTrue;
     }
-    void getDriverName(char* name) override { std::snprintf(name, 32, "LanVid Virtual ASIO"); }
+    void getDriverName(char* name) override {
+        if (name) std::snprintf(name, 32, "LanVid Virtual ASIO");
+    }
     long getDriverVersion() override { return 0x00020400; }
-    void getErrorMessage(char* s) override { std::snprintf(s, 124, "%s", err_[0] ? err_ : "No error"); }
+    void getErrorMessage(char* s) override {
+        if (s) std::snprintf(s, 124, "%s", err_[0] ? err_ : "No error");
+    }
 
     ASIOError start() override {
         if (!callbacks_ || bufsize_ == 0) return ASE_NotPresent;
@@ -130,10 +137,10 @@ public:
         return ASE_OK;
     }
     ASIOError getBufferSize(long* mn, long* mx, long* pref, long* gran) override {
-        if (mn) *mn = kBufferSizes[0];
-        if (mx) *mx = kBufferSizes[4];
-        if (pref) *pref = 256;
-        if (gran) *gran = -1;  // powers of two
+        if (mn) *mn = kMinBufferSize;
+        if (mx) *mx = kMaxBufferSize;
+        if (pref) *pref = kPreferredBufferSize;
+        if (gran) *gran = kBufferGranularity;  // 64-sample linear granularity (compatible with VB-Audio Matrix)
         return ASE_OK;
     }
     ASIOError canSampleRate(ASIOSampleRate r) override {
@@ -187,7 +194,7 @@ public:
 
     ASIOError createBuffers(ASIOBufferInfo* infos, long n, long size, ASIOCallbacks* cb) override {
         if (!infos || !cb || n <= 0) return ASE_InvalidParameter;
-        if (std::find(std::begin(kBufferSizes), std::end(kBufferSizes), size) == std::end(kBufferSizes))
+        if (size < kMinBufferSize || size > kMaxBufferSize || (size % kBufferGranularity) != 0)
             return ASE_InvalidMode;
         disposeBuffers();
         bufsize_ = size;
@@ -402,21 +409,23 @@ STDAPI DllCanUnloadNow() { return (g_objects.load() == 0 && g_locks.load() == 0)
 STDAPI DllRegisterServer() {
     wchar_t path[MAX_PATH] = {};
     if (!GetModuleFileNameW(g_module, path, MAX_PATH)) return SELFREG_E_CLASS;
-    const std::wstring clsid_key = std::wstring(L"CLSID\\") + kClsidStr;
+    const std::wstring clsid_key = std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr;
     const std::wstring asio_key = std::wstring(L"SOFTWARE\\ASIO\\") + kDriverName;
-    const bool ok = set_reg(HKEY_CLASSES_ROOT, clsid_key, nullptr, kDriverName) &&
-                    set_reg(HKEY_CLASSES_ROOT, clsid_key + L"\\InprocServer32", nullptr, path) &&
-                    set_reg(HKEY_CLASSES_ROOT, clsid_key + L"\\InprocServer32", L"ThreadingModel", L"Apartment") &&
+    const bool ok = set_reg(HKEY_LOCAL_MACHINE, clsid_key, nullptr, kDriverName) &&
+                    set_reg(HKEY_LOCAL_MACHINE, clsid_key + L"\\InprocServer32", nullptr, path) &&
+                    set_reg(HKEY_LOCAL_MACHINE, clsid_key + L"\\InprocServer32", L"ThreadingModel", L"Both") &&
                     set_reg(HKEY_LOCAL_MACHINE, asio_key, L"CLSID", kClsidStr) &&
                     set_reg(HKEY_LOCAL_MACHINE, asio_key, L"Description", kDriverName);
     return ok ? S_OK : SELFREG_E_CLASS;  // needs an elevated process (installer runs as admin)
 }
 
 STDAPI DllUnregisterServer() {
-    const std::wstring clsid_key = std::wstring(L"CLSID\\") + kClsidStr;
-    const std::wstring asio_key = std::wstring(L"SOFTWARE\\ASIO\\") + kDriverName;
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, clsid_key.c_str());
     HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\CLSID", 0, KEY_WRITE | KEY_WOW64_64KEY, &k) ==
+        ERROR_SUCCESS) {
+        RegDeleteTreeW(k, kClsidStr);
+        RegCloseKey(k);
+    }
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\ASIO", 0, KEY_WRITE | KEY_WOW64_64KEY, &k) == ERROR_SUCCESS) {
         RegDeleteTreeW(k, kDriverName);
         RegCloseKey(k);

@@ -109,6 +109,7 @@ typedef struct LvSenderConfig {
     int codec;             /* LV_CodecType: 0=DCT, 1=H264, 2=H265 */
     uint32_t bitrate_kbps; /* target bitrate for H.264/H.265 (default 8000) */
     uint32_t keyframe_interval; /* IDR interval in frames (default 120) */
+    int audio_only;        /* 1=disable video capture/encode/TX (AoIP + MasterClock only) */
 } LvSenderConfig;
 
 typedef struct LvSenderStats {
@@ -144,6 +145,7 @@ typedef struct LvReceiverConfig {
     int enable_discovery;  /* 1=respond to LAN discovery probes on UDP 5099 */
     uint16_t discovery_port; /* 0 -> default 5099 */
     char device_name[128]; /* optional friendly name for LAN discovery */
+    int audio_only;        /* 1=drop video packets before reassembly/decoding (AoIP bridge) */
 } LvReceiverConfig;
 
 typedef struct LvReceiverStats {

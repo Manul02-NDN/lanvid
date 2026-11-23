@@ -1659,6 +1659,19 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
         }
     }
 
+    if (cfg->audio_only) {
+        // Audio-only mode (identical to CLI --audio-only): no video capture/encoder/packets;
+        // run a lightweight control loop to answer MasterClock pings and keep AoIP alive.
+        handle->cap_thread = std::thread([handle]() {
+            while (!handle->stop.load(std::memory_order_relaxed)) {
+                handle->sender->service_control_try();
+                lv::sleep_until_us(lv::now_us() + 2000, [] {});
+            }
+            handle->running.store(false, std::memory_order_release);
+        });
+        return 1;
+    }
+
     if (cfg->source_type == LV_SOURCE_EXTERNAL) return 1;
 
     const LvSenderConfig cap_cfg = *cfg;
@@ -1828,19 +1841,27 @@ int lv_sender_get_stats(LvSenderHandle* handle, LvSenderStats* out) {
 
 int lv_receiver_start(LvReceiverHandle* handle, const LvReceiverConfig* cfg) {
     if (!handle || !cfg) return 0;
-    LV_ReceiverConfig rc{};
-    lv_sdk_receiver_config_default(&rc);
-    std::snprintf(rc.bind_ip, sizeof(rc.bind_ip), "%s", cfg->bind_ip);
-    rc.bind_port = cfg->bind_port;
-    rc.discovery_port = cfg->discovery_port;
-    rc.decode_threads = cfg->decode_threads;
-    rc.conceal_mode = cfg->conceal_mode;
-    rc.frame_timeout_ms = cfg->frame_timeout_ms;
-    rc.audio_target_ms = cfg->audio_target_ms;
-    rc.enable_os_audio = (cfg->enable_audio != 0 && cfg->external_audio_pull == 0) ? 1 : 0;
-    rc.enable_discovery = cfg->enable_discovery;
-    std::snprintf(rc.device_name, sizeof(rc.device_name), "%s", cfg->device_name);
-    return lv_sdk_receiver_start(handle, &rc) == LV_OK ? 1 : 0;
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+
+    lv::ReceiverConfig rcfg;
+    rcfg.bind_ip = cfg->bind_ip[0] ? cfg->bind_ip : "0.0.0.0";
+    rcfg.bind_port = cfg->bind_port;
+    rcfg.decode_threads = cfg->audio_only ? 1u : uint32_t(std::max(0, cfg->decode_threads));
+    rcfg.assembler.conceal =
+        (cfg->conceal_mode == LV_CONCEAL_BLACK) ? lv::ConcealMode::kGray : lv::ConcealMode::kPrev;
+    rcfg.assembler.frame_timeout_us =
+        uint64_t((cfg->frame_timeout_ms > 1.0 ? cfg->frame_timeout_ms : 25.0) * 1000.0);
+    rcfg.assembler.output_order = lv::PixelOrder::kBGRA;
+    rcfg.audio_target_ms = cfg->audio_target_ms > 0.0 ? cfg->audio_target_ms : 12.0;
+    rcfg.audio_sample_rate = handle->bus_cfg.sample_rate == 96000 ? 96000u : 48000u;
+    rcfg.audio_latency_ms = std::clamp<uint32_t>(handle->bus_cfg.latency_ms, 2, 2000);
+    rcfg.audio_only = (cfg->audio_only != 0);
+
+    const bool auto_os_audio = (cfg->enable_audio != 0 && cfg->external_audio_pull == 0);
+    return handle->start_common(rcfg, auto_os_audio, cfg->enable_discovery != 0,
+                                cfg->discovery_port, cfg->device_name) == LV_OK
+               ? 1
+               : 0;
 }
 
 int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out) {

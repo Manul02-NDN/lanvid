@@ -26,6 +26,7 @@ struct AppConfig {
     double audio_chunk_ms = 5.0;
 
     // 64-channel AoIP bus
+    bool audio_only = false;   // true=disable video capture/encode/decode (same as CLI --audio-only)
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
     int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
     bool aoip_tone = false;    // sender: N-channel test tone bus
@@ -51,7 +52,7 @@ struct AppConfig {
     double audio_target_ms = 12.0;
     bool show_hud = true;
     std::string preview_backend = "auto";  // "auto", "d3d11", "gdi"
-    int active_tab = 0;        // 0=Sender, 1=Receiver
+    int active_tab = 0;        // 0=Sender, 1=Receiver, 2=Duplex
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\config.json or ~/.config/lanvid/config.json).

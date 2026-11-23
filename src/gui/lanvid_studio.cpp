@@ -132,6 +132,9 @@ void LanVidStudioApp::shutdown() {
             receiver_tex_ = nullptr;
         }
     }
+    cfg_.dest_ip = ip_buf_;
+    cfg_.file_path = file_buf_;
+    cfg_.dpx_peer_host = dpx_peer_buf_;
     save_app_config(cfg_);
     lv_shutdown();
 }
@@ -222,6 +225,7 @@ void LanVidStudioApp::start_sender() {
     sc.audio_mode = cfg_.audio_mode;
     sc.audio_device_index = cfg_.audio_device_index;
     sc.audio_chunk_ms = cfg_.audio_chunk_ms;
+    sc.audio_only = cfg_.audio_only ? 1 : 0;
 
     LV_AudioBusConfig bus;
     lv_audio_bus_config_default(&bus);
@@ -234,7 +238,8 @@ void LanVidStudioApp::start_sender() {
         sender_running_ = true;
         if (cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
         if (cfg_.aoip_source == 1) start_vdev_tx();
-        toast_msg_ = "Передача запущена -> " + cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
+        toast_msg_ = std::string(cfg_.audio_only ? "Передача [Audio Only] -> " : "Передача запущена -> ") +
+                     cfg_.dest_ip + ":" + std::to_string(cfg_.dest_port);
         toast_until_us_ = now_us() + 3000000ull;
     } else {
         sender_running_ = false;
@@ -300,7 +305,7 @@ void LanVidStudioApp::apply_receiver_output() {
             for (uint32_t c = 0; c < ch; ++c) std::copy(tmp.begin() + c * n, tmp.begin() + (c + 1) * n, p[c]);
         });
     } else {
-        apply_receiver_output();
+        lv_receiver_set_multichannel_audio_callback(receiver_, &noop_bus_callback, nullptr);
     }
 }
 
@@ -480,12 +485,33 @@ void LanVidStudioApp::draw_duplex_tab() {
         }
         ImGui::TextDisabled("Discovered AoIP Nodes: %zu", nodes_.size());
     }
-    ImGui::InputText("IP партнера (вручну)", dpx_peer_buf_, sizeof(dpx_peer_buf_));
-    if (ImGui::InputInt("Порт партнера", &cfg_.dpx_peer_port)) config_dirty_ = true;
-    if (ImGui::InputInt("Мій порт прийому", &cfg_.dpx_listen_port)) config_dirty_ = true;
+    if (ImGui::InputText("IP партнера (вручну)", dpx_peer_buf_, sizeof(dpx_peer_buf_))) config_dirty_ = true;
+    if (ImGui::InputInt("Порт партнера", &cfg_.dpx_peer_port)) {
+        cfg_.dpx_peer_port = std::clamp(cfg_.dpx_peer_port, 1024, 65535);
+        config_dirty_ = true;
+    }
+    if (ImGui::InputInt("Мій порт прийому", &cfg_.dpx_listen_port)) {
+        cfg_.dpx_listen_port = std::clamp(cfg_.dpx_listen_port, 1024, 65535);
+        config_dirty_ = true;
+    }
+    {
+        int bus_idx = 1;
+        for (int i = 0; i < 5; ++i) if (kBusChoices[i] == cfg_.aoip_channels) bus_idx = i;
+        const char* bus_items[] = {"2 канали", "8 каналів", "16 каналів", "32 канали", "64 канали"};
+        if (ImGui::Combo("Канали AoIP", &bus_idx, bus_items, 5)) {
+            cfg_.aoip_channels = kBusChoices[bus_idx];
+            config_dirty_ = true;
+        }
+    }
     if (ImGui::SliderInt("Затримка", &cfg_.aoip_latency_ms, 2, 2000, "%d мс", ImGuiSliderFlags_Logarithmic)) {
         if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
         config_dirty_ = true;
+    }
+    if (ImGui::Checkbox("Audio Only (Disable Video)", &cfg_.audio_only)) {
+        config_dirty_ = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Duplex 64x64 завжди передає лише AoIP без відео; перемикач також вимикає відео у Sender/Receiver.");
     }
     ImGui::Spacing();
     if (!duplex_running_) {
@@ -541,6 +567,7 @@ void LanVidStudioApp::start_receiver() {
     rc.audio_target_ms = cfg_.audio_target_ms;
     rc.enable_audio = 1;
     rc.enable_discovery = 1;
+    rc.audio_only = cfg_.audio_only ? 1 : 0;
 
     apply_receiver_bus();
 
@@ -548,8 +575,9 @@ void LanVidStudioApp::start_receiver() {
     lv_receiver_set_volume(receiver_, cfg_.volume);
     if (lv_receiver_start(receiver_, &rc)) {
         receiver_running_ = true;
-        lv_receiver_set_multichannel_audio_callback(receiver_, &noop_bus_callback, nullptr);
-        toast_msg_ = "Прийом запущено на UDP :" + std::to_string(rc.bind_port) + " (LAN автопошук увімкнено)";
+        apply_receiver_output();
+        toast_msg_ = std::string(cfg_.audio_only ? "Прийом [Audio Only] на UDP :" : "Прийом запущено на UDP :") +
+                     std::to_string(rc.bind_port) + " (LAN автопошук увімкнено)";
         toast_until_us_ = now_us() + 3000000ull;
     } else {
         receiver_running_ = false;
@@ -661,7 +689,7 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
     const uint64_t now = now_us();
 
     // Fetch latest GPU preview frame from Sender
-    if (sender_ && sender_running_ && sender_tex_) {
+    if (sender_ && sender_running_ && !cfg_.audio_only && sender_tex_) {
         int w = 0, h = 0;
         const int want_rgba = sender_tex_->wants_rgba() ? 1 : 0;
         int rc = lv_sender_get_preview_frame(sender_, sender_frame_buf_.data(), sender_frame_buf_.size(),
@@ -677,7 +705,7 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
     }
 
     // Fetch latest decoded video frame from Receiver
-    if (receiver_ && receiver_running_ && receiver_tex_) {
+    if (receiver_ && receiver_running_ && !cfg_.audio_only && receiver_tex_) {
         int w = 0, h = 0;
         const int want_rgba = receiver_tex_->wants_rgba() ? 1 : 0;
         int rc = lv_receiver_get_latest_frame(receiver_, receiver_frame_buf_.data(),
@@ -724,6 +752,7 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
     if (config_dirty_ && (now - last_save_us_ >= 2000000ull)) {
         cfg_.dest_ip = ip_buf_;
         cfg_.file_path = file_buf_;
+        cfg_.dpx_peer_host = dpx_peer_buf_;
         save_app_config(cfg_);
         config_dirty_ = false;
         last_save_us_ = now;
@@ -796,6 +825,15 @@ void LanVidStudioApp::draw_sender_tab() {
     ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "1. Джерело відео та аудіо");
     ImGui::Separator();
 
+    if (ImGui::Checkbox("Audio Only (Disable Video)", &cfg_.audio_only)) {
+        config_dirty_ = true;
+        if (sender_running_) start_sender();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Аналог CLI --audio-only: без захоплення відео, енкодера та відеопакетів (лише AoIP + MasterClock).");
+    }
+
+    ImGui::BeginDisabled(cfg_.audio_only);
     const char* src_items[] = {"Тестовий патерн", "Екран / Монітор", "Веб-камера", "Файл (.y4m / .ppm)"};
     int src_idx = std::clamp(cfg_.source_type - 1, 0, 3);
     if (ImGui::Combo("Джерело", &src_idx, src_items, 4)) {
@@ -854,6 +892,7 @@ void LanVidStudioApp::draw_sender_tab() {
             config_dirty_ = true;
         }
     }
+    ImGui::EndDisabled();
 
     const char* aud_items[] = {"Вимкнено", "Системний звук (Loopback)", "Мікрофон"};
     if (ImGui::Combo("Аудіо", &cfg_.audio_mode, aud_items, 3)) {
@@ -934,6 +973,7 @@ void LanVidStudioApp::draw_sender_tab() {
     ImGui::TextColored(ImVec4(0.38f, 0.80f, 1.0f, 1.0f), "3. Кодек та якість");
     ImGui::Separator();
 
+    ImGui::BeginDisabled(cfg_.audio_only);
     const char* codec_items[] = {
         "LanVid DCT (~2 ms, без затримки)",
         "H.264 / AVC (Low Bandwidth, HW)",
@@ -968,6 +1008,7 @@ void LanVidStudioApp::draw_sender_tab() {
     if (ImGui::SliderInt("FPS", &cfg_.fps, 15, 120)) config_dirty_ = true;
     if (ImGui::SliderInt("XOR FEC група (0=вимк)", &cfg_.fec_group, 0, 12)) config_dirty_ = true;
     if (ImGui::Checkbox("Адаптивний контроль (AIMD для Wi-Fi)", &cfg_.adaptive_quality)) config_dirty_ = true;
+    ImGui::EndDisabled();
 
     ImGui::Spacing();
     if (!sender_running_) {
@@ -997,8 +1038,9 @@ void LanVidStudioApp::draw_sender_tab() {
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float prev_h = std::max(180.0f, avail.y - 215.0f);
-    draw_aspect_image(sender_running_ ? sender_tex_ : nullptr, ImVec2(avail.x, prev_h),
-                      "Натисніть «СТАРТ ПЕРЕДАЧІ» для живого прев'ю");
+    draw_aspect_image((sender_running_ && !cfg_.audio_only) ? sender_tex_ : nullptr, ImVec2(avail.x, prev_h),
+                      cfg_.audio_only ? "Режим Audio Only (відео вимкнено) — активна AoIP шина"
+                                      : "Натисніть «СТАРТ ПЕРЕДАЧІ» для живого прев'ю");
 
     ImGui::Spacing();
     ImGui::Columns(4, "##TxCards", false);
@@ -1086,6 +1128,15 @@ void LanVidStudioApp::draw_receiver_tab() {
     if (ImGui::Checkbox("HUD", &cfg_.show_hud)) config_dirty_ = true;
 
     ImGui::SameLine();
+    if (ImGui::Checkbox("Audio Only (Disable Video)", &cfg_.audio_only)) {
+        config_dirty_ = true;
+        if (receiver_running_) start_receiver();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Аналог CLI --audio-only: ігнорувати відеопакети до декодування (чистий AoIP-міст).");
+    }
+
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(90.0f);
     int bus_idx = 1;
     for (int i = 0; i < 5; ++i) if (kBusChoices[i] == cfg_.aoip_channels) bus_idx = i;
@@ -1132,9 +1183,13 @@ void LanVidStudioApp::draw_receiver_tab() {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float vid_h = std::max(160.0f, avail.y - 86.0f);
     ImGui::BeginChild("##RxCanvas", ImVec2(0, vid_h), false, ImGuiWindowFlags_NoScrollbar);
-    draw_aspect_image(receiver_running_ ? receiver_tex_ : nullptr, ImGui::GetContentRegionAvail(),
-                      receiver_running_ ? "Очікування відеопотоку по UDP..."
-                                        : "Натисніть «Старт прийому», щоб приймати відео та звук");
+    draw_aspect_image((receiver_running_ && !cfg_.audio_only) ? receiver_tex_ : nullptr,
+                      ImGui::GetContentRegionAvail(),
+                      cfg_.audio_only
+                          ? (receiver_running_ ? "Режим Audio Only (відео вимкнено) — AoIP прийом активний"
+                                               : "Режим Audio Only — натисніть «Старт прийому» для AoIP")
+                          : (receiver_running_ ? "Очікування відеопотоку по UDP..."
+                                               : "Натисніть «Старт прийому», щоб приймати відео та звук"));
     ImGui::EndChild();
 
     // Bottom Live Telemetry Strip
@@ -1243,19 +1298,23 @@ void LanVidStudioApp::render_frame() {
     ImGui::Spacing();
 
     if (ImGui::BeginTabBar("##MainTabs")) {
-        if (ImGui::BeginTabItem("Передача (Sender)", nullptr,
-                                cfg_.active_tab == 0 ? ImGuiTabItemFlags_None : 0)) {
-            cfg_.active_tab = 0;
+        const ImGuiTabItemFlags f0 = (!initial_tab_applied_ && cfg_.active_tab == 0) ? ImGuiTabItemFlags_SetSelected : 0;
+        const ImGuiTabItemFlags f1 = (!initial_tab_applied_ && cfg_.active_tab == 1) ? ImGuiTabItemFlags_SetSelected : 0;
+        const ImGuiTabItemFlags f2 = (!initial_tab_applied_ && cfg_.active_tab == 2) ? ImGuiTabItemFlags_SetSelected : 0;
+        initial_tab_applied_ = true;
+
+        if (ImGui::BeginTabItem("Передача (Sender)", nullptr, f0)) {
+            if (cfg_.active_tab != 0) { cfg_.active_tab = 0; config_dirty_ = true; }
             draw_sender_tab();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Прийом (Receiver)", nullptr,
-                                cfg_.active_tab == 1 ? ImGuiTabItemFlags_None : 0)) {
-            cfg_.active_tab = 1;
+        if (ImGui::BeginTabItem("Прийом (Receiver)", nullptr, f1)) {
+            if (cfg_.active_tab != 1) { cfg_.active_tab = 1; config_dirty_ = true; }
             draw_receiver_tab();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("AoIP Duplex 64x64")) {
+        if (ImGui::BeginTabItem("AoIP Duplex 64x64", nullptr, f2)) {
+            if (cfg_.active_tab != 2) { cfg_.active_tab = 2; config_dirty_ = true; }
             draw_duplex_tab();
             ImGui::EndTabItem();
         }

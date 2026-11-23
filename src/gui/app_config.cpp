@@ -134,6 +134,7 @@ bool load_app_config(AppConfig& cfg) {
     read_flt(j, "volume", cfg.volume);
     read_int(j, "conceal_mode", cfg.conceal_mode);
     read_dbl(j, "audio_target_ms", cfg.audio_target_ms);
+    read_bool(j, "audio_only", cfg.audio_only);
     read_int(j, "aoip_channels", cfg.aoip_channels);
     read_int(j, "aoip_latency_ms", cfg.aoip_latency_ms);
     read_bool(j, "aoip_tone", cfg.aoip_tone);
@@ -156,6 +157,11 @@ bool load_app_config(AppConfig& cfg) {
     cfg.volume = std::clamp(cfg.volume, 0.0f, 1.5f);
     cfg.aoip_channels = std::clamp(cfg.aoip_channels, 1, 64);
     cfg.aoip_latency_ms = std::clamp(cfg.aoip_latency_ms, 2, 2000);
+    cfg.aoip_source = std::clamp(cfg.aoip_source, 0, 1);
+    cfg.aoip_output = std::clamp(cfg.aoip_output, 0, 1);
+    cfg.dpx_peer_port = std::clamp(cfg.dpx_peer_port, 1024, 65535);
+    cfg.dpx_listen_port = std::clamp(cfg.dpx_listen_port, 1024, 65535);
+    cfg.active_tab = std::clamp(cfg.active_tab, 0, 2);
     return true;
 }
 
@@ -194,6 +200,7 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"volume\": " << cfg.volume << ",\n"
         << "  \"conceal_mode\": " << cfg.conceal_mode << ",\n"
         << "  \"audio_target_ms\": " << cfg.audio_target_ms << ",\n"
+        << "  \"audio_only\": " << (cfg.audio_only ? "true" : "false") << ",\n"
         << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"
         << "  \"aoip_latency_ms\": " << cfg.aoip_latency_ms << ",\n"
         << "  \"aoip_tone\": " << (cfg.aoip_tone ? "true" : "false") << ",\n"
