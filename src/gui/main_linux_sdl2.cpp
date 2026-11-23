@@ -212,6 +212,10 @@ int main(int argc, char** argv) {
             if (ev.type == SDL_QUIT) done = true;
         }
         if (smoke_ms > 0 && lv::now_us() - t_start >= uint64_t(smoke_ms) * 1000ull) break;
+        if (SDL_GetWindowFlags(host.win) & SDL_WINDOW_MINIMIZED) {
+            SDL_Delay(16);
+            continue;
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
@@ -223,7 +227,7 @@ int main(int argc, char** argv) {
         int dw = 0, dh = 0;
         SDL_GL_GetDrawableSize(host.win, &dw, &dh);
         glViewport(0, 0, dw, dh);
-        glClearColor(0.07f, 0.08f, 0.11f, 1.0f);
+        glClearColor(0.929f, 0.914f, 0.996f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(host.win);

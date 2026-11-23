@@ -201,10 +201,14 @@ private:
     int midi_channel_filter_ = 0;   // 0 = All, 1..16 = Ch 1..16
     float matrix_new_gain_db_ = 0.0f;
 
-    // UI status / toast notifications
+    // UI status / toast notifications & root-level popup triggers
     std::string toast_msg_;
     uint64_t toast_until_us_ = 0;
     int screenshot_counter_ = 0;
+    bool req_open_add_audio_popup_ = false;
+    bool req_open_add_midi_popup_ = false;
+    bool req_open_clear_all_popup_ = false;
+    uint64_t last_dev_refresh_us_ = 0;
 };
 
 }  // namespace lv::gui

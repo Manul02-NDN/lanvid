@@ -349,6 +349,10 @@ int main(int argc, char** argv) {
         }
         if (done) break;
         if (smoke_ms > 0 && lv::now_us() - t_start >= uint64_t(smoke_ms) * 1000ull) break;
+        if (IsIconic(hwnd)) {
+            Sleep(16);
+            continue;
+        }
 
         if (g_host.resize_w != 0 && g_host.resize_h != 0) {
             if (g_host.rtv) { g_host.rtv->Release(); g_host.rtv = nullptr; }
@@ -365,12 +369,12 @@ int main(int argc, char** argv) {
         app.render_frame();
 
         ImGui::Render();
-        const float clear_col[4] = {0.07f, 0.08f, 0.11f, 1.0f};
+        const float clear_col[4] = {0.929f, 0.914f, 0.996f, 1.0f};
         g_host.ctx->OMSetRenderTargets(1, &g_host.rtv, nullptr);
         g_host.ctx->ClearRenderTargetView(g_host.rtv, clear_col);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        const UINT sync = g_host.fullscreen ? 0u : 1u;  // zero-VSync in fullscreen for lowest latency!
+        const UINT sync = g_host.fullscreen ? 0u : 1u;  // VSync ON in windowed mode for smooth 60 FPS
         const UINT pflags = (sync == 0u && g_host.allow_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
         g_host.swap->Present(sync, pflags);
         ++rendered_frames;

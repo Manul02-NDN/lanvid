@@ -76,19 +76,10 @@ ImVec4 lerp_col(const ImVec4& a, const ImVec4& b, float t) {
 }
 
 void draw_soft_shadow(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, float rounding, float elevation = 1.0f) {
-    const float s = std::max(0.5f, elevation);
-    if (g_dark_theme) {
-        dl->AddRectFilled(ImVec2(p0.x, p0.y + 3.0f * s), ImVec2(p1.x, p1.y + 6.0f * s),
-                          IM_COL32(0, 0, 0, 55), rounding + 2.0f);
-        return;
-    }
-    // Multi-layer soft lavender drop shadow rgba(124, 58, 237, 0.04..0.10)
-    dl->AddRectFilled(ImVec2(p0.x - 1.0f * s, p0.y + 3.0f * s), ImVec2(p1.x + 1.0f * s, p1.y + 7.0f * s),
-                      IM_COL32(124, 58, 237, 10), rounding + 2.0f);
-    dl->AddRectFilled(ImVec2(p0.x, p0.y + 2.0f * s), ImVec2(p1.x, p1.y + 4.5f * s),
-                      IM_COL32(124, 58, 237, 16), rounding + 1.0f);
-    dl->AddRectFilled(ImVec2(p0.x + 1.0f, p0.y + 1.0f * s), ImVec2(p1.x - 1.0f, p1.y + 2.5f * s),
-                      IM_COL32(124, 58, 237, 25), rounding);
+    // Lightweight single-pass soft lavender shadow (minimal vertex overhead, zero judder)
+    const float s = std::clamp(elevation, 0.5f, 1.4f);
+    const ImU32 col = g_dark_theme ? IM_COL32(0, 0, 0, 48) : IM_COL32(124, 58, 237, 20);
+    dl->AddRectFilled(ImVec2(p0.x, p0.y + 2.0f * s), ImVec2(p1.x, p1.y + 3.5f * s), col, rounding + 1.0f);
 }
 
 void draw_rounded_gradient_rect(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, float rounding,
@@ -672,6 +663,7 @@ void LanVidStudioApp::on_network_midi(const LV_MidiEvent* ev, void* user_data) {
 }
 
 void LanVidStudioApp::refresh_devices() {
+    last_dev_refresh_us_ = now_us();
     monitors_ = list_monitors();
     cameras_ = list_cameras();
     loop_devs_ = list_audio_devices(true);
@@ -2414,7 +2406,8 @@ void LanVidStudioApp::draw_aspect_image(IGpuTexture* tex, const ImVec2& avail, c
 }
 
 void LanVidStudioApp::draw_top_bar() {
-    begin_glass_card("##TopBar", ImVec2(0, 56), false, ImGuiWindowFlags_NoScrollbar);
+    begin_glass_card("##TopBar", ImVec2(0, 62), false,
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const int tab_idx = std::clamp(cfg_.active_tab, 0, 3);
     const IconKind mode_icons[] = {IconKind::kSend, IconKind::kMatrix, IconKind::kHeadphones, IconKind::kGear};
     draw_gradient_icon_tile("##TopModeTile", mode_icons[tab_idx], 32.0f, -1, false);
@@ -2926,30 +2919,51 @@ void LanVidStudioApp::draw_fullscreen_receiver() {
 }
 
 void LanVidStudioApp::draw_add_device_popups() {
+    auto finish_add_slot = [this](const MatrixSlotConfig& s) {
+        audio_matrix_.add_slot(s);
+        sync_matrix_to_config();
+        save_app_config(cfg_);
+        config_dirty_ = false;
+        toast_msg_ = "Додано аудіопристрій: " + s.name;
+        toast_until_us_ = now_us() + 2800000ull;
+    };
+    auto finish_add_midi = [this](const MidiSlotConfig& m) {
+        audio_matrix_.add_midi_slot(m);
+        sync_matrix_to_config();
+        save_app_config(cfg_);
+        config_dirty_ = false;
+        toast_msg_ = "Додано MIDI-пристрій: " + m.name;
+        toast_until_us_ = now_us() + 2800000ull;
+    };
+
     if (ImGui::BeginPopup("##AddMidiDev")) {
         ImGui::TextColored(kColAccentInd, "MIDI-входи (Клавіатури / Барабани / Контролери)");
         if (midi_in_devs_.empty()) ImGui::TextDisabled("  MIDI-входів не знайдено");
-        for (const auto& m : midi_in_devs_) {
+        for (size_t i = 0; i < midi_in_devs_.size(); ++i) {
+            const auto& m = midi_in_devs_[i];
+            ImGui::PushID(int(i) + 1000);
             if (ImGui::Selectable((m.name + " [MIDI IN]").c_str())) {
-                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiInput, m.name, m.name, m.index, 0, true});
-                config_dirty_ = true;
+                finish_add_midi({-1, MidiSlotType::kMidiInput, m.name, m.name, m.index, 0, true});
             }
+            ImGui::PopID();
         }
         ImGui::Separator();
         ImGui::TextColored(kColAccentPurp, "MIDI-виходи (DAW / Синтезатори)");
         if (midi_out_devs_.empty()) ImGui::TextDisabled("  MIDI-виходів не знайдено");
-        for (const auto& m : midi_out_devs_) {
+        for (size_t i = 0; i < midi_out_devs_.size(); ++i) {
+            const auto& m = midi_out_devs_[i];
+            ImGui::PushID(int(i) + 2000);
             if (ImGui::Selectable((m.name + " [MIDI OUT]").c_str())) {
-                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiOutput, m.name, m.name, m.index, 0, true});
-                config_dirty_ = true;
+                finish_add_midi({-1, MidiSlotType::kMidiOutput, m.name, m.name, m.index, 0, true});
             }
+            ImGui::PopID();
         }
         ImGui::EndPopup();
     }
 
     if (ImGui::BeginPopup("##AddAudioDev")) {
 #if defined(__APPLE__)
-        auto add_sys_slot = [this](const SystemAudioDeviceEntry* d, MatrixSlotRole role) {
+        auto add_sys_slot = [&](const SystemAudioDeviceEntry* d, MatrixSlotRole role) {
             MatrixSlotConfig s{};
             s.id = -1;
             s.type = MatrixSlotType::kSystemAudio;
@@ -2959,71 +2973,91 @@ void LanVidStudioApp::draw_add_device_popups() {
             s.device_index = -1;
             s.channels = d ? std::clamp(d->channels, 1, 64) : 2;
             s.buffer_size = cfg_.matrix_buffer_size;
-            audio_matrix_.add_slot(s);
-            config_dirty_ = true;
+            finish_add_slot(s);
         };
         ImGui::TextColored(kColAccentInd, "Виходи CoreAudio (Навушники / Колонки / USB)");
-        if (ImGui::Selectable("Основний вихід (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kOutput);
-        for (const auto& d : sys_out_devs_) {
+        if (ImGui::Selectable("Основний вихід (CoreAudio)##DefOut")) add_sys_slot(nullptr, MatrixSlotRole::kOutput);
+        for (size_t i = 0; i < sys_out_devs_.size(); ++i) {
+            const auto& d = sys_out_devs_[i];
+            ImGui::PushID(int(i) + 100);
             char lbl[320];
             std::snprintf(lbl, sizeof(lbl), "%s (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
                           d.is_default ? " [основний]" : "");
             if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kOutput);
+            ImGui::PopID();
         }
         ImGui::Separator();
         ImGui::TextColored(kColAccentPurp, "Входи CoreAudio (Мікрофон / Лінійний вхід)");
-        if (ImGui::Selectable("Основний вхід (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kInput);
-        for (const auto& d : sys_in_devs_) {
+        if (ImGui::Selectable("Основний вхід (CoreAudio)##DefIn")) add_sys_slot(nullptr, MatrixSlotRole::kInput);
+        for (size_t i = 0; i < sys_in_devs_.size(); ++i) {
+            const auto& d = sys_in_devs_[i];
+            ImGui::PushID(int(i) + 200);
             char lbl[320];
             std::snprintf(lbl, sizeof(lbl), "%s (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
                           d.is_default ? " [основний]" : "");
             if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kInput);
+            ImGui::PopID();
         }
 #else
         ImGui::TextColored(kColAccentInd, "Виходи звуку (Навушники / Аудіоінтерфейси)");
-        if (ImGui::Selectable("Основні навушники / колонки ПК (WASAPI)")) {
-            MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
-                               "Навушники / Вихід ПК", "", -1, 2, cfg_.matrix_buffer_size, true};
-            audio_matrix_.add_slot(s);
-            config_dirty_ = true;
+        if (ImGui::Selectable("Основні навушники / колонки ПК (WASAPI)##DefOut")) {
+            finish_add_slot({-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
+                             "Навушники / Вихід ПК", "", -1, 2, cfg_.matrix_buffer_size, true});
         }
-        for (const auto& d : loop_devs_) {
+        for (size_t i = 0; i < loop_devs_.size(); ++i) {
+            const auto& d = loop_devs_[i];
+            ImGui::PushID(int(i) + 100);
             if (ImGui::Selectable((d.name + " [ВИХІД]").c_str())) {
-                MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
-                                   d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true};
-                audio_matrix_.add_slot(s);
-                config_dirty_ = true;
+                finish_add_slot({-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
+                                 d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true});
             }
+            ImGui::PopID();
         }
         ImGui::Separator();
         ImGui::TextColored(kColAccentPurp, "Входи звуку (Мікрофон / Лінійний вхід)");
-        if (ImGui::Selectable("Основний мікрофон / вхід ПК (WASAPI)")) {
-            MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
-                               "Мікрофон / Вхід ПК", "", -1, 2, cfg_.matrix_buffer_size, true};
-            audio_matrix_.add_slot(s);
-            config_dirty_ = true;
+        if (ImGui::Selectable("Основний мікрофон / вхід ПК (WASAPI)##DefIn")) {
+            finish_add_slot({-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
+                             "Мікрофон / Вхід ПК", "", -1, 2, cfg_.matrix_buffer_size, true});
         }
-        for (const auto& d : mic_devs_) {
+        for (size_t i = 0; i < mic_devs_.size(); ++i) {
+            const auto& d = mic_devs_[i];
+            ImGui::PushID(int(i) + 200);
             if (ImGui::Selectable((d.name + " [ВХІД]").c_str())) {
-                MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
-                                   d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true};
-                audio_matrix_.add_slot(s);
-                config_dirty_ = true;
+                finish_add_slot({-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
+                                 d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true});
             }
+            ImGui::PopID();
         }
         if (!asio_devs_.empty()) {
             ImGui::Separator();
             ImGui::TextColored(kColAmber, "Зовнішні ASIO-драйвери (Студійні карти)");
-            for (const auto& a : asio_devs_) {
+            for (size_t i = 0; i < asio_devs_.size(); ++i) {
+                const auto& a = asio_devs_[i];
+                ImGui::PushID(int(i) + 300);
                 if (ImGui::Selectable((a.name + " [ASIO]").c_str())) {
-                    MatrixSlotConfig s{-1, MatrixSlotType::kExternalAsio, MatrixSlotRole::kDuplex,
-                                       a.name, a.name, -1, 16, cfg_.matrix_buffer_size, true};
-                    audio_matrix_.add_slot(s);
-                    config_dirty_ = true;
+                    finish_add_slot({-1, MatrixSlotType::kExternalAsio, MatrixSlotRole::kDuplex,
+                                     a.name, a.name, -1, 16, cfg_.matrix_buffer_size, true});
                 }
+                ImGui::PopID();
             }
         }
 #endif
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal("##ConfirmClearAll", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(kColTextMain, "Очистити всі аудіо та MIDI маршрути?");
+        ImGui::TextDisabled("Ви завжди зможете відновити їх одним кліком у швидких сценаріях.");
+        ImGui::Spacing();
+        if (gradient_pill_button("Так, очистити", ImVec2(140, 32), kColPink, kColRed)) {
+            matrix_active_preset_ = -1;
+            audio_matrix_.clear_crosspoints();
+            audio_matrix_.clear_midi_crosspoints();
+            config_dirty_ = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (status_pill_button("Скасувати", false, ImVec2(110, 32))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 }
@@ -3087,7 +3121,7 @@ void LanVidStudioApp::draw_connect_tab() {
 
     // ---- Automatic LAN / Bonjour Discovery (1 click) ----
     ImGui::TextColored(kColAccentPurp, "2. Пристрої поруч у мережі (Автопошук)");
-    ImGui::SameLine(std::max(240.0f, ImGui::GetContentRegionAvail().x - 175.0f));
+    ImGui::SameLine(std::max(260.0f, ImGui::GetWindowWidth() - 190.0f));
     const bool is_scanning = scanning_.load() || nodes_scanning_.load();
     if (gradient_pill_button(is_scanning ? "Пошук..." : "Знайти пристрої", ImVec2(165.0f, 28.0f),
                              kColAccentBlue, kColAccentInd)) {
@@ -3269,8 +3303,6 @@ void LanVidStudioApp::draw_connect_tab() {
 }
 
 void LanVidStudioApp::draw_devices_tab() {
-    draw_add_device_popups();
-
     const float total_w = ImGui::GetContentRegionAvail().x;
     const float half_w = std::max(340.0f, (total_w - 10.0f) * 0.5f);
 
@@ -3286,7 +3318,8 @@ void LanVidStudioApp::draw_devices_tab() {
     ImGui::Separator();
 
     if (gradient_pill_button("+ Додати аудіопристрій", ImVec2(0, 32), kColAccentBlue, kColAccentPurp)) {
-        ImGui::OpenPopup("##AddAudioDev");
+        if (now_us() - last_dev_refresh_us_ > 3000000ull) refresh_devices();
+        req_open_add_audio_popup_ = true;
     }
     ImGui::SameLine();
     if (status_pill_button("Оновити список", false, ImVec2(0, 32))) refresh_devices();
@@ -3310,7 +3343,8 @@ void LanVidStudioApp::draw_devices_tab() {
     for (auto s : slots) {
         ImGui::PushID(s.id);
         const auto st = audio_matrix_.slot_status(s.id);
-        begin_glass_card("##DevSlotCard", ImVec2(0, 96.0f), true, ImGuiWindowFlags_NoScrollbar);
+        begin_glass_card("##DevSlotCard", ImVec2(0, 96.0f), true,
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         const char* role_lbl = (s.type == MatrixSlotType::kVirtualBus)
                                    ? "Віртуальна шина DAW"
@@ -3328,22 +3362,23 @@ void LanVidStudioApp::draw_devices_tab() {
         ImGui::TextDisabled("· %s · %u Гц", role_lbl, st.device_sample_rate);
         ImGui::EndGroup();
 
-        ImGui::SameLine(std::max(160.0f, ImGui::GetWindowWidth() - 62.0f));
-        bool act = s.active;
-        if (studio_toggle("##DevAct", &act, kColAccentInd)) {
-            s.active = act;
-            audio_matrix_.update_slot(s.id, s);
-            config_dirty_ = true;
-        }
+        const float card_w = ImGui::GetWindowWidth();
         if (s.type != MatrixSlotType::kVirtualBus && s.type != MatrixSlotType::kNetworkAoip) {
-            ImGui::SameLine(std::max(120.0f, ImGui::GetWindowWidth() - 94.0f));
-            if (ImGui::SmallButton("x")) {
+            ImGui::SameLine(std::max(140.0f, card_w - 94.0f));
+            if (ImGui::SmallButton("x##RmSlot")) {
                 audio_matrix_.remove_slot(s.id);
                 config_dirty_ = true;
                 end_glass_card();
                 ImGui::PopID();
                 break;
             }
+        }
+        ImGui::SameLine(std::max(170.0f, card_w - 60.0f));
+        bool act = s.active;
+        if (studio_toggle("##DevAct", &act, kColAccentInd)) {
+            s.active = act;
+            audio_matrix_.update_slot(s.id, s);
+            config_dirty_ = true;
         }
 
         const float vu_w = ImGui::GetContentRegionAvail().x;
@@ -3369,7 +3404,8 @@ void LanVidStudioApp::draw_devices_tab() {
     ImGui::Separator();
 
     if (gradient_pill_button("+ Додати MIDI-пристрій", ImVec2(0, 32), kColAccentInd, kColAccentPurp)) {
-        ImGui::OpenPopup("##AddMidiDev");
+        if (now_us() - last_dev_refresh_us_ > 3000000ull) refresh_devices();
+        req_open_add_midi_popup_ = true;
     }
     ImGui::SameLine();
     if (gradient_pill_button("PANIC (Скинути всі ноти)", ImVec2(-1, 32), kColPink, kColRed)) {
@@ -3668,23 +3704,7 @@ void LanVidStudioApp::draw_patchbay_tab() {
     ImGui::SameLine(0.0f, qgap);
     if (selectable_choice_card("##QrClear", "Очистити все", "Видалити всі маршрути",
                                false, ImVec2(qw, 56.0f))) {
-        ImGui::OpenPopup("##ConfirmClearAll");
-    }
-
-    if (ImGui::BeginPopupModal("##ConfirmClearAll", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextColored(kColTextMain, "Очистити всі аудіо та MIDI маршрути?");
-        ImGui::TextDisabled("Ви завжди зможете відновити їх одним кліком у швидких сценаріях.");
-        ImGui::Spacing();
-        if (gradient_pill_button("Так, очистити", ImVec2(140, 32), kColPink, kColRed)) {
-            matrix_active_preset_ = -1;
-            audio_matrix_.clear_crosspoints();
-            audio_matrix_.clear_midi_crosspoints();
-            config_dirty_ = true;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (status_pill_button("Скасувати", false, ImVec2(110, 32))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+        req_open_clear_all_popup_ = true;
     }
 
     ImGui::Spacing();
@@ -4048,7 +4068,8 @@ void LanVidStudioApp::render_frame() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::Begin("##LanVidMain", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+                     ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_NoScrollWithMouse);
 
     // Soft Pastel Lavender -> Blue-Purple diagonal backdrop (#DDD6FE -> #E0E7FF / #EDE9FE)
     ImGui::GetWindowDrawList()->AddRectFilledMultiColor(
@@ -4062,7 +4083,8 @@ void LanVidStudioApp::render_frame() {
     ImGui::SameLine();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-    ImGui::BeginChild("##MainWorkspace", ImVec2(0, 0), false);
+    ImGui::BeginChild("##MainWorkspace", ImVec2(0, 0), false,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     draw_top_bar();
     ImGui::Spacing();
 
@@ -4074,6 +4096,21 @@ void LanVidStudioApp::render_frame() {
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
+
+    // Root-level popups & modals (guaranteed matching ID stack from any child panel)
+    if (req_open_add_audio_popup_) {
+        req_open_add_audio_popup_ = false;
+        ImGui::OpenPopup("##AddAudioDev");
+    }
+    if (req_open_add_midi_popup_) {
+        req_open_add_midi_popup_ = false;
+        ImGui::OpenPopup("##AddMidiDev");
+    }
+    if (req_open_clear_all_popup_) {
+        req_open_clear_all_popup_ = false;
+        ImGui::OpenPopup("##ConfirmClearAll");
+    }
+    draw_add_device_popups();
 
     // Soft glass toast overlay
     if (!toast_msg_.empty() && now_us() < toast_until_us_) {
