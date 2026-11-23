@@ -30,6 +30,7 @@ struct AppConfig {
 
     // 64-channel AoIP bus
     bool audio_only = false;   // true=disable video capture/encode/decode (same as CLI --audio-only)
+    int audio_codec = 0;       // 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
     int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
     bool aoip_tone = false;    // sender: N-channel test tone bus

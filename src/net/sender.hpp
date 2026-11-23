@@ -102,6 +102,11 @@ public:
     }
     void set_audio_latency_ms(uint32_t ms);
     uint32_t audio_latency_ms() const { return atx_ ? atx_->latency_ms() : cfg_.audio_latency_ms; }
+    void set_audio_codec_profile(AudioCodecProfile p) {
+        audio_codec_ = p;
+        if (atx_) atx_->set_codec_profile(p);
+    }
+    AudioCodecProfile audio_codec_profile() const { return atx_ ? atx_->codec_profile() : audio_codec_; }
     void flush_audio();
     // Current master-clock position in samples (sender epoch = construction time).
     uint64_t master_samples_now() const;
@@ -148,6 +153,7 @@ private:
     uint64_t epoch_us_ = 0;
     std::mutex ctl_mu_;
     std::unique_ptr<AudioTxEngine> atx_;
+    AudioCodecProfile audio_codec_ = AudioCodecProfile::kPcm32F;
     std::atomic<uint64_t> next_auto_ts_[kMaxAudioChannels]{};
     Endpoint dst_{};
     UdpSocket sock_;

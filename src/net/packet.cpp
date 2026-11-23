@@ -151,9 +151,9 @@ bool parse_audio_header2(const uint8_t* in, size_t len, AudioHeader2& a) {
     a.wallclock_us = load_le32(in + 20);
     if (a.stream_id >= kMaxAudioChannels || a.channel_index >= kMaxAudioChannels) return false;
     if (a.sample_rate < 8000 || a.sample_rate > 192000) return false;
-    if (uint8_t(a.sample_format) < 1 || uint8_t(a.sample_format) > 3) return false;
+    if (uint8_t(a.sample_format) < 1 || uint8_t(a.sample_format) > 4) return false;
     if (a.num_samples == 0) return false;
-    const size_t body = size_t(a.num_samples) * audio2_bytes_per_sample(a.sample_format);
+    const size_t body = audio2_payload_bytes(a.sample_format, a.num_samples);
     if (a.flags & kAudioFlagFecParity) return len >= kAudioHeader2Size + kAudioFecInfoSize + body;
     return len >= kAudioHeader2Size + body;
 }

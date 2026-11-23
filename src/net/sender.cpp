@@ -33,6 +33,7 @@ bool UdpSender::init() {
         return sock_.send_to(d, n, dst_) == int(n);
     });
     atx_->set_latency_ms(cfg_.audio_latency_ms);
+    atx_->set_codec_profile(audio_codec_);
     if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
     sock_.set_buffer_sizes(cfg_.socket_buf_bytes, 256 * 1024);
     sock_.set_nonblocking(true);

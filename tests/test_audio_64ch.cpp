@@ -479,3 +479,71 @@ TEST(audio_64ch_wifi_jitter_phase_lock) {
     CHECK(divergent_ch1_ch64 == 0);  // Strictly 0-sample phase skew between Channel 1 and Channel 64!
     CHECK(sim.mat.effective_latency_ms() >= 5 && sim.mat.effective_latency_ms() <= 200);
 }
+
+TEST(audio_codec_compression_profiles_64ch) {
+    using namespace lv;
+    constexpr uint32_t kCh = 64;
+    constexpr uint32_t kBlk = 240;  // 5 ms @ 48 kHz
+    const AudioCodecProfile profiles[4] = {
+        AudioCodecProfile::kPcm32F,
+        AudioCodecProfile::kPcm24,
+        AudioCodecProfile::kPcm16,
+        AudioCodecProfile::kOpusAdpcm,
+    };
+    const char* names[4] = {"PCM32F", "PCM24", "PCM16", "ADPCM4"};
+    uint64_t bytes[4] = {};
+
+    // Single persistent receiver tests live on-the-fly codec switching across all 4 profiles!
+    Sim sim;
+    sim.tx.set_latency_ms(20);
+    sim.rx.set_latency_ms(20);
+    sim.mat.set_atomic_frame_lock(true);
+
+    std::vector<float> in_blk(kBlk);
+    std::vector<std::vector<float>> out_planes(kCh, std::vector<float>(kBlk, 0.0f));
+    float* out_ptrs[kCh];
+    for (uint32_t c = 0; c < kCh; ++c) out_ptrs[c] = out_planes[c].data();
+
+    for (int p = 0; p < 4; ++p) {
+        sim.tx.set_codec_profile(profiles[p]);
+        const uint64_t b0 = sim.tx.stats().bytes_sent;
+        uint64_t divergent = 0, nonsilent = 0;
+        double max_ch_diff = 0.0;
+
+        for (uint32_t b = 0; b < 40; ++b) {  // 200 ms per profile
+            const uint64_t media_ts = uint64_t(sim.master_samples_now());
+            for (uint32_t i = 0; i < kBlk; ++i) {
+                in_blk[i] = 0.5f * std::sin(0.05f * float(media_ts + i));
+            }
+            for (uint16_t c = 0; c < kCh; ++c) {
+                sim.tx.push_channel(c, in_blk.data(), kBlk, AudioFormat2::kFloat32, media_ts, uint32_t(sim.now));
+            }
+            sim.now += 5000;
+            sim.deliver();
+            sim.rx.service(sim.now);
+            sim.mat.pop_planar(sim.clk, sim.now, out_ptrs, kCh, kBlk);
+
+            if (b >= 15) {  // after profile transition settles
+                for (uint32_t i = 0; i < kBlk; ++i) {
+                    const float ch1 = out_planes[0][i];
+                    const float ch64 = out_planes[kCh - 1][i];
+                    const double diff = std::fabs(double(ch1) - double(ch64));
+                    if (diff > max_ch_diff) max_ch_diff = diff;
+                    if (diff > 1e-4) ++divergent;
+                    if (std::fabs(ch1) > 0.05f && std::fabs(ch64) > 0.05f) ++nonsilent;
+                }
+            }
+        }
+        bytes[p] = sim.tx.stats().bytes_sent - b0;
+        std::printf("    [64ch codec %-6s] bytes=%llu (ratio=%.2fx) nonsilent=%llu max_diff_ch1_ch64=%.2e divergent=%llu\n",
+                    names[p], (unsigned long long)bytes[p],
+                    p == 0 ? 1.0 : double(bytes[p]) / double(std::max<uint64_t>(bytes[0], 1)),
+                    (unsigned long long)nonsilent, max_ch_diff, (unsigned long long)divergent);
+        CHECK(nonsilent > 2000);
+        CHECK(divergent == 0);  // Strictly 0-sample phase skew between ch 1 and ch 64 for every codec
+    }
+
+    CHECK(bytes[1] < bytes[0] * 82 / 100);  // PCM24 saves ~25%
+    CHECK(bytes[2] < bytes[0] * 60 / 100);  // PCM16 saves ~50%
+    CHECK(bytes[3] < bytes[0] * 30 / 100);  // ADPCM4 saves ~75-85%
+}

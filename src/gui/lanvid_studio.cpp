@@ -21,6 +21,18 @@ const char* latency_mode_label(int ms) {
     return "High-Reliability / Bulletproof: 10-20 мс пакети, інтерлівінг FEC + до 12 NACK + дублювання";
 }
 
+constexpr const char* kAudioCodecItems[4] = {
+    "Uncompressed (Float32 · ~98 Mbps)",
+    "Lossless 24-bit (PCM24 · -25%)",
+    "Compact 16-bit (PCM16 · -50%)",
+    "Ultra-Light (Opus / ADPCM · -80%)"
+};
+
+double estimate_aoip_mbps(int channels, int codec) {
+    const double bits_per_sample = (codec == 0) ? 32.0 : (codec == 1 ? 24.0 : (codec == 2 ? 16.0 : 4.2));
+    return double(std::clamp(channels, 1, 64)) * 48000.0 * bits_per_sample / 1e6;
+}
+
 void noop_bus_callback(const LV_MultichannelAudioBlock*, void*) {}  // drives the playout clock + meters
 
 void push_hist(float* arr, int len, float val) {
@@ -268,6 +280,7 @@ void LanVidStudioApp::start_sender() {
     sc.audio_device_index = cfg_.audio_device_index;
     sc.audio_chunk_ms = cfg_.audio_chunk_ms;
     sc.audio_only = cfg_.audio_only ? 1 : 0;
+    sc.audio_codec = std::clamp(cfg_.audio_codec, 0, 3);
 
     LV_AudioBusConfig bus;
     lv_audio_bus_config_default(&bus);
@@ -405,6 +418,7 @@ void LanVidStudioApp::start_duplex() {
     dc.listen_port = uint16_t(std::clamp(cfg_.dpx_listen_port, 1024, 65535));
     dc.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
     dc.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
+    dc.audio_codec = std::clamp(cfg_.audio_codec, 0, 3);
     const int rc = lv_duplex_start(duplex_, &dc);
     duplex_running_ = rc == LV_OK;
     if (duplex_running_) {
@@ -549,6 +563,13 @@ void LanVidStudioApp::draw_duplex_tab() {
         if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
         config_dirty_ = true;
     }
+    if (ImGui::Combo("Audio Compression", &cfg_.audio_codec, kAudioCodecItems, 4)) {
+        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+        config_dirty_ = true;
+    }
+    ImGui::TextDisabled("Est. AoIP TX: %.1f Mbps (%d ch @ 48 kHz)",
+                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
     if (ImGui::Checkbox("Audio Only (Disable Video)", &cfg_.audio_only)) {
         config_dirty_ = true;
     }
@@ -835,6 +856,15 @@ void LanVidStudioApp::draw_studio_config_panel() {
         audio_matrix_.set_buffer_size(cfg_.matrix_buffer_size);
         config_dirty_ = true;
     }
+
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("##CfgAudioCodec", &cfg_.audio_codec, kAudioCodecItems, 4)) {
+        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+        config_dirty_ = true;
+    }
+    ImGui::TextDisabled("Audio Compression · Est: %.1f Mbps (%d ch)",
+                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
 
     if (ImGui::Checkbox("Feedback Loop Guard", &cfg_.matrix_feedback_guard)) {
         audio_matrix_.set_feedback_guard(cfg_.matrix_feedback_guard);
@@ -1328,6 +1358,13 @@ void LanVidStudioApp::draw_aoip_sender_controls() {
         if (sender_) lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
         config_dirty_ = true;
     }
+    if (ImGui::Combo("Audio Compression", &cfg_.audio_codec, kAudioCodecItems, 4)) {
+        if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+        if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+        config_dirty_ = true;
+    }
+    ImGui::TextDisabled("Est. AoIP: %.1f Mbps (%d ch @ 48 kHz)",
+                        estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec), cfg_.aoip_channels);
     ImGui::TextDisabled("2 мс — Ultra Low Latency  <->  2000 мс — Bulletproof");
     ImGui::TextWrapped("%s", latency_mode_label(cfg_.aoip_latency_ms));
     const char* src_items[] = {"Built-in Test Tone Generator", "Virtual Audio Device (ASIO / CoreAudio / PipeWire)"};

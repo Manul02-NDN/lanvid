@@ -15,6 +15,13 @@
 
 namespace lv {
 
+enum class AudioCodecProfile : uint8_t {
+    kPcm32F    = 0,  // Uncompressed 32-bit float (4 B/sample, ~98 Mbps @ 64ch 48kHz)
+    kPcm24     = 1,  // Lossless 24-bit packed PCM (3 B/sample, ~73 Mbps, -25%)
+    kPcm16     = 2,  // Compact 16-bit PCM (2 B/sample, ~49 Mbps, -50%)
+    kOpusAdpcm = 3,  // Ultra-Light 4-bit IMA-ADPCM (~12.5 Mbps, -85%, zero external deps)
+};
+
 struct AudioTxStats {
     uint64_t packets_sent = 0;
     uint64_t bytes_sent = 0;
@@ -36,9 +43,14 @@ public:
 
     void set_latency_ms(uint32_t ms);
     uint32_t latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
-    // Transparent 24-bit packed PCM network compression (-25% bandwidth vs Float32, full 144 dB dynamic range).
-    void set_wire_pcm24(bool enabled) { wire_pcm24_.store(enabled, std::memory_order_release); }
-    bool wire_pcm24() const { return wire_pcm24_.load(std::memory_order_acquire); }
+    // Live-switchable audio compression profile (PCM32F / PCM24 / PCM16 / Ultra-Light ADPCM).
+    void set_codec_profile(AudioCodecProfile p) { codec_profile_.store(uint8_t(p), std::memory_order_release); }
+    AudioCodecProfile codec_profile() const { return AudioCodecProfile(codec_profile_.load(std::memory_order_acquire)); }
+    // Convenience wrapper for 24-bit packed PCM compression.
+    void set_wire_pcm24(bool enabled) {
+        set_codec_profile(enabled ? AudioCodecProfile::kPcm24 : AudioCodecProfile::kPcm32F);
+    }
+    bool wire_pcm24() const { return codec_profile() == AudioCodecProfile::kPcm24; }
     AudioReliabilityProfile profile(AudioFormat2 fmt) const;
 
     // Pushes samples of ONE channel (contiguous in `fmt`). `media_ts` is the master-clock position of
@@ -70,7 +82,7 @@ private:
     size_t mtu_;
     SendFn send_;
     std::atomic<uint32_t> latency_ms_{20};
-    std::atomic<bool> wire_pcm24_{false};
+    std::atomic<uint8_t> codec_profile_{uint8_t(AudioCodecProfile::kPcm32F)};
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
     std::mutex create_mu_;
 

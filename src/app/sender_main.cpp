@@ -83,6 +83,7 @@ void print_usage(const char* prog) {
         "  --duration <sec>         Stop after S seconds (default: 0=infinite)\n"
         "  --audio-only, --no-video Send no video at all: only AUDIO2 packets + MasterClock sync\n"
         "                           (use with --audio-device virtual|test or --audio tone)\n"
+        "  --audio-codec <fmt>      AoIP compression: pcm32 (Float32), pcm24 (-25%%), pcm16 (-50%%), opus (ADPCM -85%%)\n"
         "  --duplex ...             Full-duplex 64x64 AoIP node (see: sender --duplex --help)\n"
         "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
@@ -154,6 +155,7 @@ int main(int argc, char** argv) {
     int audio_channels = 2;
     int audio_latency_ms = 20;
     int audio_rate = 48000;
+    lv::AudioCodecProfile audio_codec = lv::AudioCodecProfile::kPcm32F;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -228,6 +230,17 @@ int main(int argc, char** argv) {
         else if (arg == "--audio-channels") { audio_channels = std::atoi(need_val("--audio-channels")); audio_channels_explicit = true; }
         else if (arg == "--audio-latency") audio_latency_ms = std::atoi(need_val("--audio-latency"));
         else if (arg == "--audio-rate") audio_rate = std::atoi(need_val("--audio-rate"));
+        else if (arg == "--audio-codec") {
+            const std::string c = need_val("--audio-codec");
+            if (c == "pcm32" || c == "pcm32f" || c == "f32") audio_codec = lv::AudioCodecProfile::kPcm32F;
+            else if (c == "pcm24") audio_codec = lv::AudioCodecProfile::kPcm24;
+            else if (c == "pcm16") audio_codec = lv::AudioCodecProfile::kPcm16;
+            else if (c == "opus" || c == "adpcm") audio_codec = lv::AudioCodecProfile::kOpusAdpcm;
+            else {
+                std::fprintf(stderr, "Invalid --audio-codec '%s' (expected pcm32|pcm24|pcm16|opus)\n", c.c_str());
+                return 2;
+            }
+        }
         else if (arg == "--audio") {
             const std::string a = need_val("--audio");
             if (a == "none") audio_mode = lv::AudioCaptureMode::kNone;
@@ -348,6 +361,7 @@ int main(int argc, char** argv) {
                      unsigned(scfg.dest_port));
         return 1;
     }
+    sender.set_audio_codec_profile(audio_codec);
     if (!audio_only && scfg.codec != lv::VideoCodecId::kLanVidDct) {
         if (!sender.prepare_encoder(cp.width, cp.height)) {
             std::fprintf(stderr, "Failed to initialize %s video encoder for %dx%d\n",

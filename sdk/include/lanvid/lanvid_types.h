@@ -259,6 +259,7 @@ typedef struct LV_DuplexConfig {
     char bus_name[64];        /* shared-memory bus (default "LanVidAudioBus_v1") */
     uint32_t rx_headroom_frames; /* frames kept queued for the DAW inputs (0 = auto: max(3 x DAW buffer, 512));
                                     raise on busy hosts to avoid underruns, at the cost of latency */
+    int32_t audio_codec;         /* 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM */
 } LV_DuplexConfig;
 
 typedef struct LV_DuplexStats {

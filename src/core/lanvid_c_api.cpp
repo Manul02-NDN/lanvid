@@ -946,6 +946,14 @@ int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms) 
     return LV_OK;
 }
 
+int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec) {
+    if (!handle || codec < 0 || codec > 3) return LV_ERR_INVALID_ARG;
+    if (handle->sender) {
+        handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(codec));
+    }
+    return LV_OK;
+}
+
 uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle) {
     if (!handle || !handle->sender) return 0;
     return handle->sender->master_samples_now();
@@ -1388,6 +1396,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
     sc.dest_port = cfg->peer_port;
     r = lv_sdk_sender_start(h->tx, &sc);
     if (r != LV_OK) { h->stop_internal(); return r; }
+    lv_sender_set_audio_codec(h->tx, std::clamp<int>(cfg->audio_codec, 0, 3));
 
     lv::ShmAudioHost::Config hc;
     hc.channels = uint32_t(cfg->num_channels);
@@ -1451,6 +1460,14 @@ int lv_duplex_set_latency_ms(LvDuplexHandle* h, uint32_t ms) {
     h->cfg.latency_ms = ms;
     if (h->tx) lv_sender_set_audio_latency_ms(h->tx, ms);
     if (h->rx) lv_receiver_set_audio_latency_ms(h->rx, ms);
+    return LV_OK;
+}
+
+int lv_duplex_set_audio_codec(LvDuplexHandle* h, int codec) {
+    if (!h || codec < 0 || codec > 3) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->cfg.audio_codec = codec;
+    if (h->tx) lv_sender_set_audio_codec(h->tx, codec);
     return LV_OK;
 }
 
@@ -1644,6 +1661,9 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
 
     std::lock_guard<std::mutex> lk(handle->api_mu);
     handle->legacy_cfg = *cfg;
+    if (handle->sender) {
+        handle->sender->set_audio_codec_profile(static_cast<lv::AudioCodecProfile>(std::clamp(cfg->audio_codec, 0, 3)));
+    }
     if (cfg->sim_loss_pct > 0.0 && handle->sender) handle->sender->set_sim_loss_pct(cfg->sim_loss_pct);
 
     if (cfg->audio_mode == LV_AUDIO_LOOPBACK || cfg->audio_mode == LV_AUDIO_MIC) {

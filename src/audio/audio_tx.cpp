@@ -8,6 +8,95 @@
 
 namespace lv {
 
+namespace {
+
+constexpr int kImaIndexTable[16] = {-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8};
+constexpr int kImaStepTable[89] = {
+    7,     8,     9,     10,    11,    12,    13,    14,    16,    17,    19,    21,    23,    25,    28,
+    31,    34,    37,    41,    45,    50,    55,    60,    66,    73,    80,    88,    97,    107,   118,
+    130,   143,   157,   173,   190,   209,   230,   253,   279,   307,   337,   371,   408,   449,   494,
+    544,   598,   658,   724,   796,   876,   963,   1060,  1166,  1282,  1411,  1552,  1707,  1878,  2066,
+    2272,  2499,  2749,  3024,  3327,  3660,  4026,  4428,  4871,  5358,  5894,  6484,  7132,  7845,  8630,
+    9493,  10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767};
+
+// Encodes `n` float32 samples into a self-contained IMA-ADPCM 4-bit block (4B header + ceil((n-1)/2) B).
+void encode_float32_to_adpcm4(const float* in, uint32_t n, std::vector<uint8_t>& out) {
+    out.assign(audio2_payload_bytes(AudioFormat2::kAdpcm4, n), 0);
+    if (n == 0) return;
+    auto to_i16 = [](float f) -> int {
+        const float c = std::clamp(f, -1.0f, 1.0f);
+        return std::clamp<int>(int(std::lrint(double(c) * 32767.0)), -32768, 32767);
+    };
+    int pred = to_i16(in[0]);
+    int idx = 0;
+    out[0] = uint8_t(pred & 0xFF);
+    out[1] = uint8_t((pred >> 8) & 0xFF);
+    out[2] = uint8_t(idx);
+    out[3] = 0;
+    for (uint32_t i = 1; i < n; ++i) {
+        const int target = to_i16(in[i]);
+        int diff = target - pred;
+        uint8_t code = 0;
+        if (diff < 0) { code = 8; diff = -diff; }
+        int step = kImaStepTable[idx];
+        int vpdiff = step >> 3;
+        if (diff >= step) { code |= 4; diff -= step; vpdiff += step; }
+        step >>= 1;
+        if (diff >= step) { code |= 2; diff -= step; vpdiff += step; }
+        step >>= 1;
+        if (diff >= step) { code |= 1; vpdiff += step; }
+        pred = std::clamp(pred + ((code & 8) ? -vpdiff : vpdiff), -32768, 32767);
+        idx = std::clamp(idx + kImaIndexTable[code], 0, 88);
+        const size_t byte_i = 4 + (i - 1) / 2;
+        if (((i - 1) & 1u) == 0u) out[byte_i] = code & 0x0Fu;
+        else out[byte_i] |= uint8_t((code & 0x0Fu) << 4);
+    }
+}
+
+void encode_float32_wire(AudioCodecProfile prof, const float* in, uint32_t n,
+                         AudioFormat2& out_fmt, std::vector<uint8_t>& out) {
+    switch (prof) {
+        case AudioCodecProfile::kPcm24: {
+            out_fmt = AudioFormat2::kPcm24Packed;
+            out.resize(size_t(n) * 3);
+            for (uint32_t i = 0; i < n; ++i) {
+                const float c = std::clamp(in[i], -1.0f, 1.0f);
+                const int32_t q = std::clamp<int32_t>(int32_t(std::lrint(double(c) * 8388607.0)), -8388608, 8388607);
+                const uint32_t u = uint32_t(q) & 0xFFFFFFu;
+                out[3 * i + 0] = uint8_t(u & 0xFFu);
+                out[3 * i + 1] = uint8_t((u >> 8) & 0xFFu);
+                out[3 * i + 2] = uint8_t((u >> 16) & 0xFFu);
+            }
+            return;
+        }
+        case AudioCodecProfile::kPcm16: {
+            out_fmt = AudioFormat2::kPcm16;
+            out.resize(size_t(n) * 2);
+            for (uint32_t i = 0; i < n; ++i) {
+                const float c = std::clamp(in[i], -1.0f, 1.0f);
+                const int16_t q = int16_t(std::clamp<int>(int(std::lrint(double(c) * 32767.0)), -32768, 32767));
+                out[2 * i + 0] = uint8_t(q & 0xFF);
+                out[2 * i + 1] = uint8_t((q >> 8) & 0xFF);
+            }
+            return;
+        }
+        case AudioCodecProfile::kOpusAdpcm: {
+            out_fmt = AudioFormat2::kAdpcm4;
+            encode_float32_to_adpcm4(in, n, out);
+            return;
+        }
+        case AudioCodecProfile::kPcm32F:
+        default: {
+            out_fmt = AudioFormat2::kFloat32;
+            out.resize(size_t(n) * 4);
+            std::memcpy(out.data(), in, size_t(n) * 4);
+            return;
+        }
+    }
+}
+
+}  // namespace
+
 struct AudioTxEngine::Stream {
     std::mutex mu;
     uint32_t seq = 0;  // next sequence number
@@ -99,19 +188,32 @@ void AudioTxEngine::send_payload(uint32_t seq, uint16_t stream, uint32_t wallclo
 void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, uint32_t n,
                               AudioFormat2 fmt, uint64_t ts, uint32_t wallclock_us,
                               const AudioReliabilityProfile& prof) {
-    const size_t bps = audio2_bytes_per_sample(fmt);
-    std::vector<uint8_t> payload(kAudioHeader2Size + size_t(n) * bps);
+    // Live wire compression profile (only applies when caller feeds Float32; preserves raw PCM16/24 callers).
+    static thread_local std::vector<uint8_t> encoded;
+    AudioFormat2 wire_fmt = fmt;
+    const uint8_t* wire_bytes = samples;
+    size_t body = audio2_payload_bytes(fmt, n);
+    if (fmt == AudioFormat2::kFloat32) {
+        const AudioCodecProfile cp = codec_profile();
+        if (cp != AudioCodecProfile::kPcm32F) {
+            encode_float32_wire(cp, reinterpret_cast<const float*>(samples), n, wire_fmt, encoded);
+            wire_bytes = encoded.data();
+            body = encoded.size();
+        }
+    }
+
+    std::vector<uint8_t> payload(kAudioHeader2Size + body);
     AudioHeader2 ah;
     ah.stream_id = ch;
     ah.channel_index = ch;
     ah.sample_rate = rate_;
     ah.num_samples = uint16_t(n);
-    ah.sample_format = fmt;
+    ah.sample_format = wire_fmt;
     ah.flags = 0;
     ah.media_timestamp_samples = ts;
     ah.wallclock_us = wallclock_us;
     write_audio_header2(payload.data(), ah);
-    std::memcpy(payload.data() + kAudioHeader2Size, samples, size_t(n) * bps);
+    std::memcpy(payload.data() + kAudioHeader2Size, wire_bytes, body);
 
     const uint32_t seq = s.seq++;
     // history for NACK servicing
@@ -130,27 +232,27 @@ void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, ui
     // ---- interleaved XOR FEC ----
     const uint32_t k = prof.fec_k, d = prof.fec_interleave;
     if (k == 0) return;
-    // Contiguity: members must be equal-sized, back to back in media time.
-    if (s.block_count > 0 && (n != s.last_n || ts != s.last_ts + s.last_n)) {
+    // Contiguity: members must be equal-sized (and same wire format), back to back in media time.
+    if (s.block_count > 0 && (n != s.last_n || ts != s.last_ts + s.last_n ||
+                              s.parity[0].size() != body)) {
         s.block_base = seq;
         s.block_count = 0;
     }
     const uint32_t idx = s.block_count;  // == seq - block_base
     const uint32_t col = idx % d;
     auto& acc = s.parity[col];
-    const size_t body = size_t(n) * bps;
     if (idx < d) {
-        acc.assign(samples, samples + body);
+        acc.assign(wire_bytes, wire_bytes + body);
         s.member_ts[col] = ts;
         s.member_seq[col] = seq;
     } else {
-        for (size_t i = 0; i < body; ++i) acc[i] ^= samples[i];
+        for (size_t i = 0; i < body; ++i) acc[i] ^= wire_bytes[i];
     }
     s.last_ts = ts;
     s.last_n = n;
     ++s.block_count;
     if (idx >= (k - 1) * d) {  // last member of this column
-        emit_parity(s, ch, col, fmt, n, wallclock_us);
+        emit_parity(s, ch, col, wire_fmt, n, wallclock_us);
     }
     if (s.block_count >= k * d) {
         s.block_base = seq + 1;
@@ -201,25 +303,6 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
     Stream& s = *sp;
     std::lock_guard<std::mutex> lk(s.mu);
 
-    // Optional transparent Float32 -> 24-bit Packed PCM wire compression (-25% traffic, 144 dB range).
-    static thread_local std::vector<uint8_t> pcm24_buf;
-    const uint8_t* src = static_cast<const uint8_t*>(samples);
-    if (fmt == AudioFormat2::kFloat32 && wire_pcm24_.load(std::memory_order_acquire)) {
-        pcm24_buf.resize(size_t(num_samples) * 3);
-        const float* fp = static_cast<const float*>(samples);
-        for (uint32_t i = 0; i < num_samples; ++i) {
-            const float clamped = std::clamp(fp[i], -1.0f, 1.0f);
-            int32_t q = int32_t(std::lrint(double(clamped) * 8388607.0));
-            q = std::clamp<int32_t>(q, -8388608, 8388607);
-            const uint32_t u = uint32_t(q) & 0xFFFFFFu;
-            pcm24_buf[3 * i + 0] = uint8_t(u & 0xFFu);
-            pcm24_buf[3 * i + 1] = uint8_t((u >> 8) & 0xFFu);
-            pcm24_buf[3 * i + 2] = uint8_t((u >> 16) & 0xFFu);
-        }
-        src = pcm24_buf.data();
-        fmt = AudioFormat2::kPcm24Packed;
-    }
-
     // Format change or discontinuity closes the partial chunk first.
     if (s.stage_samples && (fmt != s.fmt || media_ts != s.next_ts)) flush_stream(s, channel, wallclock_us);
     const uint32_t lat = latency_ms_.load(std::memory_order_relaxed);
@@ -232,6 +315,7 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
     update_loss_estimate();
 
     const size_t bps = audio2_bytes_per_sample(fmt);
+    const uint8_t* src = static_cast<const uint8_t*>(samples);
     uint64_t ts = media_ts;
     uint32_t left = num_samples;
     while (left) {

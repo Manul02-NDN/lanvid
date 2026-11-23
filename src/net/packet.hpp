@@ -136,6 +136,7 @@ enum class AudioFormat2 : uint8_t {
     kPcm16 = 1,
     kPcm24Packed = 2,  // 3 bytes / sample, little-endian signed
     kFloat32 = 3,
+    kAdpcm4 = 4,       // block-independent 4-bit IMA-ADPCM (4B header + ceil((n-1)/2) B, ~8x vs Float32)
 };
 
 enum AudioFlags2 : uint8_t {
@@ -145,7 +146,18 @@ enum AudioFlags2 : uint8_t {
 };
 
 inline size_t audio2_bytes_per_sample(AudioFormat2 f) {
-    return f == AudioFormat2::kPcm16 ? 2 : (f == AudioFormat2::kPcm24Packed ? 3 : 4);
+    return f == AudioFormat2::kPcm16 ? 2 : (f == AudioFormat2::kPcm24Packed ? 3 : (f == AudioFormat2::kAdpcm4 ? 1 : 4));
+}
+
+inline size_t audio2_payload_bytes(AudioFormat2 f, uint32_t num_samples) {
+    if (num_samples == 0) return 0;
+    switch (f) {
+        case AudioFormat2::kPcm16:       return size_t(num_samples) * 2;
+        case AudioFormat2::kPcm24Packed: return size_t(num_samples) * 3;
+        case AudioFormat2::kFloat32:     return size_t(num_samples) * 4;
+        case AudioFormat2::kAdpcm4:      return 4u + (num_samples > 1 ? (size_t(num_samples - 1) + 1) / 2 : 0u);
+    }
+    return size_t(num_samples) * 4;
 }
 
 // 24-byte header (the requested fields sum to 24 bytes, not 16). Little-endian:
