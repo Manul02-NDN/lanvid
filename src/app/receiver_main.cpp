@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
             return 0;
         } else if (arg == "-V" || arg == "--version") {
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.4.0"
+#define LANVID_VERSION_STRING "2.5.0"
 #endif
             std::printf("LanVid receiver v%s (SIMD: %s)\n", LANVID_VERSION_STRING,
                         lv::dct_kernels_best().name);

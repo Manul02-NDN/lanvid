@@ -298,7 +298,10 @@ int main(int argc, char** argv) {
     wc.lpszClassName = L"LanVidStudioWindowClass";
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"LanVid Studio v2.4.0 — Ultra-Low Latency LAN Video & Audio",
+#ifndef LANVID_VERSION_STRING
+#define LANVID_VERSION_STRING "2.5.0"
+#endif
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"LanVid Studio v" LANVID_VERSION_STRING L" — Ultra-Low Latency LAN Video & Audio",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 780, nullptr,
                                 nullptr, wc.hInstance, nullptr);
     if (!hwnd) return 1;

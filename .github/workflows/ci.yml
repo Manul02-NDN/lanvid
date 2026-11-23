@@ -129,7 +129,7 @@ jobs:
 
   build-and-test-macos-ios:
     name: macOS & iOS (Apple Silicon NEON + .pkg + XCFramework + SwiftPM)
-    runs-on: macos-15
+    runs-on: macos-14
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

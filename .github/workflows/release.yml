@@ -69,7 +69,7 @@ jobs:
 
   release-macos-ios:
     name: Release macOS & iOS (Universal)
-    runs-on: macos-15
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 

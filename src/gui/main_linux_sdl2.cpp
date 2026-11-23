@@ -165,8 +165,11 @@ int main(int argc, char** argv) {
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
+#ifndef LANVID_VERSION_STRING
+#define LANVID_VERSION_STRING "2.5.0"
+#endif
     SdlGlHost host;
-    host.win = SDL_CreateWindow("LanVid Studio v2.4.0 — Ultra-Low Latency LAN Video & Audio",
+    host.win = SDL_CreateWindow("LanVid Studio v" LANVID_VERSION_STRING " — Ultra-Low Latency LAN Video & Audio",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 780,
                                 SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!host.win) {

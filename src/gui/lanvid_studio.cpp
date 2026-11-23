@@ -772,7 +772,7 @@ void LanVidStudioApp::draw_sidebar() {
     ImGui::BeginChild("##Sidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.4.0"
+#define LANVID_VERSION_STRING "2.5.0"
 #endif
     ImGui::TextColored(kColCyan, "LanVid");
     ImGui::SameLine();
@@ -1848,7 +1848,7 @@ void LanVidStudioApp::draw_top_bar() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, kColSidebar);
     ImGui::BeginChild("##TopBar", ImVec2(0, 42), true, ImGuiWindowFlags_NoScrollbar);
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.4.0"
+#define LANVID_VERSION_STRING "2.5.0"
 #endif
     const char* mode_names[] = {"SENDER", "RECEIVER", "FULL-DUPLEX 64x64", "AUDIO MATRIX"};
     const char* cur_mode = mode_names[std::clamp(cfg_.active_tab, 0, 3)];
