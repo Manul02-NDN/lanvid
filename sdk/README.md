@@ -1,4 +1,4 @@
-# LanVidSDK v2.5.0 — Cross-Platform Ultra-Low Latency LAN Video & Audio SDK
+# LanVidSDK v2.6.0 — Cross-Platform Ultra-Low Latency LAN Video & Audio SDK
 
 **LanVidSDK** надає єдине C++20/C-ABI ядро (intra-only slice-паралельний AVX2/NEON кодек, UDP + XOR FEC + AIMD, 48 kHz PCM16/F32 аудіо, LAN Auto-Discovery) для інтеграції у власні застосунки під **Windows, Linux, macOS, iOS, Android та Python**.
 
@@ -34,9 +34,9 @@ tx.push_frame(bgra_ptr, 1920, 1080);
 
 ### 2. Swift — iOS 15+ та macOS 12+ (`LanVidKit` SwiftPM + XCFramework + One-Click `.pkg`)
 
-#### Встановлення на MacBook в один клік (`LanVidSDK-v2.5.0-macOS.pkg`)
-1. На MacBook (Apple Silicon M1–M4 або Intel) запустіть `python3 sdk/build_sdk.py` або `./sdk/apple/build_macos_pkg.sh` (або подвійний клік по `sdk/apple/installer/Install_LanVidSDK.command` у Finder) — це згенерує **`dist/apple/LanVidSDK-v2.5.0-macOS.pkg`** та **`dist/apple/LanVidSDK-v2.5.0-macOS.dmg`**.
-2. Відкрийте `LanVidSDK-v2.5.0-macOS.pkg` подвійним кліком у Finder — майстер `Installer.app` автоматично:
+#### Встановлення на MacBook в один клік (`LanVidSDK-v2.6.0-macOS.pkg`)
+1. На MacBook (Apple Silicon M1–M4 або Intel) запустіть `python3 sdk/build_sdk.py` або `./sdk/apple/build_macos_pkg.sh` (або подвійний клік по `sdk/apple/installer/Install_LanVidSDK.command` у Finder) — це згенерує **`dist/apple/LanVidSDK-v2.6.0-macOS.pkg`** та **`dist/apple/LanVidSDK-v2.6.0-macOS.dmg`**.
+2. Відкрийте `LanVidSDK-v2.6.0-macOS.pkg` подвійним кліком у Finder — майстер `Installer.app` автоматично:
    - перевірить архітектуру (`arm64` NEON / `x86_64` AVX2), версію macOS (`>= 12.0`), порти UDP `5000`/`5099` та Xcode Command Line Tools;
    - встановить універсальну бібліотеку, `LanVidCore.xcframework`, `LanVidKit` Swift Package, CMake/pkg-config симлінки (вкл. `/opt/homebrew/`), `import lanvid_sdk` для Python 3 та винятки в macOS Firewall.
 3. Перевірте встановлення, активний SIMD та loopback self-test однією командою у Терміналі:
@@ -63,9 +63,9 @@ try sender.start(config: .init(destHost: peers.first?.ip ?? "192.168.1.50"))
 try sender.push(sampleBuffer: sampleBuffer)
 ```
 
-### 3. Kotlin — Android (`lanvid-sdk-2.5.0.aar`)
+### 3. Kotlin — Android (`lanvid-sdk-2.6.0.aar`)
 
-Додайте `dist/android/lanvid-sdk-2.5.0.aar` у `libs/` та `implementation(files("libs/lanvid-sdk-2.5.0.aar"))`:
+Додайте `dist/android/lanvid-sdk-2.6.0.aar` у `libs/` та `implementation(files("libs/lanvid-sdk-2.6.0.aar"))`:
 
 ```kotlin
 import com.lanvid.sdk.*
@@ -122,14 +122,14 @@ LV_AudioChannelStats st; lv_receiver_get_channel_stats(rx, 17, &st); /* dBFS, в
 
 ---
 
-## Структура дистрибутиву `dist/LanVidSDK-v2.5.0/`
+## Структура дистрибутиву `dist/LanVidSDK-v2.6.0/`
 
 - `include/lanvid/` — публічні заголовки `lanvid_export.h`, `lanvid_types.h`, `lanvid_sdk.h`, `lanvid.hpp`
 - `bin/` та `lib/` — скомпільована бібліотека `lanvid_core.dll` / `liblanvid_core.so` / `liblanvid_core.dylib`
 - `lib/cmake/LanVidSDK/` — `LanVidSDKConfig.cmake`, `LanVidSDKTargets.cmake`
 - `lib/pkgconfig/lanvid-sdk.pc` — файл конфігурації для `pkg-config`
 - `apple/` — `Package.swift`, `LanVidKit`, `build_xcframework.sh`, SwiftUI-приклади (`iOSCameraSender`, `MacReceiverMetal`)
-- `android/` — `lanvid-sdk-2.5.0.aar` (`arm64-v8a`, `armeabi-v7a`, `x86_64`) + Kotlin/JNI вихідний модуль
+- `android/` — `lanvid-sdk-2.6.0.aar` (`arm64-v8a`, `armeabi-v7a`, `x86_64`) + Kotlin/JNI вихідний модуль
 - `cpp/` та `examples/cpp_client/` — C++17 wrapper і зовнішній приклад для `find_package(LanVidSDK)`
 - `python/` — `lanvid_sdk.py`
 

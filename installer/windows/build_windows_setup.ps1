@@ -6,6 +6,8 @@ $buildDir = Join-Path $root "build"
 $winDir = $PSScriptRoot
 $stageDir = Join-Path $winDir "_stage"
 $zipPath = Join-Path $winDir "lanvid_payload.zip"
+$version = "2.6.0"
+$outExeVersioned = Join-Path $winDir "LanVid_Setup_v$version.exe"
 $outExe = Join-Path $winDir "LanVid_Setup.exe"
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath
@@ -44,5 +46,6 @@ cmd /c $cmd
 if ($LASTEXITCODE -ne 0) { throw "Failed to compile LanVid_Setup.exe (exit=$LASTEXITCODE)" }
 
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath, (Join-Path $winDir "setup_payload.res"), (Join-Path $winDir "setup_wizard.obj")
-$item = Get-Item $outExe
-Write-Host ("Built {0} ({1:N0} bytes)" -f $item.FullName, $item.Length)
+Copy-Item -Force $outExe $outExeVersioned
+$item = Get-Item $outExeVersioned
+Write-Host ("Built {0} and {1} ({2:N0} bytes)" -f $item.FullName, $outExe, $item.Length)

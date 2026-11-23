@@ -5,7 +5,7 @@ if(POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING "" FORCE)
 endif()
 
-project(lanvid VERSION 2.5.0 LANGUAGES CXX)
+project(lanvid VERSION 2.6.0 LANGUAGES CXX)
 if(APPLE)
   enable_language(OBJCXX)
 endif()

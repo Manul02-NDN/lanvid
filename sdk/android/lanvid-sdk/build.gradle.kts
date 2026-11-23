@@ -53,7 +53,7 @@ dependencies {
 tasks.register("exportAar") {
     dependsOn("assembleRelease")
     val srcAar = layout.buildDirectory.file("outputs/aar/lanvid-sdk-release.aar")
-    val dstAar = rootProject.layout.projectDirectory.file("../../dist/android/lanvid-sdk-2.5.0.aar")
+    val dstAar = rootProject.layout.projectDirectory.file("../../dist/android/lanvid-sdk-2.6.0.aar")
     doLast {
         val out = dstAar.asFile
         out.parentFile.mkdirs()

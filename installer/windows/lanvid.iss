@@ -2,7 +2,7 @@
 ; Build with: iscc installer\windows\lanvid.iss
 
 #define MyAppName "LanVid Studio"
-#define MyAppVersion "2.5.0"
+#define MyAppVersion "2.6.0"
 #define MyAppPublisher "LanVid Project"
 #define MyAppExeName "lanvid_app.exe"
 
@@ -10,12 +10,15 @@
 AppId={{8E74A82C-4D39-4E53-9B3C-6F82D05147B2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName=LanVid Studio {#MyAppVersion}
+VersionInfoVersion=2.6.0.0
+VersionInfoProductVersion=2.6.0.0
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\LanVid
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=.
-OutputBaseFilename=LanVid_Setup
+OutputBaseFilename=LanVid_Setup_v{#MyAppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

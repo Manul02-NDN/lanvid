@@ -1442,7 +1442,7 @@ void LanVidStudioApp::draw_sidebar() {
     ImGui::BeginChild("##Sidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.5.0"
+#define LANVID_VERSION_STRING "2.6.0"
 #endif
     draw_gradient_icon_tile("##BrandTile", IconKind::kWaveform, 36.0f, -1, false);
     ImGui::SameLine();
@@ -4161,6 +4161,13 @@ void LanVidStudioApp::draw_settings_tab() {
             config_dirty_ = true;
         }
     }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextColored(kColAccentPurp, "Про програму");
+    ImGui::TextColored(kColTextMain, "LanVid Studio v%s", LANVID_VERSION_STRING);
+    ImGui::TextDisabled("Opus CELT 48 kHz · MIDI2 Virtual DAW Port · Personal Monitor Bus · Soft Lavender UI");
     ImGui::EndGroup();
 
     end_glass_card();
