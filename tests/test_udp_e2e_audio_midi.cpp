@@ -238,7 +238,7 @@ TEST(udp_end_to_end_64ch_audio_and_midi_sync) {
         if (hi == 0x90 && e.d1 != 99) {
             ++balance[e.d1];
             int64_t best = INT64_MAX;
-            for (int64_t imp : impulses) best = std::min(best, std::llabs(imp - e.g_pos));
+            for (int64_t imp : impulses) best = std::min<int64_t>(best, int64_t(std::llabs(imp - e.g_pos)));
             if (e.g_pos >= 0 && best != INT64_MAX && best < int64_t(kRate / 10)) {
                 ++matched;
                 max_sync_ms = std::max(max_sync_ms, double(best) * 1000.0 / kRate);
