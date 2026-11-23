@@ -36,8 +36,8 @@ public:
     // Renders one Dear ImGui frame covering the entire OS window.
     void render_frame();
 
-    // Applies Soft Pastel Lavender / Blue-Purple (Soft Glass / Claymorphic) visual style.
-    static void apply_theme();
+    // Applies Soft Pastel Lavender (default) or Dark Studio visual style.
+    static void apply_theme(bool dark = false);
 
 private:
     enum class IconKind {
@@ -90,6 +90,11 @@ private:
 
     void draw_top_bar();
     void draw_sidebar();
+    void draw_connect_tab();
+    void draw_patchbay_tab();
+    void draw_devices_tab();
+    void draw_settings_tab();
+    void draw_add_device_popups();
     void draw_studio_config_panel();
     // Jitter-buffer latency mode (Fixed (Ethernet) / Adaptive (Wi-Fi)) + live "ACTUAL BUFFER" telemetry.
     void draw_latency_mode_controls(const char* id, float combo_width);

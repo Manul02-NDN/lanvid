@@ -291,6 +291,9 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "show_hud", cfg.show_hud);
     read_str(j, "preview_backend", cfg.preview_backend);
     read_int(j, "active_tab", cfg.active_tab);
+    read_int(j, "connect_role", cfg.connect_role);
+    read_bool(j, "dark_theme", cfg.dark_theme);
+    read_bool(j, "matrix_stereo_pairs", cfg.matrix_stereo_pairs);
     read_int(j, "matrix_buffer_size", cfg.matrix_buffer_size);
     read_bool(j, "matrix_feedback_guard", cfg.matrix_feedback_guard);
     {
@@ -322,6 +325,7 @@ bool load_app_config(AppConfig& cfg) {
     cfg.dpx_peer_port = std::clamp(cfg.dpx_peer_port, 1024, 65535);
     cfg.dpx_listen_port = std::clamp(cfg.dpx_listen_port, 1024, 65535);
     cfg.active_tab = std::clamp(cfg.active_tab, 0, 3);
+    cfg.connect_role = std::clamp(cfg.connect_role, 0, 2);
     cfg.matrix_buffer_size = (cfg.matrix_buffer_size <= 128) ? 128 : (cfg.matrix_buffer_size <= 256 ? 256 : 512);
     return true;
 }
@@ -375,6 +379,9 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"show_hud\": " << (cfg.show_hud ? "true" : "false") << ",\n"
         << "  \"preview_backend\": \"" << json_esc(cfg.preview_backend) << "\",\n"
         << "  \"active_tab\": " << cfg.active_tab << ",\n"
+        << "  \"connect_role\": " << cfg.connect_role << ",\n"
+        << "  \"dark_theme\": " << (cfg.dark_theme ? "true" : "false") << ",\n"
+        << "  \"matrix_stereo_pairs\": " << (cfg.matrix_stereo_pairs ? "true" : "false") << ",\n"
         << "  \"matrix_buffer_size\": " << cfg.matrix_buffer_size << ",\n"
         << "  \"matrix_feedback_guard\": " << (cfg.matrix_feedback_guard ? "true" : "false") << ",\n"
         << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"

@@ -40,34 +40,35 @@ void push_hist(float* arr, int len, float val) {
     arr[len - 1] = val;
 }
 
-// Soft Pastel Lavender / Blue-Purple Palette (Soft Glass / Claymorphic UI)
+// Dual-Theme Palette: Soft Pastel Lavender (default) + Dark Studio (toggleable in Settings)
 constexpr float kPi = 3.14159265358979323846f;
 
-constexpr ImVec4 kColBgTopLeft   = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
-constexpr ImVec4 kColBgTopRight  = ImVec4(0.878f, 0.906f, 1.000f, 1.00f);  // #E0E7FF
-constexpr ImVec4 kColBgBotRight  = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);  // #EDE9FE
-constexpr ImVec4 kColBgBotLeft   = ImVec4(0.894f, 0.878f, 1.000f, 1.00f);  // #E4E0FF
-constexpr ImVec4 kColSidebar     = ImVec4(0.961f, 0.953f, 1.000f, 0.92f);  // #F5F3FF @ 0.92
-constexpr ImVec4 kColCard        = ImVec4(1.000f, 1.000f, 1.000f, 0.97f);  // #FFFFFF
-constexpr ImVec4 kColCardSoft    = ImVec4(0.953f, 0.937f, 0.996f, 0.96f);  // #F3EFFE
-constexpr ImVec4 kColBorder      = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
-constexpr ImVec4 kColAccentBlue  = ImVec4(0.376f, 0.647f, 0.980f, 1.00f);  // #60A5FA
-constexpr ImVec4 kColAccentSky   = ImVec4(0.231f, 0.510f, 0.965f, 1.00f);  // #3B82F6
-constexpr ImVec4 kColAccentInd   = ImVec4(0.388f, 0.400f, 0.945f, 1.00f);  // #6366F1
-constexpr ImVec4 kColAccentNode  = ImVec4(0.545f, 0.361f, 0.965f, 1.00f);  // #8B5CF6
-constexpr ImVec4 kColAccentPurp  = ImVec4(0.576f, 0.200f, 0.918f, 1.00f);  // #9333EA
-constexpr ImVec4 kColAccentViol  = ImVec4(0.659f, 0.333f, 0.969f, 1.00f);  // #A855F7
-constexpr ImVec4 kColGreen       = ImVec4(0.063f, 0.725f, 0.506f, 1.00f);  // #10B981
-constexpr ImVec4 kColAmber       = ImVec4(0.961f, 0.620f, 0.043f, 1.00f);  // #F59E0B
-constexpr ImVec4 kColPink        = ImVec4(0.925f, 0.282f, 0.600f, 1.00f);  // #EC4899
-constexpr ImVec4 kColRed         = ImVec4(0.937f, 0.267f, 0.267f, 1.00f);  // #EF4444
-constexpr ImVec4 kColTextMain    = ImVec4(0.118f, 0.106f, 0.294f, 1.00f);  // #1E1B4B
-constexpr ImVec4 kColTextMuted   = ImVec4(0.486f, 0.451f, 0.600f, 1.00f);  // #7C7399
-constexpr ImVec4 kColWhite       = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);  // #FFFFFF
+bool g_dark_theme = false;
 
-// Compatibility aliases so existing semantic references stay crystal-clear
-constexpr ImVec4 kColCyan = kColAccentInd;
-constexpr ImVec4 kColTeal = kColAccentPurp;
+ImVec4 kColBgTopLeft   = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
+ImVec4 kColBgTopRight  = ImVec4(0.878f, 0.906f, 1.000f, 1.00f);  // #E0E7FF
+ImVec4 kColBgBotRight  = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);  // #EDE9FE
+ImVec4 kColBgBotLeft   = ImVec4(0.894f, 0.878f, 1.000f, 1.00f);  // #E4E0FF
+ImVec4 kColSidebar     = ImVec4(0.961f, 0.953f, 1.000f, 0.92f);  // #F5F3FF @ 0.92
+ImVec4 kColCard        = ImVec4(1.000f, 1.000f, 1.000f, 0.97f);  // #FFFFFF
+ImVec4 kColCardSoft    = ImVec4(0.953f, 0.937f, 0.996f, 0.96f);  // #F3EFFE
+ImVec4 kColBorder      = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
+ImVec4 kColAccentBlue  = ImVec4(0.376f, 0.647f, 0.980f, 1.00f);  // #60A5FA
+ImVec4 kColAccentSky   = ImVec4(0.231f, 0.510f, 0.965f, 1.00f);  // #3B82F6
+ImVec4 kColAccentInd   = ImVec4(0.388f, 0.400f, 0.945f, 1.00f);  // #6366F1
+ImVec4 kColAccentNode  = ImVec4(0.545f, 0.361f, 0.965f, 1.00f);  // #8B5CF6
+ImVec4 kColAccentPurp  = ImVec4(0.576f, 0.200f, 0.918f, 1.00f);  // #9333EA
+ImVec4 kColAccentViol  = ImVec4(0.659f, 0.333f, 0.969f, 1.00f);  // #A855F7
+ImVec4 kColGreen       = ImVec4(0.063f, 0.725f, 0.506f, 1.00f);  // #10B981
+ImVec4 kColAmber       = ImVec4(0.961f, 0.620f, 0.043f, 1.00f);  // #F59E0B
+ImVec4 kColPink        = ImVec4(0.925f, 0.282f, 0.600f, 1.00f);  // #EC4899
+ImVec4 kColRed         = ImVec4(0.937f, 0.267f, 0.267f, 1.00f);  // #EF4444
+ImVec4 kColTextMain    = ImVec4(0.118f, 0.106f, 0.294f, 1.00f);  // #1E1B4B
+ImVec4 kColTextMuted   = ImVec4(0.486f, 0.451f, 0.600f, 1.00f);  // #7C7399
+constexpr ImVec4 kColWhite = ImVec4(1.000f, 1.000f, 1.000f, 1.00f);  // #FFFFFF
+
+ImVec4 kColCyan = kColAccentInd;
+ImVec4 kColTeal = kColAccentPurp;
 
 ImVec4 lerp_col(const ImVec4& a, const ImVec4& b, float t) {
     t = std::clamp(t, 0.0f, 1.0f);
@@ -75,8 +76,13 @@ ImVec4 lerp_col(const ImVec4& a, const ImVec4& b, float t) {
 }
 
 void draw_soft_shadow(ImDrawList* dl, const ImVec2& p0, const ImVec2& p1, float rounding, float elevation = 1.0f) {
-    // Multi-layer soft lavender drop shadow rgba(124, 58, 237, 0.04..0.10)
     const float s = std::max(0.5f, elevation);
+    if (g_dark_theme) {
+        dl->AddRectFilled(ImVec2(p0.x, p0.y + 3.0f * s), ImVec2(p1.x, p1.y + 6.0f * s),
+                          IM_COL32(0, 0, 0, 55), rounding + 2.0f);
+        return;
+    }
+    // Multi-layer soft lavender drop shadow rgba(124, 58, 237, 0.04..0.10)
     dl->AddRectFilled(ImVec2(p0.x - 1.0f * s, p0.y + 3.0f * s), ImVec2(p1.x + 1.0f * s, p1.y + 7.0f * s),
                       IM_COL32(124, 58, 237, 10), rounding + 2.0f);
     dl->AddRectFilled(ImVec2(p0.x, p0.y + 2.0f * s), ImVec2(p1.x, p1.y + 4.5f * s),
@@ -138,8 +144,8 @@ bool gradient_pill_button(const char* label, const ImVec2& req_size = ImVec2(0, 
     ImVec4 ca = col_a;
     ImVec4 cb = col_b;
     if (held) {
-        ca = lerp_col(ca, kColTextMain, 0.14f);
-        cb = lerp_col(cb, kColTextMain, 0.14f);
+        ca = lerp_col(ca, ImVec4(0.08f, 0.08f, 0.16f, 1.0f), 0.18f);
+        cb = lerp_col(cb, ImVec4(0.08f, 0.08f, 0.16f, 1.0f), 0.18f);
     } else if (hovered) {
         ca = lerp_col(ca, kColWhite, 0.14f);
         cb = lerp_col(cb, kColWhite, 0.10f);
@@ -168,13 +174,57 @@ bool status_pill_button(const char* label, bool active, const ImVec2& req_size =
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float r = h * 0.5f;
-    const ImU32 bg = hovered ? IM_COL32(237, 233, 254, 255) : IM_COL32(255, 255, 255, 245);
+    const ImU32 bg = g_dark_theme
+                         ? (hovered ? IM_COL32(38, 46, 66, 255) : IM_COL32(26, 32, 46, 255))
+                         : (hovered ? IM_COL32(237, 233, 254, 255) : IM_COL32(255, 255, 255, 245));
+    const ImU32 brd = hovered ? ImGui::ColorConvertFloat4ToU32(kColAccentNode)
+                              : ImGui::ColorConvertFloat4ToU32(kColBorder);
     dl->AddRectFilled(p0, p1, bg, r);
-    dl->AddRect(p0, p1, hovered ? IM_COL32(167, 139, 250, 220) : IM_COL32(221, 214, 254, 255), r, 0, 1.0f);
+    dl->AddRect(p0, p1, brd, r, 0, 1.0f);
     const ImVec2 tpos(p0.x + (w - tsz.x) * 0.5f, p0.y + (h - tsz.y) * 0.5f);
     const ImU32 tc = ImGui::ColorConvertFloat4ToU32(kColTextMain);
     if (disp_end) dl->AddText(tpos, tc, label, disp_end);
     else dl->AddText(tpos, tc, label);
+    return clicked;
+}
+
+bool selectable_choice_card(const char* id, const char* title, const char* subtitle, bool selected,
+                            const ImVec2& req_size) {
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float w = (req_size.x > 0.0f) ? req_size.x : std::max(120.0f, avail.x);
+    const float h = (req_size.y > 0.0f) ? req_size.y : 64.0f;
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const ImVec2 p1(p0.x + w, p0.y + h);
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float r = 14.0f;
+
+    if (selected) {
+        draw_soft_shadow(dl, p0, p1, r, 1.0f);
+        draw_rounded_gradient_rect(dl, p0, p1, r, kColAccentInd, kColAccentViol, false);
+        dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 75), r, 0, 1.0f);
+    } else {
+        draw_soft_shadow(dl, p0, p1, r, hovered ? 0.9f : 0.55f);
+        const ImU32 bg = g_dark_theme
+                             ? (hovered ? IM_COL32(32, 39, 56, 255) : IM_COL32(22, 27, 38, 255))
+                             : (hovered ? IM_COL32(245, 242, 255, 255) : IM_COL32(255, 255, 255, 248));
+        dl->AddRectFilled(p0, p1, bg, r);
+        dl->AddRect(p0, p1, hovered ? ImGui::ColorConvertFloat4ToU32(kColAccentNode)
+                                    : ImGui::ColorConvertFloat4ToU32(kColBorder),
+                    r, 0, 1.2f);
+    }
+
+    const ImU32 title_col = selected ? IM_COL32(255, 255, 255, 255) : ImGui::ColorConvertFloat4ToU32(kColTextMain);
+    const ImU32 sub_col = selected ? IM_COL32(238, 235, 255, 235) : ImGui::ColorConvertFloat4ToU32(kColTextMuted);
+    dl->AddText(ImVec2(p0.x + 14.0f, p0.y + 12.0f), title_col, title);
+    if (subtitle && subtitle[0]) {
+        dl->AddText(ImVec2(p0.x + 14.0f, p0.y + 34.0f), sub_col, subtitle);
+    }
+    if (selected) {
+        dl->AddCircleFilled(ImVec2(p1.x - 18.0f, p0.y + 18.0f), 6.0f, IM_COL32(255, 255, 255, 245));
+        dl->AddCircleFilled(ImVec2(p1.x - 18.0f, p0.y + 18.0f), 2.8f, ImGui::ColorConvertFloat4ToU32(kColAccentPurp));
+    }
     return clicked;
 }
 
@@ -190,9 +240,9 @@ bool studio_toggle(const char* str_id, bool* v, const ImVec4& active_col = kColA
     if (*v) {
         draw_rounded_gradient_rect(dl, p, p1, r, active_col, kColAccentViol, false);
     } else {
-        dl->AddRectFilled(p, p1, IM_COL32(221, 214, 254, 255), r);
+        dl->AddRectFilled(p, p1, g_dark_theme ? IM_COL32(42, 50, 68, 255) : IM_COL32(221, 214, 254, 255), r);
     }
-    dl->AddRect(p, p1, *v ? IM_COL32(139, 92, 246, 120) : IM_COL32(196, 181, 253, 220), r, 0, 1.0f);
+    dl->AddRect(p, p1, *v ? IM_COL32(139, 92, 246, 120) : ImGui::ColorConvertFloat4ToU32(kColBorder), r, 0, 1.0f);
     const float knob_x = *v ? (p.x + w - r) : (p.x + r);
     dl->AddCircleFilled(ImVec2(knob_x, p.y + r + 1.0f), r - 2.5f, IM_COL32(124, 58, 237, 45));
     dl->AddCircleFilled(ImVec2(knob_x, p.y + r), r - 2.5f, IM_COL32(255, 255, 255, 255));
@@ -371,7 +421,7 @@ void LanVidStudioApp::draw_ring_gauge(const char* title, const char* value_str, 
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
     draw_soft_shadow(dl, p0, p1, 14.0f, 0.85f);
-    dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 250), 14.0f);
+    dl->AddRectFilled(p0, p1, ImGui::ColorConvertFloat4ToU32(kColCard), 14.0f);
     dl->AddRect(p0, p1, ImGui::ColorConvertFloat4ToU32(kColBorder), 14.0f, 0, 1.0f);
 
     const float frac = std::clamp(fraction, 0.0f, 1.0f);
@@ -379,10 +429,10 @@ void LanVidStudioApp::draw_ring_gauge(const char* title, const char* value_str, 
     const float thick = std::max(5.5f, ring_r * 0.22f);
     const ImVec2 center(p0.x + card_w * 0.5f, p0.y + 12.0f + ring_r + 2.0f);
 
-    // Background pastel lavender ring track (#EDE9FE)
+    // Background ring track (#EDE9FE in lavender, subtle slate in dark mode)
     dl->PathClear();
     dl->PathArcTo(center, ring_r, 0.0f, 2.0f * kPi, 40);
-    dl->PathStroke(IM_COL32(237, 233, 254, 255), ImDrawFlags_Closed, thick);
+    dl->PathStroke(g_dark_theme ? IM_COL32(37, 45, 61, 255) : IM_COL32(237, 233, 254, 255), ImDrawFlags_Closed, thick);
 
     // Foreground gradient arc
     const ImVec4 col_start = warn ? kColAmber : (health_mode ? kColGreen : kColAccentPurp);
@@ -427,7 +477,40 @@ void LanVidStudioApp::draw_ring_gauge(const char* title, const char* value_str, 
     ImGui::Dummy(ImVec2(card_w, card_h));
 }
 
-void LanVidStudioApp::apply_theme() {
+void LanVidStudioApp::apply_theme(bool dark) {
+    g_dark_theme = dark;
+    if (!dark) {
+        // Soft Pastel Lavender / Blue-Purple (Soft Glass / Claymorphic UI)
+        kColBgTopLeft   = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
+        kColBgTopRight  = ImVec4(0.878f, 0.906f, 1.000f, 1.00f);  // #E0E7FF
+        kColBgBotRight  = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);  // #EDE9FE
+        kColBgBotLeft   = ImVec4(0.894f, 0.878f, 1.000f, 1.00f);  // #E4E0FF
+        kColSidebar     = ImVec4(0.961f, 0.953f, 1.000f, 0.92f);  // #F5F3FF @ 0.92
+        kColCard        = ImVec4(1.000f, 1.000f, 1.000f, 0.97f);  // #FFFFFF
+        kColCardSoft    = ImVec4(0.953f, 0.937f, 0.996f, 0.96f);  // #F3EFFE
+        kColBorder      = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
+        kColAccentInd   = ImVec4(0.388f, 0.400f, 0.945f, 1.00f);  // #6366F1
+        kColAccentPurp  = ImVec4(0.576f, 0.200f, 0.918f, 1.00f);  // #9333EA
+        kColTextMain    = ImVec4(0.118f, 0.106f, 0.294f, 1.00f);  // #1E1B4B
+        kColTextMuted   = ImVec4(0.486f, 0.451f, 0.600f, 1.00f);  // #7C7399
+    } else {
+        // Dark Studio Theme
+        kColBgTopLeft   = ImVec4(0.051f, 0.067f, 0.090f, 1.00f);  // #0D1117
+        kColBgTopRight  = ImVec4(0.063f, 0.075f, 0.114f, 1.00f);
+        kColBgBotRight  = ImVec4(0.051f, 0.067f, 0.090f, 1.00f);
+        kColBgBotLeft   = ImVec4(0.071f, 0.067f, 0.114f, 1.00f);
+        kColSidebar     = ImVec4(0.067f, 0.086f, 0.122f, 0.96f);  // #11161F
+        kColCard        = ImVec4(0.086f, 0.106f, 0.149f, 0.98f);  // #161B26
+        kColCardSoft    = ImVec4(0.110f, 0.133f, 0.188f, 0.96f);
+        kColBorder      = ImVec4(0.145f, 0.176f, 0.239f, 1.00f);  // #252D3D
+        kColAccentInd   = ImVec4(0.494f, 0.525f, 0.988f, 1.00f);
+        kColAccentPurp  = ImVec4(0.753f, 0.518f, 0.988f, 1.00f);
+        kColTextMain    = ImVec4(0.953f, 0.957f, 0.965f, 1.00f);  // #F3F4F6
+        kColTextMuted   = ImVec4(0.545f, 0.580f, 0.650f, 1.00f);  // #8B949E
+    }
+    kColCyan = kColAccentInd;
+    kColTeal = kColAccentPurp;
+
     ImGuiStyle& st = ImGui::GetStyle();
     st.WindowRounding = 16.0f;
     st.ChildRounding = 16.0f;
@@ -446,44 +529,45 @@ void LanVidStudioApp::apply_theme() {
     st.ScrollbarSize = 9.0f;
 
     ImVec4* c = st.Colors;
-    c[ImGuiCol_WindowBg]            = kColBgBotRight;
-    c[ImGuiCol_ChildBg]             = kColCard;
-    c[ImGuiCol_PopupBg]             = ImVec4(1.000f, 1.000f, 1.000f, 0.98f);
-    c[ImGuiCol_Border]              = kColBorder;
-    c[ImGuiCol_BorderShadow]        = ImVec4(0.486f, 0.227f, 0.929f, 0.06f);
-    c[ImGuiCol_FrameBg]             = kColWhite;
-    c[ImGuiCol_FrameBgHovered]      = ImVec4(0.961f, 0.953f, 1.000f, 1.00f);
-    c[ImGuiCol_FrameBgActive]       = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);
-    c[ImGuiCol_TitleBg]             = kColSidebar;
-    c[ImGuiCol_TitleBgActive]       = kColCardSoft;
-    c[ImGuiCol_CheckMark]           = kColAccentPurp;
-    c[ImGuiCol_SliderGrab]          = kColAccentInd;
-    c[ImGuiCol_SliderGrabActive]    = kColAccentPurp;
-    c[ImGuiCol_Button]              = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);  // soft lavender pill (#EDE9FE)
-    c[ImGuiCol_ButtonHovered]       = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);  // #DDD6FE
-    c[ImGuiCol_ButtonActive]        = ImVec4(0.769f, 0.710f, 0.992f, 1.00f);  // #C4B5FD
-    c[ImGuiCol_Header]              = ImVec4(0.867f, 0.839f, 0.996f, 0.70f);
-    c[ImGuiCol_HeaderHovered]       = ImVec4(0.769f, 0.710f, 0.992f, 0.55f);
-    c[ImGuiCol_HeaderActive]        = ImVec4(0.659f, 0.333f, 0.969f, 0.35f);
-    c[ImGuiCol_Tab]                 = kColCardSoft;
-    c[ImGuiCol_TabHovered]          = ImVec4(0.867f, 0.839f, 0.996f, 1.00f);
-    c[ImGuiCol_TabSelected]         = kColWhite;
-    c[ImGuiCol_PlotLines]           = kColAccentInd;
-    c[ImGuiCol_PlotLinesHovered]    = kColAccentPurp;
-    c[ImGuiCol_PlotHistogram]       = kColAccentViol;
-    c[ImGuiCol_PlotHistogramHovered]= kColPink;
-    c[ImGuiCol_Separator]           = kColBorder;
-    c[ImGuiCol_Text]                = kColTextMain;
-    c[ImGuiCol_TextDisabled]        = kColTextMuted;
-    c[ImGuiCol_ScrollbarBg]         = ImVec4(0.953f, 0.937f, 0.996f, 0.60f);
-    c[ImGuiCol_ScrollbarGrab]       = ImVec4(0.769f, 0.710f, 0.992f, 0.85f);
-    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.659f, 0.333f, 0.969f, 0.85f);
-    c[ImGuiCol_ScrollbarGrabActive] = kColAccentPurp;
-    c[ImGuiCol_TableHeaderBg]       = kColCardSoft;
-    c[ImGuiCol_TableBorderStrong]   = kColBorder;
-    c[ImGuiCol_TableBorderLight]    = ImVec4(0.929f, 0.914f, 0.996f, 1.00f);
-    c[ImGuiCol_TableRowBg]          = ImVec4(1.000f, 1.000f, 1.000f, 0.90f);
-    c[ImGuiCol_TableRowBgAlt]       = ImVec4(0.973f, 0.965f, 1.000f, 0.90f);
+    c[ImGuiCol_WindowBg]             = kColBgBotRight;
+    c[ImGuiCol_ChildBg]              = kColCard;
+    c[ImGuiCol_PopupBg]              = dark ? ImVec4(0.086f, 0.106f, 0.149f, 0.98f)
+                                            : ImVec4(1.000f, 1.000f, 1.000f, 0.98f);
+    c[ImGuiCol_Border]               = kColBorder;
+    c[ImGuiCol_BorderShadow]         = dark ? ImVec4(0, 0, 0, 0) : ImVec4(0.486f, 0.227f, 0.929f, 0.06f);
+    c[ImGuiCol_FrameBg]              = dark ? kColSidebar : kColWhite;
+    c[ImGuiCol_FrameBgHovered]       = dark ? ImVec4(0.12f, 0.15f, 0.22f, 1.0f) : ImVec4(0.961f, 0.953f, 1.000f, 1.00f);
+    c[ImGuiCol_FrameBgActive]        = dark ? ImVec4(0.15f, 0.19f, 0.27f, 1.0f) : ImVec4(0.929f, 0.914f, 0.996f, 1.00f);
+    c[ImGuiCol_TitleBg]              = kColSidebar;
+    c[ImGuiCol_TitleBgActive]        = kColCardSoft;
+    c[ImGuiCol_CheckMark]            = kColAccentPurp;
+    c[ImGuiCol_SliderGrab]           = kColAccentInd;
+    c[ImGuiCol_SliderGrabActive]     = kColAccentPurp;
+    c[ImGuiCol_Button]               = dark ? ImVec4(0.13f, 0.16f, 0.23f, 1.0f) : ImVec4(0.929f, 0.914f, 0.996f, 1.00f);
+    c[ImGuiCol_ButtonHovered]        = dark ? ImVec4(0.18f, 0.22f, 0.32f, 1.0f) : ImVec4(0.867f, 0.839f, 0.996f, 1.00f);
+    c[ImGuiCol_ButtonActive]         = dark ? ImVec4(0.24f, 0.28f, 0.42f, 1.0f) : ImVec4(0.769f, 0.710f, 0.992f, 1.00f);
+    c[ImGuiCol_Header]               = dark ? ImVec4(0.39f, 0.40f, 0.95f, 0.28f) : ImVec4(0.867f, 0.839f, 0.996f, 0.70f);
+    c[ImGuiCol_HeaderHovered]        = dark ? ImVec4(0.39f, 0.40f, 0.95f, 0.42f) : ImVec4(0.769f, 0.710f, 0.992f, 0.55f);
+    c[ImGuiCol_HeaderActive]         = dark ? ImVec4(0.58f, 0.20f, 0.92f, 0.50f) : ImVec4(0.659f, 0.333f, 0.969f, 0.35f);
+    c[ImGuiCol_Tab]                  = kColCardSoft;
+    c[ImGuiCol_TabHovered]           = dark ? ImVec4(0.18f, 0.22f, 0.32f, 1.0f) : ImVec4(0.867f, 0.839f, 0.996f, 1.00f);
+    c[ImGuiCol_TabSelected]          = dark ? kColCard : kColWhite;
+    c[ImGuiCol_PlotLines]            = kColAccentInd;
+    c[ImGuiCol_PlotLinesHovered]     = kColAccentPurp;
+    c[ImGuiCol_PlotHistogram]        = kColAccentViol;
+    c[ImGuiCol_PlotHistogramHovered] = kColPink;
+    c[ImGuiCol_Separator]            = kColBorder;
+    c[ImGuiCol_Text]                 = kColTextMain;
+    c[ImGuiCol_TextDisabled]         = kColTextMuted;
+    c[ImGuiCol_ScrollbarBg]          = dark ? ImVec4(0.06f, 0.08f, 0.11f, 0.60f) : ImVec4(0.953f, 0.937f, 0.996f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]        = dark ? ImVec4(0.24f, 0.29f, 0.40f, 0.85f) : ImVec4(0.769f, 0.710f, 0.992f, 0.85f);
+    c[ImGuiCol_ScrollbarGrabHovered] = kColAccentViol;
+    c[ImGuiCol_ScrollbarGrabActive]  = kColAccentPurp;
+    c[ImGuiCol_TableHeaderBg]        = kColCardSoft;
+    c[ImGuiCol_TableBorderStrong]    = kColBorder;
+    c[ImGuiCol_TableBorderLight]     = dark ? ImVec4(0.14f, 0.18f, 0.24f, 1.0f) : ImVec4(0.929f, 0.914f, 0.996f, 1.00f);
+    c[ImGuiCol_TableRowBg]           = dark ? ImVec4(0.086f, 0.106f, 0.149f, 0.90f) : ImVec4(1.000f, 1.000f, 1.000f, 0.90f);
+    c[ImGuiCol_TableRowBgAlt]        = dark ? ImVec4(0.102f, 0.125f, 0.176f, 0.90f) : ImVec4(0.973f, 0.965f, 1.000f, 0.90f);
 }
 
 LanVidStudioApp::LanVidStudioApp(PlatformHost host) : host_(host) {}
@@ -493,6 +577,7 @@ LanVidStudioApp::~LanVidStudioApp() { shutdown(); }
 void LanVidStudioApp::init() {
     lv_init();
     load_app_config(cfg_);
+    apply_theme(cfg_.dark_theme);
     std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", cfg_.dest_ip.c_str());
     std::snprintf(file_buf_, sizeof(file_buf_), "%s", cfg_.file_path.c_str());
     std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", cfg_.dpx_peer_host.c_str());
@@ -1134,11 +1219,11 @@ void LanVidStudioApp::draw_segmented_vu(float dbfs, float width, float height) {
 }
 
 void LanVidStudioApp::draw_sidebar() {
-    float sidebar_w = 176.0f;
+    float sidebar_w = 204.0f;
     {
-        const char* labels[] = {"SENDER", "RECEIVER", "DUPLEX", "AUDIO & MIDI"};
+        const char* labels[] = {"З'єднання", "Маршрути", "Пристрої", "Налаштування"};
         for (const char* lbl : labels) {
-            const float need = 14.0f + 28.0f + 10.0f + ImGui::CalcTextSize(lbl).x + 28.0f;
+            const float need = 16.0f + 34.0f + 12.0f + ImGui::CalcTextSize(lbl).x + 28.0f;
             sidebar_w = std::max(sidebar_w, need);
         }
     }
@@ -1155,7 +1240,7 @@ void LanVidStudioApp::draw_sidebar() {
 #ifndef LANVID_VERSION_STRING
 #define LANVID_VERSION_STRING "2.5.0"
 #endif
-    draw_gradient_icon_tile("##BrandTile", IconKind::kWaveform, 34.0f, -1, false);
+    draw_gradient_icon_tile("##BrandTile", IconKind::kWaveform, 36.0f, -1, false);
     ImGui::SameLine();
     ImGui::BeginGroup();
     ImGui::TextColored(kColAccentPurp, "LanVid");
@@ -1171,13 +1256,14 @@ void LanVidStudioApp::draw_sidebar() {
     struct NavItem {
         int id;
         IconKind icon;
-        const char* label;
+        const char* title;
+        const char* subtitle;
     };
     const NavItem nav[] = {
-        {0, IconKind::kSend,    "SENDER"},
-        {1, IconKind::kReceive, "RECEIVER"},
-        {2, IconKind::kDuplex,  "DUPLEX"},
-        {3, IconKind::kMatrix,  "AUDIO & MIDI"},
+        {0, IconKind::kSend,       "З'єднання",    "Connect"},
+        {1, IconKind::kMatrix,     "Маршрути",     "Patchbay"},
+        {2, IconKind::kHeadphones, "Пристрої",     "Devices"},
+        {3, IconKind::kGear,       "Налаштування", "Settings"},
     };
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1185,8 +1271,8 @@ void LanVidStudioApp::draw_sidebar() {
         const bool selected = (cfg_.active_tab == item.id);
         const ImVec2 pos = ImGui::GetCursorScreenPos();
         const float w = ImGui::GetContentRegionAvail().x;
-        const float h = 44.0f;
-        if (ImGui::InvisibleButton(item.label, ImVec2(w, h))) {
+        const float h = 54.0f;
+        if (ImGui::InvisibleButton(item.subtitle, ImVec2(w, h))) {
             if (cfg_.active_tab != item.id) {
                 cfg_.active_tab = item.id;
                 config_dirty_ = true;
@@ -1195,47 +1281,55 @@ void LanVidStudioApp::draw_sidebar() {
         const bool hovered = ImGui::IsItemHovered();
         const ImVec2 p1(pos.x + w, pos.y + h);
         if (selected) {
-            draw_soft_shadow(dl, pos, p1, 14.0f, 0.7f);
+            draw_soft_shadow(dl, pos, p1, 14.0f, 0.75f);
             draw_rounded_gradient_rect(dl, pos, p1, 14.0f, kColAccentInd, kColAccentViol, false);
-            dl->AddRect(pos, p1, IM_COL32(255, 255, 255, 70), 14.0f, 0, 1.0f);
+            dl->AddRect(pos, p1, IM_COL32(255, 255, 255, 75), 14.0f, 0, 1.0f);
         } else if (hovered) {
-            dl->AddRectFilled(pos, p1, IM_COL32(237, 233, 254, 220), 14.0f);
-            dl->AddRect(pos, p1, IM_COL32(221, 214, 254, 255), 14.0f, 0, 1.0f);
+            dl->AddRectFilled(pos, p1,
+                              g_dark_theme ? IM_COL32(32, 39, 56, 220) : IM_COL32(237, 233, 254, 220), 14.0f);
+            dl->AddRect(pos, p1, ImGui::ColorConvertFloat4ToU32(kColBorder), 14.0f, 0, 1.0f);
         }
 
-        // Small icon badge inside nav item
-        const ImVec2 ic_p0(pos.x + 8.0f, pos.y + 8.0f);
-        const ImVec2 ic_p1(ic_p0.x + 28.0f, ic_p0.y + 28.0f);
+        // Large soft gradient icon tile inside nav item
+        const ImVec2 ic_p0(pos.x + 9.0f, pos.y + 10.0f);
+        const ImVec2 ic_p1(ic_p0.x + 34.0f, ic_p0.y + 34.0f);
         if (selected) {
-            dl->AddRectFilled(ic_p0, ic_p1, IM_COL32(255, 255, 255, 50), 9.0f);
+            dl->AddRectFilled(ic_p0, ic_p1, IM_COL32(255, 255, 255, 55), 10.0f);
         } else {
-            draw_rounded_gradient_rect(dl, ic_p0, ic_p1, 9.0f, kColAccentViol, kColAccentInd, true);
+            draw_rounded_gradient_rect(dl, ic_p0, ic_p1, 10.0f, kColAccentViol, kColAccentInd, true);
         }
         const ImVec2 ic_c((ic_p0.x + ic_p1.x) * 0.5f, (ic_p0.y + ic_p1.y) * 0.5f);
-        const float u = 7.5f;
+        const float u = 9.0f;
         const ImU32 wc = IM_COL32(255, 255, 255, 245);
         if (item.icon == IconKind::kSend) {
-            dl->AddLine(ImVec2(ic_c.x - u * 0.6f, ic_c.y + u * 0.4f), ImVec2(ic_c.x + u * 0.5f, ic_c.y - u * 0.5f), wc, 1.7f);
-            dl->AddTriangleFilled(ImVec2(ic_c.x + u * 0.7f, ic_c.y - u * 0.6f), ImVec2(ic_c.x + u * 0.1f, ic_c.y - u * 0.55f), ImVec2(ic_c.x + u * 0.48f, ic_c.y - u * 0.02f), wc);
-        } else if (item.icon == IconKind::kReceive) {
-            dl->AddLine(ImVec2(ic_c.x + u * 0.6f, ic_c.y - u * 0.5f), ImVec2(ic_c.x - u * 0.5f, ic_c.y + u * 0.4f), wc, 1.7f);
-            dl->AddTriangleFilled(ImVec2(ic_c.x - u * 0.7f, ic_c.y + u * 0.55f), ImVec2(ic_c.x - u * 0.1f, ic_c.y + u * 0.52f), ImVec2(ic_c.x - u * 0.48f, ic_c.y + u * 0.02f), wc);
-        } else if (item.icon == IconKind::kDuplex) {
-            dl->AddLine(ImVec2(ic_c.x - u * 0.7f, ic_c.y - u * 0.28f), ImVec2(ic_c.x + u * 0.55f, ic_c.y - u * 0.28f), wc, 1.6f);
-            dl->AddTriangleFilled(ImVec2(ic_c.x + u * 0.75f, ic_c.y - u * 0.28f), ImVec2(ic_c.x + u * 0.30f, ic_c.y - u * 0.60f), ImVec2(ic_c.x + u * 0.30f, ic_c.y + u * 0.04f), wc);
-            dl->AddLine(ImVec2(ic_c.x + u * 0.7f, ic_c.y + u * 0.32f), ImVec2(ic_c.x - u * 0.55f, ic_c.y + u * 0.32f), wc, 1.6f);
-            dl->AddTriangleFilled(ImVec2(ic_c.x - u * 0.75f, ic_c.y + u * 0.32f), ImVec2(ic_c.x - u * 0.30f, ic_c.y), ImVec2(ic_c.x - u * 0.30f, ic_c.y + u * 0.64f), wc);
-        } else {
+            dl->AddLine(ImVec2(ic_c.x - u * 0.6f, ic_c.y + u * 0.4f), ImVec2(ic_c.x + u * 0.5f, ic_c.y - u * 0.5f), wc, 1.9f);
+            dl->AddTriangleFilled(ImVec2(ic_c.x + u * 0.72f, ic_c.y - u * 0.62f),
+                                  ImVec2(ic_c.x + u * 0.10f, ic_c.y - u * 0.58f),
+                                  ImVec2(ic_c.x + u * 0.50f, ic_c.y - u * 0.02f), wc);
+        } else if (item.icon == IconKind::kMatrix) {
             for (int r = -1; r <= 1; ++r)
                 for (int k = -1; k <= 1; ++k)
-                    dl->AddCircleFilled(ImVec2(ic_c.x + float(k) * 4.2f, ic_c.y + float(r) * 4.2f), (r == k) ? 2.0f : 1.2f,
-                                        (r == k) ? wc : IM_COL32(255, 255, 255, 130));
+                    dl->AddCircleFilled(ImVec2(ic_c.x + float(k) * 5.0f, ic_c.y + float(r) * 5.0f),
+                                        (r == k) ? 2.3f : 1.3f, (r == k) ? wc : IM_COL32(255, 255, 255, 130));
+        } else if (item.icon == IconKind::kHeadphones) {
+            dl->PathClear();
+            dl->PathArcTo(ImVec2(ic_c.x, ic_c.y + 0.5f), u * 0.78f, kPi, 2.0f * kPi, 16);
+            dl->PathStroke(wc, 0, 1.9f);
+            dl->AddRectFilled(ImVec2(ic_c.x - u * 0.92f, ic_c.y + 0.5f), ImVec2(ic_c.x - u * 0.48f, ic_c.y + u * 0.75f), wc, 2.5f);
+            dl->AddRectFilled(ImVec2(ic_c.x + u * 0.48f, ic_c.y + 0.5f), ImVec2(ic_c.x + u * 0.92f, ic_c.y + u * 0.75f), wc, 2.5f);
+        } else {
+            dl->AddCircle(ic_c, u * 0.52f, wc, 16, 1.8f);
+            for (int g = 0; g < 8; ++g) {
+                const float ang = float(g) * (2.0f * kPi / 8.0f);
+                dl->AddLine(ImVec2(ic_c.x + std::cos(ang) * u * 0.62f, ic_c.y + std::sin(ang) * u * 0.62f),
+                            ImVec2(ic_c.x + std::cos(ang) * u * 0.98f, ic_c.y + std::sin(ang) * u * 0.98f), wc, 1.9f);
+            }
         }
 
-        const ImU32 txt_col = selected ? IM_COL32(255, 255, 255, 255)
-                                       : ImGui::ColorConvertFloat4ToU32(kColTextMain);
-        const ImVec2 tsz = ImGui::CalcTextSize(item.label);
-        dl->AddText(ImVec2(pos.x + 44.0f, pos.y + (h - tsz.y) * 0.5f), txt_col, item.label);
+        const ImU32 title_col = selected ? IM_COL32(255, 255, 255, 255) : ImGui::ColorConvertFloat4ToU32(kColTextMain);
+        const ImU32 sub_col = selected ? IM_COL32(238, 235, 255, 225) : ImGui::ColorConvertFloat4ToU32(kColTextMuted);
+        dl->AddText(ImVec2(pos.x + 52.0f, pos.y + 10.0f), title_col, item.title);
+        dl->AddText(ImVec2(pos.x + 52.0f, pos.y + 29.0f), sub_col, item.subtitle);
         ImGui::Spacing();
     }
 
@@ -1245,7 +1339,7 @@ void LanVidStudioApp::draw_sidebar() {
     const ImVec2 bp0 = ImGui::GetCursorScreenPos();
     const float bw = ImGui::GetContentRegionAvail().x;
     const ImVec2 bp1(bp0.x + bw, bp0.y + 78.0f);
-    dl->AddRectFilled(bp0, bp1, IM_COL32(255, 255, 255, 235), 14.0f);
+    dl->AddRectFilled(bp0, bp1, ImGui::ColorConvertFloat4ToU32(kColCard), 14.0f);
     dl->AddRect(bp0, bp1, ImGui::ColorConvertFloat4ToU32(kColBorder), 14.0f, 0, 1.0f);
 
     const bool any_active = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
@@ -1253,12 +1347,12 @@ void LanVidStudioApp::draw_sidebar() {
                         ImGui::ColorConvertFloat4ToU32(any_active ? kColGreen : kColTextMuted));
     dl->AddText(ImVec2(bp0.x + 25.0f, bp0.y + 12.0f),
                 ImGui::ColorConvertFloat4ToU32(any_active ? kColGreen : kColTextMuted),
-                any_active ? "Connected" : "Standby");
+                any_active ? "На зв'язку" : "Очікування");
     char lat_txt[48];
-    if (actual_buf_valid_) std::snprintf(lat_txt, sizeof(lat_txt), "LATENCY: %.0f ms", actual_buf_ms_);
-    else std::snprintf(lat_txt, sizeof(lat_txt), "LATENCY: %d ms", cfg_.aoip_latency_ms);
+    if (actual_buf_valid_) std::snprintf(lat_txt, sizeof(lat_txt), "Затримка: %.0f мс", actual_buf_ms_);
+    else std::snprintf(lat_txt, sizeof(lat_txt), "Затримка: %d мс", cfg_.aoip_latency_ms);
     dl->AddText(ImVec2(bp0.x + 14.0f, bp0.y + 34.0f), ImGui::ColorConvertFloat4ToU32(kColTextMuted), lat_txt);
-    const char* lat_mode = cfg_.adaptive_jitter ? "MODE: AUTO (Wi-Fi)" : "MODE: FIXED (LAN)";
+    const char* lat_mode = cfg_.adaptive_jitter ? "Авто для Wi-Fi" : "Фіксована (кабель)";
     dl->AddText(ImVec2(bp0.x + 14.0f, bp0.y + 52.0f),
                 ImGui::ColorConvertFloat4ToU32(cfg_.adaptive_jitter ? kColGreen : kColAccentInd), lat_mode);
     ImGui::Dummy(ImVec2(bw, 78.0f));
@@ -2320,46 +2414,61 @@ void LanVidStudioApp::draw_aspect_image(IGpuTexture* tex, const ImVec2& avail, c
 }
 
 void LanVidStudioApp::draw_top_bar() {
-    begin_glass_card("##TopBar", ImVec2(0, 50), false, ImGuiWindowFlags_NoScrollbar);
-#ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.5.0"
-#endif
+    begin_glass_card("##TopBar", ImVec2(0, 56), false, ImGuiWindowFlags_NoScrollbar);
     const int tab_idx = std::clamp(cfg_.active_tab, 0, 3);
-    const char* mode_names[] = {"SENDER", "RECEIVER", "FULL-DUPLEX 64x64", "AUDIO & MIDI MATRIX"};
-    const IconKind mode_icons[] = {IconKind::kSend, IconKind::kReceive, IconKind::kDuplex, IconKind::kMatrix};
-    draw_gradient_icon_tile("##TopModeTile", mode_icons[tab_idx], 28.0f, -1, false);
+    const IconKind mode_icons[] = {IconKind::kSend, IconKind::kMatrix, IconKind::kHeadphones, IconKind::kGear};
+    draw_gradient_icon_tile("##TopModeTile", mode_icons[tab_idx], 32.0f, -1, false);
     ImGui::SameLine();
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
-    ImGui::TextColored(kColTextMain, "%s", mode_names[tab_idx]);
-    ImGui::SameLine();
-    ImGui::TextDisabled("  ·  SIMD: %s  ·  GPU: %s  ·  LAN IP: %s",
-                        lv_get_cpu_simd_info(), host_.renderer_name, local_lan_ip_.c_str());
+
+    // Human-friendly interactive live status banner
+    const bool any_live = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
+    const bool has_routes = !audio_matrix_.crosspoints().empty() || !audio_matrix_.midi_crosspoints().empty();
+    const char* target_ip = (cfg_.connect_role == 2) ? dpx_peer_buf_ : ip_buf_;
+    const int lat_disp = actual_buf_valid_ ? int(std::round(actual_buf_ms_)) : cfg_.aoip_latency_ms;
+    const bool has_midi = !audio_matrix_.midi_slots().empty();
+
+    char banner[256];
+    ImVec4 banner_col = kColTextMain;
+    if (!has_routes) {
+        std::snprintf(banner, sizeof(banner),
+                      "Підказка: оберіть навушники у «Пристрої» або увімкніть пресет маршрутизації у «Маршрути»");
+        banner_col = kColAmber;
+    } else if (any_live) {
+        std::snprintf(banner, sizeof(banner),
+                      "Працює: %d каналів%s -> %s (Затримка %d мс · %s)",
+                      cfg_.aoip_channels, has_midi ? " + MIDI" : "", target_ip, lat_disp,
+                      cfg_.adaptive_jitter ? "Авто Wi-Fi" : "Фіксована");
+        banner_col = kColGreen;
+    } else {
+        std::snprintf(banner, sizeof(banner),
+                      "Готово до роботи: %d каналів%s -> %s (Затримка %d мс)",
+                      cfg_.aoip_channels, has_midi ? " + MIDI" : "", target_ip, lat_disp);
+    }
+
+    ImGui::BeginGroup();
+    ImGui::TextColored(banner_col, "%s", banner);
+    ImGui::TextDisabled("Ваш IP у локальній мережі: %s  ·  48 кГц  ·  %s",
+                        local_lan_ip_.c_str(), cfg_.audio_only ? "Лише звук" : "Звук + Відео");
+    ImGui::EndGroup();
 
     // Live status pill on right side
-    const bool any_live = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
-    const char* badge = audio_matrix_.is_running()
-                            ? "● MATRIX ACTIVE"
-                            : ((sender_running_ && receiver_running_)
-                                   ? "● TX + RX ACTIVE"
-                                   : (sender_running_ ? "● TX ACTIVE"
-                                                      : (receiver_running_ ? "● RX ACTIVE"
-                                                                           : (duplex_running_ ? "● DUPLEX ACTIVE"
-                                                                                              : "● STANDBY"))));
+    const char* badge = any_live ? "● Активно" : "● Готово";
     const ImVec2 tsz = ImGui::CalcTextSize(badge);
-    const float pill_w = tsz.x + 22.0f;
-    const float pill_h = 26.0f;
+    const float pill_w = tsz.x + 24.0f;
+    const float pill_h = 28.0f;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetWindowWidth() - pill_w - 16.0f));
     const ImVec2 pp0 = ImGui::GetCursorScreenPos();
     const ImVec2 pp1(pp0.x + pill_w, pp0.y + pill_h);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     if (any_live) {
         dl->AddRectFilled(pp0, pp1, IM_COL32(16, 185, 129, 32), pill_h * 0.5f);
-        dl->AddRect(pp0, pp1, IM_COL32(16, 185, 129, 130), pill_h * 0.5f, 0, 1.0f);
+        dl->AddRect(pp0, pp1, IM_COL32(16, 185, 129, 140), pill_h * 0.5f, 0, 1.0f);
     } else {
-        dl->AddRectFilled(pp0, pp1, IM_COL32(237, 233, 254, 235), pill_h * 0.5f);
+        dl->AddRectFilled(pp0, pp1,
+                          g_dark_theme ? IM_COL32(32, 39, 56, 235) : IM_COL32(237, 233, 254, 235), pill_h * 0.5f);
         dl->AddRect(pp0, pp1, ImGui::ColorConvertFloat4ToU32(kColBorder), pill_h * 0.5f, 0, 1.0f);
     }
-    dl->AddText(ImVec2(pp0.x + 11.0f, pp0.y + (pill_h - tsz.y) * 0.5f),
+    dl->AddText(ImVec2(pp0.x + 12.0f, pp0.y + (pill_h - tsz.y) * 0.5f),
                 ImGui::ColorConvertFloat4ToU32(any_live ? kColGreen : kColTextMuted), badge);
     ImGui::Dummy(ImVec2(pill_w, pill_h));
     end_glass_card();
@@ -2816,6 +2925,1105 @@ void LanVidStudioApp::draw_fullscreen_receiver() {
     ImGui::PopStyleVar(2);
 }
 
+void LanVidStudioApp::draw_add_device_popups() {
+    if (ImGui::BeginPopup("##AddMidiDev")) {
+        ImGui::TextColored(kColAccentInd, "MIDI-входи (Клавіатури / Барабани / Контролери)");
+        if (midi_in_devs_.empty()) ImGui::TextDisabled("  MIDI-входів не знайдено");
+        for (const auto& m : midi_in_devs_) {
+            if (ImGui::Selectable((m.name + " [MIDI IN]").c_str())) {
+                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiInput, m.name, m.name, m.index, 0, true});
+                config_dirty_ = true;
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextColored(kColAccentPurp, "MIDI-виходи (DAW / Синтезатори)");
+        if (midi_out_devs_.empty()) ImGui::TextDisabled("  MIDI-виходів не знайдено");
+        for (const auto& m : midi_out_devs_) {
+            if (ImGui::Selectable((m.name + " [MIDI OUT]").c_str())) {
+                audio_matrix_.add_midi_slot({-1, MidiSlotType::kMidiOutput, m.name, m.name, m.index, 0, true});
+                config_dirty_ = true;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopup("##AddAudioDev")) {
+#if defined(__APPLE__)
+        auto add_sys_slot = [this](const SystemAudioDeviceEntry* d, MatrixSlotRole role) {
+            MatrixSlotConfig s{};
+            s.id = -1;
+            s.type = MatrixSlotType::kSystemAudio;
+            s.role = role;
+            s.name = d ? d->name : (role == MatrixSlotRole::kOutput ? "Основний вихід (CoreAudio)" : "Основний вхід (CoreAudio)");
+            s.device_id = d ? d->uid : "";
+            s.device_index = -1;
+            s.channels = d ? std::clamp(d->channels, 1, 64) : 2;
+            s.buffer_size = cfg_.matrix_buffer_size;
+            audio_matrix_.add_slot(s);
+            config_dirty_ = true;
+        };
+        ImGui::TextColored(kColAccentInd, "Виходи CoreAudio (Навушники / Колонки / USB)");
+        if (ImGui::Selectable("Основний вихід (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kOutput);
+        for (const auto& d : sys_out_devs_) {
+            char lbl[320];
+            std::snprintf(lbl, sizeof(lbl), "%s (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
+                          d.is_default ? " [основний]" : "");
+            if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kOutput);
+        }
+        ImGui::Separator();
+        ImGui::TextColored(kColAccentPurp, "Входи CoreAudio (Мікрофон / Лінійний вхід)");
+        if (ImGui::Selectable("Основний вхід (CoreAudio)")) add_sys_slot(nullptr, MatrixSlotRole::kInput);
+        for (const auto& d : sys_in_devs_) {
+            char lbl[320];
+            std::snprintf(lbl, sizeof(lbl), "%s (%d кан., %u Гц)%s", d.name.c_str(), d.channels, d.sample_rate,
+                          d.is_default ? " [основний]" : "");
+            if (ImGui::Selectable(lbl)) add_sys_slot(&d, MatrixSlotRole::kInput);
+        }
+#else
+        ImGui::TextColored(kColAccentInd, "Виходи звуку (Навушники / Аудіоінтерфейси)");
+        if (ImGui::Selectable("Основні навушники / колонки ПК (WASAPI)")) {
+            MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
+                               "Навушники / Вихід ПК", "", -1, 2, cfg_.matrix_buffer_size, true};
+            audio_matrix_.add_slot(s);
+            config_dirty_ = true;
+        }
+        for (const auto& d : loop_devs_) {
+            if (ImGui::Selectable((d.name + " [ВИХІД]").c_str())) {
+                MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput,
+                                   d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true};
+                audio_matrix_.add_slot(s);
+                config_dirty_ = true;
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextColored(kColAccentPurp, "Входи звуку (Мікрофон / Лінійний вхід)");
+        if (ImGui::Selectable("Основний мікрофон / вхід ПК (WASAPI)")) {
+            MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
+                               "Мікрофон / Вхід ПК", "", -1, 2, cfg_.matrix_buffer_size, true};
+            audio_matrix_.add_slot(s);
+            config_dirty_ = true;
+        }
+        for (const auto& d : mic_devs_) {
+            if (ImGui::Selectable((d.name + " [ВХІД]").c_str())) {
+                MatrixSlotConfig s{-1, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput,
+                                   d.name, d.name, d.index, 2, cfg_.matrix_buffer_size, true};
+                audio_matrix_.add_slot(s);
+                config_dirty_ = true;
+            }
+        }
+        if (!asio_devs_.empty()) {
+            ImGui::Separator();
+            ImGui::TextColored(kColAmber, "Зовнішні ASIO-драйвери (Студійні карти)");
+            for (const auto& a : asio_devs_) {
+                if (ImGui::Selectable((a.name + " [ASIO]").c_str())) {
+                    MatrixSlotConfig s{-1, MatrixSlotType::kExternalAsio, MatrixSlotRole::kDuplex,
+                                       a.name, a.name, -1, 16, cfg_.matrix_buffer_size, true};
+                    audio_matrix_.add_slot(s);
+                    config_dirty_ = true;
+                }
+            }
+        }
+#endif
+        ImGui::EndPopup();
+    }
+}
+
+void LanVidStudioApp::draw_connect_tab() {
+    const float total_w = ImGui::GetContentRegionAvail().x;
+    const float left_w = std::max(440.0f, total_w * 0.56f);
+
+    // ---- LEFT COLUMN: Quick Start, Role, One-Click Start, Auto-Discovery ----
+    begin_glass_card("##ConnectMain", ImVec2(left_w, 0));
+
+    ImGui::TextColored(kColAccentPurp, "1. Що має робити цей комп'ютер?");
+    ImGui::Spacing();
+    const float role_gap = 10.0f;
+    const float role_w = std::max(120.0f, (ImGui::GetContentRegionAvail().x - role_gap * 2.0f) / 3.0f);
+    if (selectable_choice_card("##RoleSend", "Віддавати звук", "З цього ПК -> у мережу",
+                               cfg_.connect_role == 0, ImVec2(role_w, 60.0f))) {
+        cfg_.connect_role = 0;
+        config_dirty_ = true;
+    }
+    ImGui::SameLine(0.0f, role_gap);
+    if (selectable_choice_card("##RoleRecv", "Приймати звук", "З мережі -> на цей ПК",
+                               cfg_.connect_role == 1, ImVec2(role_w, 60.0f))) {
+        cfg_.connect_role = 1;
+        config_dirty_ = true;
+    }
+    ImGui::SameLine(0.0f, role_gap);
+    if (selectable_choice_card("##RoleDpx", "Обидва напрямки", "Студійний міст 64x64",
+                               cfg_.connect_role == 2, ImVec2(role_w, 60.0f))) {
+        cfg_.connect_role = 2;
+        config_dirty_ = true;
+    }
+
+    ImGui::Spacing();
+    const bool role_running = (cfg_.connect_role == 0) ? sender_running_
+                                                       : (cfg_.connect_role == 1 ? receiver_running_ : duplex_running_);
+    if (!role_running) {
+        if (gradient_pill_button("Підключитись / Старт", ImVec2(-1, 48.0f), kColAccentBlue, kColAccentPurp)) {
+            if (cfg_.connect_role == 0) {
+                start_sender();
+                if (!audio_matrix_.is_running()) audio_matrix_.start();
+            } else if (cfg_.connect_role == 1) {
+                start_receiver();
+                if (!audio_matrix_.is_running()) audio_matrix_.start();
+            } else {
+                audio_matrix_.stop();
+                start_duplex();
+            }
+        }
+    } else {
+        if (gradient_pill_button("Зупинити з'єднання", ImVec2(-1, 48.0f), kColPink, kColRed)) {
+            if (cfg_.connect_role == 0) stop_sender();
+            else if (cfg_.connect_role == 1) stop_receiver();
+            else stop_duplex();
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // ---- Automatic LAN / Bonjour Discovery (1 click) ----
+    ImGui::TextColored(kColAccentPurp, "2. Пристрої поруч у мережі (Автопошук)");
+    ImGui::SameLine(std::max(240.0f, ImGui::GetContentRegionAvail().x - 175.0f));
+    const bool is_scanning = scanning_.load() || nodes_scanning_.load();
+    if (gradient_pill_button(is_scanning ? "Пошук..." : "Знайти пристрої", ImVec2(165.0f, 28.0f),
+                             kColAccentBlue, kColAccentInd)) {
+        start_lan_scan();
+        scan_aoip_nodes();
+    }
+    ImGui::Spacing();
+
+    begin_glass_card("##DiscoveredCards", ImVec2(0, 136.0f), true);
+    int found_total = 0;
+    {
+        std::lock_guard<std::mutex> lk(disc_mu_);
+        for (size_t i = 0; i < discovered_.size(); ++i) {
+            const auto& d = discovered_[i];
+            ++found_total;
+            char title[128], sub[128];
+            std::snprintf(title, sizeof(title), "%s (%s)", d.device_name.c_str(), d.os.c_str());
+            std::snprintf(sub, sizeof(sub), "%s:%u  ·  пінг %u мс  ·  клік щоб обрати",
+                          d.ip.c_str(), unsigned(d.stream_port), unsigned(d.rtt_ms));
+            const bool is_sel = (cfg_.dest_ip == d.ip && cfg_.dest_port == int(d.stream_port));
+            ImGui::PushID(int(i) + 100);
+            if (selectable_choice_card("##DiscPeer", title, sub, is_sel, ImVec2(-1, 56.0f))) {
+                cfg_.dest_ip = d.ip;
+                cfg_.dest_port = int(d.stream_port);
+                std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", d.ip.c_str());
+                std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", d.ip.c_str());
+                config_dirty_ = true;
+                toast_msg_ = "Обрано пристрій: " + d.device_name + " (" + d.ip + ")";
+                toast_until_us_ = now_us() + 2500000ull;
+            }
+            ImGui::PopID();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(nodes_mu_);
+        for (size_t i = 0; i < nodes_.size(); ++i) {
+            const auto& nd = nodes_[i];
+            ++found_total;
+            char title[128], sub[160];
+            std::snprintf(title, sizeof(title), "%s (AoIP %u кан.)", nd.name, nd.channels);
+            std::snprintf(sub, sizeof(sub), "%s:%u  ·  %s  ·  клік щоб обрати",
+                          nd.ip, nd.rx_port, nd.driver_connected ? "DAW підключена" : "Готовий");
+            const bool is_sel = (std::strcmp(dpx_peer_buf_, nd.ip) == 0);
+            ImGui::PushID(int(i) + 500);
+            if (selectable_choice_card("##AoipPeer", title, sub, is_sel, ImVec2(-1, 56.0f))) {
+                std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", nd.ip);
+                std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", nd.ip);
+                cfg_.dest_ip = nd.ip;
+                cfg_.dpx_peer_host = nd.ip;
+                cfg_.dest_port = nd.rx_port;
+                cfg_.dpx_peer_port = nd.rx_port;
+                if (nd.duplex && nd.tx_port) cfg_.dpx_listen_port = nd.tx_port;
+                config_dirty_ = true;
+                toast_msg_ = std::string("Обрано AoIP-вузол: ") + nd.name;
+                toast_until_us_ = now_us() + 2500000ull;
+            }
+            ImGui::PopID();
+        }
+    }
+    if (found_total == 0) {
+        ImGui::TextDisabled("Поки що не знайдено інших комп'ютерів із LanVid у вашій мережі.");
+        ImGui::TextDisabled("Натисніть «Знайти пристрої» або введіть IP-адресу вручну нижче.");
+    }
+    end_glass_card();
+
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Ввести IP-адресу та порт вручну")) {
+        ImGui::SetNextItemWidth(200.0f);
+        if (cfg_.connect_role == 2) {
+            if (ImGui::InputText("IP партнера", dpx_peer_buf_, sizeof(dpx_peer_buf_))) config_dirty_ = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(92.0f);
+            if (ImGui::InputInt("Порт TX", &cfg_.dpx_peer_port, 0, 0)) {
+                cfg_.dpx_peer_port = std::clamp(cfg_.dpx_peer_port, 1024, 65535);
+                config_dirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(92.0f);
+            if (ImGui::InputInt("Порт RX", &cfg_.dpx_listen_port, 0, 0)) {
+                cfg_.dpx_listen_port = std::clamp(cfg_.dpx_listen_port, 1024, 65535);
+                config_dirty_ = true;
+            }
+        } else {
+            if (ImGui::InputText("IP отримувача", ip_buf_, sizeof(ip_buf_))) config_dirty_ = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(96.0f);
+            if (ImGui::InputInt("Порт UDP", &cfg_.dest_port, 0, 0)) {
+                cfg_.dest_port = std::clamp(cfg_.dest_port, 1024, 65535);
+                cfg_.listen_port = cfg_.dest_port;
+                config_dirty_ = true;
+            }
+        }
+    }
+
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Відеопотік, прев'ю та просунуті параметри")) {
+        if (cfg_.connect_role == 0) {
+            draw_sender_tab();
+        } else if (cfg_.connect_role == 1) {
+            draw_receiver_tab();
+        } else {
+            draw_duplex_tab();
+        }
+    }
+
+    end_glass_card();
+
+    // ---- RIGHT COLUMN: 3 Large Telemetry Donut Gauges + Live Quick Summary ----
+    ImGui::SameLine();
+    begin_glass_card("##ConnectTelemetry", ImVec2(0, 0));
+    draw_gradient_icon_tile("##TelIcon", IconKind::kWaveform, 32.0f, cfg_.aoip_channels, false);
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColTextMain, "Стан з'єднання в реальному часі");
+    ImGui::TextDisabled("Якість мережі · Затримка · Трафік");
+    ImGui::EndGroup();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps +
+                              (tx_stats_.audio_kbps + rx_stats_.audio_kbps) / 1000.0;
+    const double loss_pct = std::clamp(receiver_running_ ? rx_stats_.loss_pct : tx_stats_.rx_loss_pct, 0.0, 100.0);
+    const double health_pct = std::clamp(100.0 - loss_pct, 0.0, 100.0);
+    const double est_mbps = estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec);
+    const float bw_frac = float(std::clamp(total_mbps / std::max(100.0, est_mbps), 0.0, 1.0));
+    const double buf_ms = actual_buf_valid_ ? actual_buf_ms_ : double(cfg_.aoip_latency_ms);
+    const float lat_frac = float(std::clamp(buf_ms / 100.0, 0.05, 1.0));
+
+    const float gw_avail = ImGui::GetContentRegionAvail().x;
+    const float ggap = 10.0f;
+    const float card_w = std::max(100.0f, (gw_avail - ggap * 2.0f) / 3.0f);
+    const float card_h = 136.0f;
+
+    char hlth_val[24];
+    std::snprintf(hlth_val, sizeof(hlth_val), "%.0f%%", health_pct);
+    draw_ring_gauge("Якість мережі", hlth_val, loss_pct > 0.5 ? "Втрати" : "Чудово",
+                    float(health_pct / 100.0), card_w, card_h, loss_pct > 1.0, true);
+
+    ImGui::SameLine(0.0f, ggap);
+    char lat_val[24];
+    std::snprintf(lat_val, sizeof(lat_val), "%.0f", buf_ms);
+    draw_ring_gauge("Затримка", lat_val, "мс", lat_frac, card_w, card_h, buf_ms > 50.0, false);
+
+    ImGui::SameLine(0.0f, ggap);
+    char tr_val[24], tr_sub[24];
+    std::snprintf(tr_val, sizeof(tr_val), "%.1f", total_mbps);
+    std::snprintf(tr_sub, sizeof(tr_sub), "Mbps");
+    draw_ring_gauge("Трафік", tr_val, tr_sub, std::max(0.06f, bw_frac), card_w, card_h, bw_frac > 0.85f, false);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Quick status summary cards
+    begin_glass_card("##QuickSummary", ImVec2(0, 150.0f), true);
+    ImGui::TextColored(kColAccentPurp, "Поточна конфігурація");
+    ImGui::Spacing();
+    const char* q_names[4] = {"Максимальна (32-bit)", "Студійна (24-bit)", "Збалансована (16-bit)", "Економна (Wi-Fi)"};
+    ImGui::Text("Канали: %d кан. @ 48 кГц  ·  %s", cfg_.aoip_channels, q_names[std::clamp(cfg_.audio_codec, 0, 3)]);
+    ImGui::Text("Очікуваний трафік: ~%.1f Мбіт/с", est_mbps);
+    ImGui::Text("Режим затримки: %s (%d мс)",
+                cfg_.adaptive_jitter ? "Авто для Wi-Fi" : "Фіксована для кабелю", cfg_.aoip_latency_ms);
+    ImGui::Text("Активні маршрути: %zu аудіо  ·  %zu MIDI",
+                audio_matrix_.crosspoints().size(), audio_matrix_.midi_crosspoints().size());
+    ImGui::Spacing();
+    if (status_pill_button("Відкрити маршрути ->", false, ImVec2(0, 28))) { cfg_.active_tab = 1; config_dirty_ = true; }
+    ImGui::SameLine();
+    if (status_pill_button("Налаштування ->", false, ImVec2(0, 28))) { cfg_.active_tab = 3; config_dirty_ = true; }
+    end_glass_card();
+
+    // Compact live meters preview if receiver is running
+    if (receiver_running_) {
+        ImGui::Spacing();
+        ImGui::TextColored(kColAccentPurp, "Живі рівні каналів");
+        draw_aoip_meter_grid();
+    }
+
+    end_glass_card();
+}
+
+void LanVidStudioApp::draw_devices_tab() {
+    draw_add_device_popups();
+
+    const float total_w = ImGui::GetContentRegionAvail().x;
+    const float half_w = std::max(340.0f, (total_w - 10.0f) * 0.5f);
+
+    // ---- LEFT: AUDIO DEVICES ----
+    auto slots = audio_matrix_.slots();
+    begin_glass_card("##DevAudioCol", ImVec2(half_w, 0));
+    draw_gradient_icon_tile("##DevAudTile", IconKind::kHeadphones, 34.0f, int(slots.size()), false);
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColTextMain, "Аудіопристрої та звукові карти");
+    ImGui::TextDisabled("Навушники, мікрофони, ASIO-драйвери та шина DAW (%zu / %d)", slots.size(), kMatrixMaxSlots);
+    ImGui::EndGroup();
+    ImGui::Separator();
+
+    if (gradient_pill_button("+ Додати аудіопристрій", ImVec2(0, 32), kColAccentBlue, kColAccentPurp)) {
+        ImGui::OpenPopup("##AddAudioDev");
+    }
+    ImGui::SameLine();
+    if (status_pill_button("Оновити список", false, ImVec2(0, 32))) refresh_devices();
+    ImGui::SameLine();
+    const bool mx_on = audio_matrix_.is_running();
+    if (!mx_on) {
+        if (gradient_pill_button("Увімкнути звук", ImVec2(-1, 32), kColAccentBlue, kColGreen)) {
+            stop_vdev_tx();
+            vdev_rx_.stop();
+            audio_matrix_.start();
+            toast_msg_ = "Аудіоматрицю запущено (48 кГц)";
+            toast_until_us_ = now_us() + 2500000ull;
+        }
+    } else {
+        if (gradient_pill_button("Зупинити звук", ImVec2(-1, 32), kColPink, kColRed)) {
+            audio_matrix_.stop();
+        }
+    }
+
+    ImGui::Spacing();
+    for (auto s : slots) {
+        ImGui::PushID(s.id);
+        const auto st = audio_matrix_.slot_status(s.id);
+        begin_glass_card("##DevSlotCard", ImVec2(0, 96.0f), true, ImGuiWindowFlags_NoScrollbar);
+
+        const char* role_lbl = (s.type == MatrixSlotType::kVirtualBus)
+                                   ? "Віртуальна шина DAW"
+                                   : (s.type == MatrixSlotType::kNetworkAoip
+                                          ? "Мережевий потік (AoIP)"
+                                          : (s.type == MatrixSlotType::kExternalAsio ? "Зовнішній ASIO" : "Системний звук"));
+        const IconKind ik = (s.type == MatrixSlotType::kSystemAudio) ? IconKind::kHeadphones : IconKind::kWaveform;
+        draw_gradient_icon_tile("##DevSlotIco", ik, 38.0f, s.channels, false);
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(kColTextMain, "%s", s.name.c_str());
+        ImGui::TextColored(st.connected ? kColGreen : kColTextMuted, "%s",
+                           s.active ? (st.connected ? "Активний" : "Готовий") : "Вимкнено");
+        ImGui::SameLine();
+        ImGui::TextDisabled("· %s · %u Гц", role_lbl, st.device_sample_rate);
+        ImGui::EndGroup();
+
+        ImGui::SameLine(std::max(160.0f, ImGui::GetWindowWidth() - 62.0f));
+        bool act = s.active;
+        if (studio_toggle("##DevAct", &act, kColAccentInd)) {
+            s.active = act;
+            audio_matrix_.update_slot(s.id, s);
+            config_dirty_ = true;
+        }
+        if (s.type != MatrixSlotType::kVirtualBus && s.type != MatrixSlotType::kNetworkAoip) {
+            ImGui::SameLine(std::max(120.0f, ImGui::GetWindowWidth() - 94.0f));
+            if (ImGui::SmallButton("x")) {
+                audio_matrix_.remove_slot(s.id);
+                config_dirty_ = true;
+                end_glass_card();
+                ImGui::PopID();
+                break;
+            }
+        }
+
+        const float vu_w = ImGui::GetContentRegionAvail().x;
+        const float vu_db = (s.role == MatrixSlotRole::kOutput) ? st.peak_out_dbfs
+                                                                : std::max(st.peak_in_dbfs, st.peak_out_dbfs);
+        draw_segmented_vu(vu_db, vu_w, 10.0f);
+        end_glass_card();
+        ImGui::PopID();
+    }
+    end_glass_card();
+
+    // ---- RIGHT: MIDI DEVICES ----
+    ImGui::SameLine();
+    const auto mslots = audio_matrix_.midi_slots();
+    begin_glass_card("##DevMidiCol", ImVec2(0, 0));
+    draw_gradient_icon_tile("##DevMidTile", IconKind::kMidiPlug, 34.0f, int(mslots.size()), false);
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColTextMain, "MIDI-контролери та порти");
+    ImGui::TextDisabled("Клавіатури, електробарабани, DAW та мережевий MIDI (%zu / %d)",
+                        mslots.size(), kMatrixMaxMidiSlots);
+    ImGui::EndGroup();
+    ImGui::Separator();
+
+    if (gradient_pill_button("+ Додати MIDI-пристрій", ImVec2(0, 32), kColAccentInd, kColAccentPurp)) {
+        ImGui::OpenPopup("##AddMidiDev");
+    }
+    ImGui::SameLine();
+    if (gradient_pill_button("PANIC (Скинути всі ноти)", ImVec2(-1, 32), kColPink, kColRed)) {
+        audio_matrix_.send_midi_panic(-1);
+        toast_msg_ = "MIDI PANIC: надіслано All Notes Off на всі 16 каналів";
+        toast_until_us_ = now_us() + 2500000ull;
+    }
+
+    ImGui::Spacing();
+    const uint64_t now_t = now_us();
+    for (auto ms : mslots) {
+        ImGui::PushID(4000 + ms.id);
+        const auto mst = audio_matrix_.midi_slot_status(ms.id);
+        const bool blinking = (mst.last_activity_us > 0 && now_t - mst.last_activity_us < 180000ull);
+        begin_glass_card("##DevMidiCard", ImVec2(0, 74.0f), true, ImGuiWindowFlags_NoScrollbar);
+
+        const int ev_badge = (mst.events_count > 0) ? int(std::min<uint64_t>(mst.events_count, 99)) : -1;
+        draw_gradient_icon_tile("##DevMidIco", IconKind::kMidiPlug, 36.0f, ev_badge, false);
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        ImGui::TextColored(blinking ? kColGreen : kColTextMuted, "●");
+        ImGui::SameLine(0.0f, 5.0f);
+        ImGui::TextColored(kColTextMain, "%s", ms.name.c_str());
+
+        const char* mtag = (ms.type == MidiSlotType::kMidiInput)
+                               ? "Вхід MIDI"
+                               : (ms.type == MidiSlotType::kMidiOutput
+                                      ? "Вихід MIDI"
+                                      : (ms.type == MidiSlotType::kNetworkMidiTx ? "У мережу (MIDI2)" : "З мережі (MIDI2)"));
+        ImGui::TextColored(blinking ? kColAccentPurp : kColTextMuted, "%s · %llu подій",
+                           mtag, (unsigned long long)mst.events_count);
+        if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("PANIC")) audio_matrix_.send_midi_panic(ms.id);
+        }
+        if (ms.type == MidiSlotType::kMidiInput || ms.type == MidiSlotType::kMidiOutput) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) {
+                audio_matrix_.remove_midi_slot(ms.id);
+                config_dirty_ = true;
+                ImGui::EndGroup();
+                end_glass_card();
+                ImGui::PopID();
+                break;
+            }
+        }
+        ImGui::EndGroup();
+
+        ImGui::SameLine(std::max(160.0f, ImGui::GetWindowWidth() - 62.0f));
+        bool act = ms.active;
+        if (studio_toggle("##DevMidAct", &act, kColAccentPurp)) {
+            ms.active = act;
+            audio_matrix_.update_midi_slot(ms.id, ms);
+            config_dirty_ = true;
+        }
+        end_glass_card();
+        ImGui::PopID();
+    }
+    end_glass_card();
+}
+
+void LanVidStudioApp::draw_settings_tab() {
+    begin_glass_card("##SettingsRoot", ImVec2(0, 0));
+
+    // Top header + Theme Switch in top-right corner
+    draw_gradient_icon_tile("##SetGear", IconKind::kGear, 34.0f, -1, false);
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColTextMain, "Налаштування LanVid Studio");
+    ImGui::TextDisabled("Зрозумілі параметри якості звуку, затримки та оформлення");
+    ImGui::EndGroup();
+
+    // Theme switcher pinned to top-right corner
+    const char* theme_lbl = cfg_.dark_theme ? "Тема: Темна Студія" : "Тема: Світла Лаванда";
+    const float tw = ImGui::CalcTextSize(theme_lbl).x + 56.0f;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 16.0f, ImGui::GetWindowWidth() - tw - 20.0f));
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColAccentPurp, "%s", theme_lbl);
+    ImGui::SameLine();
+    if (studio_toggle("##ThemeToggle", &cfg_.dark_theme, kColAccentInd)) {
+        apply_theme(cfg_.dark_theme);
+        config_dirty_ = true;
+    }
+    ImGui::EndGroup();
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float col_gap = 14.0f;
+    const float left_w = std::max(380.0f, (avail_w - col_gap) * 0.54f);
+
+    // ---- LEFT COLUMN: Audio Quality Cards + Channel Count Pills ----
+    ImGui::BeginGroup();
+    ImGui::TextColored(kColAccentPurp, "1. Якість звуку і трафік мережі");
+    ImGui::TextDisabled("Оберіть баланс між точністю звучання та навантаженням на Wi-Fi чи Ethernet");
+    ImGui::Spacing();
+
+    struct QualityCard {
+        int codec;
+        const char* title;
+        const char* desc;
+    };
+    const QualityCard qcards[4] = {
+        {0, "Максимальна (Без втрат 32-bit)", "Для кабелю Ethernet (~98 Мбіт/с на 64 кан.)"},
+        {1, "Студійна (24-bit)",              "Оптимально для швидкого Wi-Fi 6 (-25% трафіку)"},
+        {2, "Збалансована (16-bit)",          "Стабільно для звичайного Wi-Fi (-50% трафіку)"},
+        {3, "Економна (Стиснення для Wi-Fi)", "Мінімальне навантаження на мережу (-80% трафіку)"},
+    };
+    for (const auto& q : qcards) {
+        ImGui::PushID(q.codec);
+        if (selectable_choice_card("##QCard", q.title, q.desc, cfg_.audio_codec == q.codec, ImVec2(left_w, 60.0f))) {
+            cfg_.audio_codec = q.codec;
+            if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
+            if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
+            config_dirty_ = true;
+        }
+        ImGui::PopID();
+    }
+    ImGui::TextDisabled("Орієнтовний трафік для %d каналів: %.1f Мбіт/с",
+                        cfg_.aoip_channels, estimate_aoip_mbps(cfg_.aoip_channels, cfg_.audio_codec));
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Big channel count pill buttons: 2 (Стерео), 8, 16, 32, 64
+    ImGui::TextColored(kColAccentPurp, "2. Кількість каналів звуку");
+    ImGui::TextDisabled("Скільки доріжок передавати одночасно");
+    ImGui::Spacing();
+    const char* ch_labels[5] = {"2 (Стерео)", "8", "16", "32", "64"};
+    for (int i = 0; i < 5; ++i) {
+        if (i > 0) ImGui::SameLine(0.0f, 8.0f);
+        if (status_pill_button(ch_labels[i], cfg_.aoip_channels == kBusChoices[i],
+                               ImVec2(i == 0 ? 116.0f : 62.0f, 36.0f))) {
+            cfg_.aoip_channels = kBusChoices[i];
+            tone_channels_.store(cfg_.aoip_channels);
+            if (receiver_) apply_receiver_bus();
+            config_dirty_ = true;
+        }
+    }
+    ImGui::EndGroup();
+
+    // ---- RIGHT COLUMN: Latency Mode Cards + Buffer & Stream Options ----
+    ImGui::SameLine(0.0f, col_gap);
+    ImGui::BeginGroup();
+    const float right_w = std::max(320.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::TextColored(kColAccentPurp, "3. Режим затримки");
+    ImGui::TextDisabled("Перемикається на льоту без переривання звуку");
+    ImGui::Spacing();
+
+    char auto_desc[128];
+    if (actual_buf_valid_) {
+        std::snprintf(auto_desc, sizeof(auto_desc),
+                      "Сам підлаштовується під Wi-Fi (поточна затримка: %.0f мс)", actual_buf_ms_);
+    } else {
+        std::snprintf(auto_desc, sizeof(auto_desc),
+                      "Сам підлаштовується під якість Wi-Fi (ціль: %d мс)", cfg_.aoip_latency_ms);
+    }
+    if (selectable_choice_card("##LatAuto", "Авто для Wi-Fi (Без обривів)", auto_desc,
+                               cfg_.adaptive_jitter != 0, ImVec2(right_w, 64.0f))) {
+        cfg_.adaptive_jitter = 1;
+        apply_latency_mode();
+        config_dirty_ = true;
+    }
+    if (selectable_choice_card("##LatFixed", "Фіксована для кабелю (Для живої гри)",
+                               "Жорстко тримає вибрані 5 / 10 / 20 мс без змін",
+                               cfg_.adaptive_jitter == 0, ImVec2(right_w, 64.0f))) {
+        cfg_.adaptive_jitter = 0;
+        apply_latency_mode();
+        config_dirty_ = true;
+    }
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Цільова затримка:");
+    const int lat_presets[4] = {5, 10, 20, 50};
+    const char* lat_lbls[4] = {"5 мс", "10 мс", "20 мс", "50 мс"};
+    for (int i = 0; i < 4; ++i) {
+        if (i > 0) ImGui::SameLine(0.0f, 8.0f);
+        if (status_pill_button(lat_lbls[i], cfg_.aoip_latency_ms == lat_presets[i], ImVec2(72.0f, 32.0f))) {
+            cfg_.aoip_latency_ms = lat_presets[i];
+            if (sender_) lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
+            if (receiver_) lv_receiver_set_audio_latency_ms(receiver_, uint32_t(cfg_.aoip_latency_ms));
+            if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
+            config_dirty_ = true;
+        }
+    }
+    ImGui::SetNextItemWidth(right_w);
+    if (ImGui::SliderInt("##SetLatSlider", &cfg_.aoip_latency_ms, 2, 2000, "Точна затримка: %d мс",
+                         ImGuiSliderFlags_Logarithmic)) {
+        if (sender_) lv_sender_set_audio_latency_ms(sender_, uint32_t(cfg_.aoip_latency_ms));
+        if (receiver_) lv_receiver_set_audio_latency_ms(receiver_, uint32_t(cfg_.aoip_latency_ms));
+        if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
+        config_dirty_ = true;
+    }
+    draw_actual_buffer_line();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextColored(kColAccentPurp, "4. Додаткові налаштування");
+    ImGui::Spacing();
+    if (studio_toggle("##SetAudioOnly", &cfg_.audio_only, kColAccentInd)) {
+        config_dirty_ = true;
+        if (sender_running_) start_sender();
+        if (receiver_running_) start_receiver();
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(kColTextMain, "Лише звук (Вимкнути відео)");
+    ImGui::TextDisabled("Економить процесор і трафік, якщо потрібен тільки звук та MIDI");
+
+    ImGui::Spacing();
+    if (studio_toggle("##SetFbGuard", &cfg_.matrix_feedback_guard, kColAccentPurp)) {
+        audio_matrix_.set_feedback_guard(cfg_.matrix_feedback_guard);
+        config_dirty_ = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(kColTextMain, "Захист від петлі зворотного зв'язку");
+    ImGui::TextDisabled("Блокує випадкове замикання виходу пристрою на власний вхід");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Розмір буфера аудіоматриці:");
+    const int bufs[3] = {128, 256, 512};
+    const char* buf_l[3] = {"128 (2.7 мс)", "256 (5.3 мс)", "512 (10.7 мс)"};
+    for (int i = 0; i < 3; ++i) {
+        if (i > 0) ImGui::SameLine(0.0f, 8.0f);
+        if (status_pill_button(buf_l[i], cfg_.matrix_buffer_size == bufs[i], ImVec2(106.0f, 30.0f))) {
+            cfg_.matrix_buffer_size = bufs[i];
+            audio_matrix_.set_buffer_size(cfg_.matrix_buffer_size);
+            config_dirty_ = true;
+        }
+    }
+    ImGui::EndGroup();
+
+    end_glass_card();
+}
+
+void LanVidStudioApp::draw_patchbay_tab() {
+    auto slots = audio_matrix_.slots();
+    auto find_slot_by_type = [&](MatrixSlotType t, MatrixSlotRole role_hint = MatrixSlotRole::kDuplex,
+                                 bool check_role = false) -> int {
+        for (const auto& s : slots) {
+            if (s.type == t && (!check_role || s.role == role_hint)) return s.id;
+        }
+        return -1;
+    };
+    const int net_id = find_slot_by_type(MatrixSlotType::kNetworkAoip);
+    const int daw_id = find_slot_by_type(MatrixSlotType::kVirtualBus);
+    const int mon_id = find_slot_by_type(MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput, true);
+
+    begin_glass_card("##PatchbayRoot", ImVec2(0, 0));
+
+    // ---- 1. QUICK ROUTINGS (1-Click Scenarios) ----
+    ImGui::TextColored(kColAccentPurp, "Швидкі сценарії в 1 клік");
+    ImGui::Spacing();
+    const float qgap = 10.0f;
+    const float qw = std::max(145.0f, (ImGui::GetContentRegionAvail().x - qgap * 3.0f) / 4.0f);
+    if (selectable_choice_card("##QrListen", "Слухати на цьому ПК", "Мережа -> Навушники + DAW",
+                               matrix_active_preset_ == 0, ImVec2(qw, 56.0f))) {
+        matrix_active_preset_ = 0;
+        matrix_patch_mode_ = 0;
+        audio_matrix_.apply_preset(0, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+        toast_msg_ = "Сценарій: Мережа -> Навушники + DAW";
+        toast_until_us_ = now_us() + 2500000ull;
+    }
+    ImGui::SameLine(0.0f, qgap);
+    if (selectable_choice_card("##QrBridge", "Студійний міст 1:1", "DAW <-> Мережа + Моніторинг",
+                               matrix_active_preset_ == 1, ImVec2(qw, 56.0f))) {
+        matrix_active_preset_ = 1;
+        matrix_patch_mode_ = 0;
+        audio_matrix_.apply_preset(1, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+        toast_msg_ = "Сценарій: Студійний міст 1:1 (DAW <-> Мережа)";
+        toast_until_us_ = now_us() + 2500000ull;
+    }
+    ImGui::SameLine(0.0f, qgap);
+    if (selectable_choice_card("##QrMidi", "MIDI-контролер у DAW", "Усі MIDI -> DAW / Мережа",
+                               matrix_active_preset_ == 3, ImVec2(qw, 56.0f))) {
+        matrix_active_preset_ = 3;
+        matrix_patch_mode_ = 1;
+        const auto mslots = audio_matrix_.midi_slots();
+        for (const auto& s : mslots) {
+            if (s.type != MidiSlotType::kMidiInput && s.type != MidiSlotType::kNetworkMidiRx) continue;
+            for (const auto& d : mslots) {
+                if (d.type != MidiSlotType::kMidiOutput && d.type != MidiSlotType::kNetworkMidiTx) continue;
+                if (s.type == MidiSlotType::kNetworkMidiRx && d.type == MidiSlotType::kNetworkMidiTx) continue;
+                audio_matrix_.set_midi_crosspoint(s.id, d.id, 0, false);
+            }
+        }
+        config_dirty_ = true;
+        toast_msg_ = "Сценарій: Усі MIDI-входи направлено в DAW та мережу";
+        toast_until_us_ = now_us() + 2500000ull;
+    }
+    ImGui::SameLine(0.0f, qgap);
+    if (selectable_choice_card("##QrClear", "Очистити все", "Видалити всі маршрути",
+                               false, ImVec2(qw, 56.0f))) {
+        ImGui::OpenPopup("##ConfirmClearAll");
+    }
+
+    if (ImGui::BeginPopupModal("##ConfirmClearAll", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(kColTextMain, "Очистити всі аудіо та MIDI маршрути?");
+        ImGui::TextDisabled("Ви завжди зможете відновити їх одним кліком у швидких сценаріях.");
+        ImGui::Spacing();
+        if (gradient_pill_button("Так, очистити", ImVec2(140, 32), kColPink, kColRed)) {
+            matrix_active_preset_ = -1;
+            audio_matrix_.clear_crosspoints();
+            audio_matrix_.clear_midi_crosspoints();
+            config_dirty_ = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (status_pill_button("Скасувати", false, ImVec2(110, 32))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // ---- 2. MODE & SCALE CONTROLS ----
+    if (status_pill_button("Аудіо-маршрути", matrix_patch_mode_ == 0, ImVec2(0, 30))) matrix_patch_mode_ = 0;
+    ImGui::SameLine();
+    if (status_pill_button("MIDI-маршрути", matrix_patch_mode_ == 1, ImVec2(0, 30))) matrix_patch_mode_ = 1;
+
+    if (matrix_patch_mode_ == 0) {
+        ImGui::SameLine(0.0f, 18.0f);
+        if (status_pill_button("Стерео-пари (1-2, 3-4...)", cfg_.matrix_stereo_pairs, ImVec2(0, 30))) {
+            cfg_.matrix_stereo_pairs = true;
+            config_dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (status_pill_button("Поканально (1, 2, 3...)", !cfg_.matrix_stereo_pairs, ImVec2(0, 30))) {
+            cfg_.matrix_stereo_pairs = false;
+            config_dirty_ = true;
+        }
+    }
+
+    // ---- MIDI PATCHBAY VIEW ----
+    if (matrix_patch_mode_ == 1) {
+        ImGui::SameLine(0.0f, 18.0f);
+        const char* ch_filters[17] = {"Усі канали", "Ch 1", "Ch 2", "Ch 3", "Ch 4", "Ch 5", "Ch 6", "Ch 7", "Ch 8",
+                                      "Ch 9", "Ch 10", "Ch 11", "Ch 12", "Ch 13", "Ch 14", "Ch 15", "Ch 16"};
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::Combo("Фільтр MIDI", &midi_channel_filter_, ch_filters, 17);
+        ImGui::Spacing();
+
+        std::vector<MidiSlotConfig> srcs, dsts;
+        for (const auto& s : audio_matrix_.midi_slots()) {
+            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx) srcs.push_back(s);
+            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx) dsts.push_back(s);
+        }
+        if (srcs.empty() || dsts.empty()) {
+            ImGui::TextDisabled("Додайте MIDI-клавіатуру або вихід у вкладці «Пристрої», щоб налаштувати маршрути.");
+        } else if (ImGui::BeginTable("##MidiPatchTbl2", int(dsts.size()) + 1,
+                                     ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("ЗВІДКИ (Джерела) \\ КУДИ (Приймачі)");
+            for (const auto& d : dsts) ImGui::TableSetupColumn(d.name.c_str());
+            ImGui::TableHeadersRow();
+            const uint64_t now_t = now_us();
+            for (const auto& s : srcs) {
+                const auto mst = audio_matrix_.midi_slot_status(s.id);
+                const bool midi_pulse = (mst.last_activity_us > 0 && now_t - mst.last_activity_us < 220000ull);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextColored(midi_pulse ? kColGreen : kColAccentPurp, "●");
+                ImGui::SameLine(0.0f, 6.0f);
+                ImGui::Text("%s", s.name.c_str());
+                for (size_t j = 0; j < dsts.size(); ++j) {
+                    ImGui::TableSetColumnIndex(int(j) + 1);
+                    MidiCrosspoint mcp{};
+                    const bool linked = audio_matrix_.has_midi_crosspoint(s.id, dsts[j].id, &mcp);
+                    ImGui::PushID(s.id * 32 + dsts[j].id);
+                    const ImVec4 bcol = linked ? (mcp.mute ? kColPink : (midi_pulse ? kColGreen : kColAccentNode))
+                                               : kColCardSoft;
+                    ImGui::PushStyleColor(ImGuiCol_Button, bcol);
+                    ImGui::PushStyleColor(ImGuiCol_Text, linked ? kColWhite : kColTextMuted);
+                    char blbl[16];
+                    if (!linked) std::snprintf(blbl, sizeof(blbl), "·");
+                    else if (mcp.mute) std::snprintf(blbl, sizeof(blbl), "MUTE");
+                    else if (mcp.channel_filter == 0) std::snprintf(blbl, sizeof(blbl), "УСІ");
+                    else std::snprintf(blbl, sizeof(blbl), "Ch%d", mcp.channel_filter);
+                    if (ImGui::Button(blbl, ImVec2(58.0f, 26.0f))) {
+                        if (linked) audio_matrix_.remove_midi_crosspoint(s.id, dsts[j].id);
+                        else audio_matrix_.set_midi_crosspoint(s.id, dsts[j].id, midi_channel_filter_, false);
+                        config_dirty_ = true;
+                    }
+                    if (linked && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        audio_matrix_.set_midi_crosspoint(s.id, dsts[j].id, mcp.channel_filter, !mcp.mute);
+                        config_dirty_ = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Направити MIDI: %s -> %s\nКлік — увімкнути/вимкнути, ПКМ — Mute",
+                                          s.name.c_str(), dsts[j].name.c_str());
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("Підказка: зелена пульсація означає, що зараз надходять MIDI-ноти.");
+        end_glass_card();
+        return;
+    }
+
+    // ---- 3. AUDIO SOURCE / DESTINATION SELECTORS + RANGE PILLS ----
+    ImGui::Spacing();
+    MatrixSlotConfig src_cfg{}, dst_cfg{};
+    bool has_src = false, has_dst = false;
+    for (const auto& s : slots) {
+        if (s.id == matrix_src_slot_) { src_cfg = s; has_src = true; }
+        if (s.id == matrix_dst_slot_) { dst_cfg = s; has_dst = true; }
+    }
+    if (!has_src && !slots.empty()) { src_cfg = slots.front(); matrix_src_slot_ = src_cfg.id; has_src = true; }
+    if (!has_dst && !slots.empty()) { dst_cfg = slots.back(); matrix_dst_slot_ = dst_cfg.id; has_dst = true; }
+
+    ImGui::TextColored(kColAccentInd, "● ЗВІДКИ (Джерело):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220.0f);
+    if (ImGui::BeginCombo("##PbSrc", has_src ? src_cfg.name.c_str() : "Оберіть джерело")) {
+        for (const auto& s : slots) {
+            if (s.role == MatrixSlotRole::kOutput) continue;
+            if (ImGui::Selectable(s.name.c_str(), s.id == matrix_src_slot_)) {
+                matrix_src_slot_ = s.id;
+                matrix_src_page_ = 0;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(0.0f, 16.0f);
+    ImGui::TextColored(kColAccentPurp, "● КУДИ (Приймач):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(220.0f);
+    if (ImGui::BeginCombo("##PbDst", has_dst ? dst_cfg.name.c_str() : "Оберіть приймач")) {
+        for (const auto& s : slots) {
+            if (s.role == MatrixSlotRole::kInput) continue;
+            if (ImGui::Selectable(s.name.c_str(), s.id == matrix_dst_slot_)) {
+                matrix_dst_slot_ = s.id;
+                matrix_dst_page_ = 0;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine(0.0f, 14.0f);
+    ImGui::SetNextItemWidth(110.0f);
+    ImGui::SliderFloat("##PbGain", &matrix_new_gain_db_, -24.0f, 6.0f, "Гучність %.0f дБ");
+
+    // Range filter pills (1-16, 17-32, 33-48, 49-64)
+    const char* page_lbl[] = {"1-16", "17-32", "33-48", "49-64"};
+    const int max_src_pages = has_src ? std::min(4, (src_cfg.channels + 15) / 16) : 1;
+    const int max_dst_pages = has_dst ? std::min(4, (dst_cfg.channels + 15) / 16) : 1;
+    if (matrix_src_page_ >= max_src_pages) matrix_src_page_ = 0;
+    if (matrix_dst_page_ >= max_dst_pages) matrix_dst_page_ = 0;
+    if (max_src_pages > 1 || max_dst_pages > 1) {
+        ImGui::TextDisabled("Діапазон каналів:");
+        const int max_p = std::max(max_src_pages, max_dst_pages);
+        for (int p = 0; p < max_p; ++p) {
+            ImGui::SameLine(0.0f, 6.0f);
+            const bool cur = (matrix_src_page_ == p || (max_src_pages == 1 && matrix_dst_page_ == p));
+            if (status_pill_button(page_lbl[p], cur, ImVec2(66.0f, 24.0f))) {
+                if (p < max_src_pages) matrix_src_page_ = p;
+                if (p < max_dst_pages) matrix_dst_page_ = p;
+            }
+        }
+    }
+
+    ImGui::Spacing();
+
+    // ---- 4. INTERACTIVE AUDIO PATCHBAY GRID (Stereo-Pairs or Per-Channel + Signal Pulse) ----
+    if (has_src && has_dst) {
+        const int step = cfg_.matrix_stereo_pairs ? 2 : 1;
+        const int r0 = matrix_src_page_ * 16;
+        const int r1 = std::min(src_cfg.channels, r0 + 16);
+        const int c0 = matrix_dst_page_ * 16;
+        const int c1 = std::min(dst_cfg.channels, c0 + 16);
+        const int rows = (r1 - r0 + step - 1) / step;
+        const int cols = (c1 - c0 + step - 1) / step;
+
+        // Real audio signal pulse factor from source/dest live peak levels
+        const auto src_st = audio_matrix_.slot_status(src_cfg.id);
+        const auto dst_st = audio_matrix_.slot_status(dst_cfg.id);
+        const float peak_db = std::max(std::max(src_st.peak_in_dbfs, src_st.peak_out_dbfs),
+                                       std::max(dst_st.peak_in_dbfs, dst_st.peak_out_dbfs));
+        const float sig_norm = std::clamp((peak_db + 54.0f) / 54.0f, 0.0f, 1.0f);
+        const float pulse_wave = 0.5f + 0.5f * std::sin(float(ImGui::GetTime() * 8.0));
+        const float sig_pulse = sig_norm * (0.65f + 0.35f * pulse_wave);
+
+        if (rows > 0 && cols > 0) {
+            const float label_w = 88.0f;
+            const float header_h = 34.0f;
+            const ImVec2 avail = ImGui::GetContentRegionAvail();
+            const float max_cell = cfg_.matrix_stereo_pairs ? 44.0f : 30.0f;
+            const float cell = std::clamp(std::min((avail.x - label_w - 12.0f) / float(cols),
+                                                   (avail.y - header_h - 32.0f) / float(rows)),
+                                          22.0f, max_cell);
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Backing plate
+            const ImVec2 grid_p0(origin.x + label_w - 3.0f, origin.y + header_h - 3.0f);
+            const ImVec2 grid_p1(origin.x + label_w + float(cols) * cell + 3.0f,
+                                 origin.y + header_h + float(rows) * cell + 3.0f);
+            dl->AddRectFilled(grid_p0, grid_p1,
+                              g_dark_theme ? IM_COL32(18, 22, 34, 255) : IM_COL32(250, 248, 255, 255), 14.0f);
+            dl->AddRect(grid_p0, grid_p1, ImGui::ColorConvertFloat4ToU32(kColBorder), 14.0f, 0, 1.0f);
+
+            // Top-left corner legend
+            dl->AddText(ImVec2(origin.x + 2.0f, origin.y + 10.0f),
+                        ImGui::ColorConvertFloat4ToU32(kColAccentInd), "ЗВІДКИ \\ КУДИ");
+
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            int hov_r = -1, hov_c = -1;
+            if (ImGui::IsWindowHovered()) {
+                const float mx = mouse.x - (origin.x + label_w);
+                const float my = mouse.y - (origin.y + header_h);
+                if (mx >= 0 && my >= 0 && mx < float(cols) * cell && my < float(rows) * cell) {
+                    hov_c = int(mx / cell);
+                    hov_r = int(my / cell);
+                }
+            }
+
+            const ImU32 hov_fill = g_dark_theme ? IM_COL32(99, 102, 241, 40) : IM_COL32(237, 233, 254, 230);
+            if (hov_r >= 0) {
+                dl->AddRectFilled(ImVec2(origin.x, origin.y + header_h + float(hov_r) * cell),
+                                  ImVec2(origin.x + label_w + float(cols) * cell,
+                                         origin.y + header_h + float(hov_r + 1) * cell),
+                                  hov_fill, 6.0f);
+            }
+            if (hov_c >= 0) {
+                dl->AddRectFilled(ImVec2(origin.x + label_w + float(hov_c) * cell, origin.y),
+                                  ImVec2(origin.x + label_w + float(hov_c + 1) * cell,
+                                         origin.y + header_h + float(rows) * cell),
+                                  hov_fill, 6.0f);
+            }
+
+            // Column headers (Destinations)
+            for (int j = 0; j < cols; ++j) {
+                const int dc = c0 + j * step;
+                char hdr[16];
+                if (step == 2 && dc + 1 < dst_cfg.channels) std::snprintf(hdr, sizeof(hdr), "%d-%d", dc + 1, dc + 2);
+                else std::snprintf(hdr, sizeof(hdr), "%d", dc + 1);
+                const ImVec2 hsz = ImGui::CalcTextSize(hdr);
+                const ImU32 col = (j == hov_c) ? ImGui::ColorConvertFloat4ToU32(kColAccentPurp)
+                                               : ImGui::ColorConvertFloat4ToU32(kColTextMuted);
+                dl->AddText(ImVec2(origin.x + label_w + float(j) * cell + (cell - hsz.x) * 0.5f, origin.y + 10.0f),
+                            col, hdr);
+            }
+
+            // Rows + clickable nodes
+            for (int i = 0; i < rows; ++i) {
+                const int sc = r0 + i * step;
+                const float ry = origin.y + header_h + float(i) * cell;
+                char rlbl[20];
+                if (step == 2 && sc + 1 < src_cfg.channels) std::snprintf(rlbl, sizeof(rlbl), "Ch %d-%d", sc + 1, sc + 2);
+                else std::snprintf(rlbl, sizeof(rlbl), "Ch %02d", sc + 1);
+                const ImU32 rcol = (i == hov_r) ? ImGui::ColorConvertFloat4ToU32(kColAccentInd)
+                                                : ImGui::ColorConvertFloat4ToU32(kColTextMain);
+                dl->AddText(ImVec2(origin.x + 6.0f, ry + (cell - 14.0f) * 0.5f), rcol, rlbl);
+
+                for (int j = 0; j < cols; ++j) {
+                    const int dc = c0 + j * step;
+                    const float cx = origin.x + label_w + float(j) * cell + cell * 0.5f;
+                    const float cy = ry + cell * 0.5f;
+
+                    MatrixCrosspoint cp0{}, cp1{};
+                    const bool l0 = audio_matrix_.has_crosspoint(src_cfg.id, sc, dst_cfg.id, dc, &cp0);
+                    const bool has_pair = (step == 2 && sc + 1 < src_cfg.channels && dc + 1 < dst_cfg.channels);
+                    const bool l1 = has_pair && audio_matrix_.has_crosspoint(src_cfg.id, sc + 1, dst_cfg.id, dc + 1, &cp1);
+                    const bool linked = l0 || l1;
+                    const bool muted = linked && (l0 ? cp0.mute : cp1.mute);
+
+                    ImGui::SetCursorScreenPos(ImVec2(origin.x + label_w + float(j) * cell, ry));
+                    ImGui::PushID(sc * 100 + dc);
+                    if (ImGui::InvisibleButton("##PbNode", ImVec2(cell, cell))) {
+                        matrix_active_preset_ = -1;
+                        if (linked) {
+                            audio_matrix_.remove_crosspoint(src_cfg.id, sc, dst_cfg.id, dc);
+                            if (has_pair) audio_matrix_.remove_crosspoint(src_cfg.id, sc + 1, dst_cfg.id, dc + 1);
+                            config_dirty_ = true;
+                        } else {
+                            const auto res = audio_matrix_.set_crosspoint(
+                                src_cfg.id, sc, dst_cfg.id, dc, matrix_new_gain_db_, false, !cfg_.matrix_feedback_guard);
+                            if (res == CrosspointResult::kBlockedFeedbackLoop) {
+                                toast_msg_ = "Захист від петлі: не можна замкнути пристрій сам на себе!";
+                                toast_until_us_ = now_us() + 3500000ull;
+                            } else if (res == CrosspointResult::kOk) {
+                                if (has_pair) {
+                                    audio_matrix_.set_crosspoint(src_cfg.id, sc + 1, dst_cfg.id, dc + 1,
+                                                                 matrix_new_gain_db_, false, !cfg_.matrix_feedback_guard);
+                                }
+                                config_dirty_ = true;
+                            }
+                        }
+                    }
+                    if (linked && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                        audio_matrix_.set_crosspoint(src_cfg.id, sc, dst_cfg.id, dc, cp0.gain_db, !muted, true);
+                        if (has_pair) {
+                            audio_matrix_.set_crosspoint(src_cfg.id, sc + 1, dst_cfg.id, dc + 1, cp1.gain_db, !muted, true);
+                        }
+                        config_dirty_ = true;
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        char sc_s[16], dc_s[16];
+                        if (step == 2 && sc + 1 < src_cfg.channels) std::snprintf(sc_s, sizeof(sc_s), "Ch %d-%d", sc + 1, sc + 2);
+                        else std::snprintf(sc_s, sizeof(sc_s), "Ch %d", sc + 1);
+                        if (step == 2 && dc + 1 < dst_cfg.channels) std::snprintf(dc_s, sizeof(dc_s), "Ch %d-%d", dc + 1, dc + 2);
+                        else std::snprintf(dc_s, sizeof(dc_s), "Ch %d", dc + 1);
+
+                        if (linked) {
+                            ImGui::SetTooltip("Маршрут: %s %s -> %s %s\nГучність: %.1f дБ | %s\n(Клік — вимкнути, ПКМ — Mute)",
+                                              src_cfg.name.c_str(), sc_s, dst_cfg.name.c_str(), dc_s,
+                                              cp0.gain_db, muted ? "ЗАГЛУШЕНО" : "АКТИВНИЙ");
+                        } else {
+                            ImGui::SetTooltip("Направити: %s %s -> %s %s\n(Клік — увімкнути, ПКМ — Mute)",
+                                              src_cfg.name.c_str(), sc_s, dst_cfg.name.c_str(), dc_s);
+                        }
+                    }
+                    ImGui::PopID();
+
+                    const float base_rad = cell * 0.28f;
+                    if (linked) {
+                        if (muted) {
+                            dl->AddCircleFilled(ImVec2(cx, cy), base_rad + 3.0f, IM_COL32(236, 72, 153, 55));
+                            dl->AddCircleFilled(ImVec2(cx, cy), base_rad, ImGui::ColorConvertFloat4ToU32(kColPink));
+                        } else {
+                            // Soft violet-blue node pulsing gently with live audio signal level
+                            const float rad = base_rad * (1.0f + 0.20f * sig_pulse);
+                            const float halo = rad + 3.5f + 4.5f * sig_pulse;
+                            const float t_diag = float(i + j) / std::max(1.0f, float(rows + cols - 2));
+                            const ImVec4 ncol = lerp_col(kColAccentNode, kColAccentSky, t_diag);
+                            dl->AddCircleFilled(ImVec2(cx, cy), halo,
+                                                IM_COL32(139, 92, 246, int(52 + 75 * sig_pulse)));
+                            dl->AddCircleFilled(ImVec2(cx, cy), rad, ImGui::ColorConvertFloat4ToU32(ncol));
+                            dl->AddCircleFilled(ImVec2(cx - rad * 0.28f, cy - rad * 0.28f), rad * 0.26f,
+                                                IM_COL32(255, 255, 255, 175));
+                        }
+                    } else {
+                        const ImU32 dot = (i == hov_r && j == hov_c)
+                                              ? IM_COL32(139, 92, 246, 175)
+                                              : (g_dark_theme ? IM_COL32(55, 65, 88, 220) : IM_COL32(221, 214, 254, 240));
+                        dl->AddCircleFilled(ImVec2(cx, cy), base_rad * 0.58f, dot);
+                    }
+                }
+            }
+            ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + header_h + float(rows) * cell + 8.0f));
+        }
+    }
+    ImGui::TextDisabled("Клік: з'єднати / роз'єднати  ·  ПКМ: Mute  ·  Пульсація вузла = є живий звук");
+    end_glass_card();
+}
+
 void LanVidStudioApp::render_frame() {
     poll_telemetry_and_frames();
 
@@ -2859,10 +4067,10 @@ void LanVidStudioApp::render_frame() {
     ImGui::Spacing();
 
     switch (std::clamp(cfg_.active_tab, 0, 3)) {
-        case 0: draw_sender_tab(); break;
-        case 1: draw_receiver_tab(); break;
-        case 2: draw_duplex_tab(); break;
-        default: draw_audio_matrix_tab(); break;
+        case 0: draw_connect_tab(); break;
+        case 1: draw_patchbay_tab(); break;
+        case 2: draw_devices_tab(); break;
+        default: draw_settings_tab(); break;
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();

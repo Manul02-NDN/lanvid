@@ -57,7 +57,10 @@ struct AppConfig {
     double audio_target_ms = 12.0;
     bool show_hud = true;
     std::string preview_backend = "auto";  // "auto", "d3d11", "gdi"
-    int active_tab = 0;        // 0=Sender, 1=Receiver, 2=Duplex, 3=Audio Matrix
+    int active_tab = 0;        // 0=Connect, 1=Patchbay, 2=Devices, 3=Settings
+    int connect_role = 0;      // 0=Send, 1=Receive, 2=Duplex (Both directions)
+    bool dark_theme = false;   // false=Soft Pastel Lavender, true=Dark Studio
+    bool matrix_stereo_pairs = true;  // true=Stereo pairs (1-2, 3-4...), false=Per-channel
 
     // Multi-Device Audio Matrix persistence
     int matrix_buffer_size = 256;
