@@ -1320,13 +1320,36 @@ void LanVidStudioApp::init_audio_matrix() {
         }
     }
 
-    // Restore or initialize MIDI slots (Network MIDI TX/RX + saved OS MIDI devices)
+    // Restore or initialize MIDI slots (Network MIDI TX/RX + system virtual DAW port + saved OS MIDI devices)
     audio_matrix_.clear_midi_slots();
     if (cfg_.midi_slots.empty()) {
         audio_matrix_.add_midi_slot({0, MidiSlotType::kNetworkMidiTx, "Network MIDI TX (MIDI2)", "", -1, 0, true});
         audio_matrix_.add_midi_slot({1, MidiSlotType::kNetworkMidiRx, "Network MIDI RX (MIDI2)", "", -1, 0, true});
+        const int daw_midi_id = audio_matrix_.add_midi_slot(
+            {2, MidiSlotType::kVirtualDawMidi, "LanVid MIDI (DAW)", "LanVid MIDI", -1, 0, true});
+        if (daw_midi_id >= 0) {
+            audio_matrix_.set_midi_crosspoint(1, daw_midi_id, 0, false);  // Network MIDI RX -> LanVid MIDI (DAW)
+            audio_matrix_.set_midi_crosspoint(daw_midi_id, 0, 0, false);  // LanVid MIDI (DAW) -> Network MIDI TX
+        }
     } else {
-        for (const auto& ms : cfg_.midi_slots) audio_matrix_.add_midi_slot(ms);
+        bool has_virtual_daw = false;
+        for (const auto& ms : cfg_.midi_slots) {
+            if (ms.type == MidiSlotType::kVirtualDawMidi) has_virtual_daw = true;
+            audio_matrix_.add_midi_slot(ms);
+        }
+        if (!has_virtual_daw) {
+            const int daw_midi_id = audio_matrix_.add_midi_slot(
+                {-1, MidiSlotType::kVirtualDawMidi, "LanVid MIDI (DAW)", "LanVid MIDI", -1, 0, true});
+            if (daw_midi_id >= 0) {
+                for (const auto& s : audio_matrix_.midi_slots()) {
+                    if (s.type == MidiSlotType::kNetworkMidiRx) {
+                        audio_matrix_.set_midi_crosspoint(s.id, daw_midi_id, 0, false);
+                    } else if (s.type == MidiSlotType::kNetworkMidiTx) {
+                        audio_matrix_.set_midi_crosspoint(daw_midi_id, s.id, 0, false);
+                    }
+                }
+            }
+        }
         for (const auto& mc : cfg_.midi_crosspoints) {
             audio_matrix_.set_midi_crosspoint(mc.src_slot, mc.dst_slot, mc.channel_filter, mc.mute);
         }
@@ -1713,6 +1736,18 @@ void LanVidStudioApp::draw_studio_config_panel() {
     ImGui::Spacing();
     ImGui::Separator();
 
+    // Virtual DAW MIDI Port status ("LanVid MIDI")
+    for (const auto& ms : audio_matrix_.midi_slots()) {
+        if (ms.type != MidiSlotType::kVirtualDawMidi) continue;
+        const auto mst = audio_matrix_.midi_slot_status(ms.id);
+        ImGui::Spacing();
+        ImGui::TextColored(mst.connected ? kColGreen : kColAmber, "●");
+        ImGui::SameLine(0.0f, 5.0f);
+        ImGui::TextWrapped("Віртуальний порт для DAW: %s",
+                           mst.status_text.empty() ? "LanVid MIDI" : mst.status_text.c_str());
+        break;
+    }
+
     // ---- AUDIO BUS ----
     ImGui::TextColored(kColAccentPurp, "AUDIO BUS");
     int bus_idx = 4;
@@ -2030,10 +2065,13 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
                                    ? "MIDI IN"
                                    : (ms.type == MidiSlotType::kMidiOutput
                                           ? "MIDI OUT"
-                                          : (ms.type == MidiSlotType::kNetworkMidiTx ? "NET TX" : "NET RX"));
+                                          : (ms.type == MidiSlotType::kVirtualDawMidi
+                                                 ? "DAW VIRT"
+                                                 : (ms.type == MidiSlotType::kNetworkMidiTx ? "NET TX" : "NET RX")));
             ImGui::TextColored(blinking ? kColAccentPurp : kColTextMuted, "%llu ev · %s",
                                (unsigned long long)mst.events_count, mtag);
-            if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx) {
+            if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx ||
+                ms.type == MidiSlotType::kVirtualDawMidi) {
                 ImGui::SameLine();
                 if (ImGui::SmallButton("PANIC")) audio_matrix_.send_midi_panic(ms.id);
             }
@@ -2092,8 +2130,12 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
 
         std::vector<MidiSlotConfig> srcs, dsts;
         for (const auto& s : audio_matrix_.midi_slots()) {
-            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx) srcs.push_back(s);
-            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx) dsts.push_back(s);
+            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx ||
+                s.type == MidiSlotType::kVirtualDawMidi)
+                srcs.push_back(s);
+            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx ||
+                s.type == MidiSlotType::kVirtualDawMidi)
+                dsts.push_back(s);
         }
         if (srcs.empty() || dsts.empty()) {
             ImGui::TextDisabled("Add MIDI Input / Output devices on the left to patch MIDI routes.");
@@ -2108,6 +2150,10 @@ void LanVidStudioApp::draw_audio_matrix_tab() {
                 ImGui::Text("%s", s.name.c_str());
                 for (size_t j = 0; j < dsts.size(); ++j) {
                     ImGui::TableSetColumnIndex(int(j) + 1);
+                    if (s.id == dsts[j].id) {
+                        ImGui::TextDisabled("  —");
+                        continue;
+                    }
                     MidiCrosspoint mcp{};
                     const bool linked = audio_matrix_.has_midi_crosspoint(s.id, dsts[j].id, &mcp);
                     ImGui::PushID(s.id * 32 + dsts[j].id);
@@ -3204,6 +3250,7 @@ void LanVidStudioApp::draw_add_device_popups() {
         if (midi_in_devs_.empty()) ImGui::TextDisabled("  MIDI-входів не знайдено");
         for (size_t i = 0; i < midi_in_devs_.size(); ++i) {
             const auto& m = midi_in_devs_[i];
+            if (m.name == "LanVid MIDI Internal") continue;
             ImGui::PushID(int(i) + 1000);
             if (ImGui::Selectable((m.name + " [MIDI IN]").c_str())) {
                 finish_add_midi({-1, MidiSlotType::kMidiInput, m.name, m.name, m.index, 0, true});
@@ -3215,6 +3262,7 @@ void LanVidStudioApp::draw_add_device_popups() {
         if (midi_out_devs_.empty()) ImGui::TextDisabled("  MIDI-виходів не знайдено");
         for (size_t i = 0; i < midi_out_devs_.size(); ++i) {
             const auto& m = midi_out_devs_[i];
+            if (m.name == "LanVid MIDI Internal") continue;
             ImGui::PushID(int(i) + 2000);
             if (ImGui::Selectable((m.name + " [MIDI OUT]").c_str())) {
                 finish_add_midi({-1, MidiSlotType::kMidiOutput, m.name, m.name, m.index, 0, true});
@@ -3685,6 +3733,22 @@ void LanVidStudioApp::draw_devices_tab() {
     }
 
     ImGui::Spacing();
+    // Status banner for the system virtual DAW MIDI port ("LanVid MIDI")
+    for (const auto& ms : mslots) {
+        if (ms.type != MidiSlotType::kVirtualDawMidi) continue;
+        const auto mst = audio_matrix_.midi_slot_status(ms.id);
+        begin_glass_card("##VirtDawMidiBanner", ImVec2(0, 48.0f), true, ImGuiWindowFlags_NoScrollbar);
+        ImGui::TextColored(mst.connected ? kColGreen : kColAmber, "●");
+        ImGui::SameLine(0.0f, 6.0f);
+        ImGui::TextColored(kColTextMain, "Віртуальний порт для DAW:");
+        ImGui::SameLine(0.0f, 6.0f);
+        ImGui::TextColored(mst.connected ? kColAccentPurp : kColTextMuted, "%s",
+                           mst.status_text.empty() ? "LanVid MIDI" : mst.status_text.c_str());
+        end_glass_card();
+        ImGui::Spacing();
+        break;
+    }
+
     const uint64_t now_t = now_us();
     for (auto ms : mslots) {
         ImGui::PushID(4000 + ms.id);
@@ -3696,7 +3760,7 @@ void LanVidStudioApp::draw_devices_tab() {
         draw_gradient_icon_tile("##DevMidIco", IconKind::kMidiPlug, 36.0f, ev_badge, false);
         ImGui::SameLine();
         ImGui::BeginGroup();
-        ImGui::TextColored(blinking ? kColGreen : kColTextMuted, "●");
+        ImGui::TextColored(blinking ? kColGreen : (mst.connected ? kColAccentInd : kColTextMuted), "●");
         ImGui::SameLine(0.0f, 5.0f);
         ImGui::TextColored(kColTextMain, "%s", ms.name.c_str());
 
@@ -3704,10 +3768,14 @@ void LanVidStudioApp::draw_devices_tab() {
                                ? "Вхід MIDI"
                                : (ms.type == MidiSlotType::kMidiOutput
                                       ? "Вихід MIDI"
-                                      : (ms.type == MidiSlotType::kNetworkMidiTx ? "У мережу (MIDI2)" : "З мережі (MIDI2)"));
+                                      : (ms.type == MidiSlotType::kVirtualDawMidi
+                                             ? "DAW Віртуальний (In/Out)"
+                                             : (ms.type == MidiSlotType::kNetworkMidiTx ? "У мережу (MIDI2)"
+                                                                                        : "З мережі (MIDI2)")));
         ImGui::TextColored(blinking ? kColAccentPurp : kColTextMuted, "%s · %llu подій",
                            mtag, (unsigned long long)mst.events_count);
-        if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx) {
+        if (ms.type == MidiSlotType::kMidiOutput || ms.type == MidiSlotType::kNetworkMidiTx ||
+            ms.type == MidiSlotType::kVirtualDawMidi) {
             ImGui::SameLine();
             if (ImGui::SmallButton("PANIC")) audio_matrix_.send_midi_panic(ms.id);
         }
@@ -3974,21 +4042,26 @@ void LanVidStudioApp::draw_patchbay_tab() {
         toast_until_us_ = now_us() + 2500000ull;
     }
     ImGui::SameLine(0.0f, qgap);
-    if (selectable_choice_card("##QrMidi", "MIDI-контролер у DAW", "Усі MIDI -> DAW / Мережа",
+    if (selectable_choice_card("##QrMidi", "MIDI-контролер у DAW", "LanVid MIDI (DAW) <-> Мережа",
                                matrix_active_preset_ == 3, ImVec2(qw, 56.0f))) {
         matrix_active_preset_ = 3;
         matrix_patch_mode_ = 1;
         const auto mslots = audio_matrix_.midi_slots();
         for (const auto& s : mslots) {
-            if (s.type != MidiSlotType::kMidiInput && s.type != MidiSlotType::kNetworkMidiRx) continue;
+            if (s.type != MidiSlotType::kMidiInput && s.type != MidiSlotType::kNetworkMidiRx &&
+                s.type != MidiSlotType::kVirtualDawMidi)
+                continue;
             for (const auto& d : mslots) {
-                if (d.type != MidiSlotType::kMidiOutput && d.type != MidiSlotType::kNetworkMidiTx) continue;
+                if (d.type != MidiSlotType::kMidiOutput && d.type != MidiSlotType::kNetworkMidiTx &&
+                    d.type != MidiSlotType::kVirtualDawMidi)
+                    continue;
+                if (s.id == d.id) continue;
                 if (s.type == MidiSlotType::kNetworkMidiRx && d.type == MidiSlotType::kNetworkMidiTx) continue;
                 audio_matrix_.set_midi_crosspoint(s.id, d.id, 0, false);
             }
         }
         config_dirty_ = true;
-        toast_msg_ = "Сценарій: Усі MIDI-входи направлено в DAW та мережу";
+        toast_msg_ = "Сценарій: MIDI-контролер у DAW (LanVid MIDI <-> Мережа)";
         toast_until_us_ = now_us() + 2500000ull;
     }
     ImGui::SameLine(0.0f, qgap);
@@ -4030,8 +4103,12 @@ void LanVidStudioApp::draw_patchbay_tab() {
 
         std::vector<MidiSlotConfig> srcs, dsts;
         for (const auto& s : audio_matrix_.midi_slots()) {
-            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx) srcs.push_back(s);
-            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx) dsts.push_back(s);
+            if (s.type == MidiSlotType::kMidiInput || s.type == MidiSlotType::kNetworkMidiRx ||
+                s.type == MidiSlotType::kVirtualDawMidi)
+                srcs.push_back(s);
+            if (s.type == MidiSlotType::kMidiOutput || s.type == MidiSlotType::kNetworkMidiTx ||
+                s.type == MidiSlotType::kVirtualDawMidi)
+                dsts.push_back(s);
         }
         if (srcs.empty() || dsts.empty()) {
             ImGui::TextDisabled("Додайте MIDI-клавіатуру або вихід у вкладці «Пристрої», щоб налаштувати маршрути.");
@@ -4051,6 +4128,10 @@ void LanVidStudioApp::draw_patchbay_tab() {
                 ImGui::Text("%s", s.name.c_str());
                 for (size_t j = 0; j < dsts.size(); ++j) {
                     ImGui::TableSetColumnIndex(int(j) + 1);
+                    if (s.id == dsts[j].id) {
+                        ImGui::TextDisabled("  —");
+                        continue;
+                    }
                     MidiCrosspoint mcp{};
                     const bool linked = audio_matrix_.has_midi_crosspoint(s.id, dsts[j].id, &mcp);
                     ImGui::PushID(s.id * 32 + dsts[j].id);

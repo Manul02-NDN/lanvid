@@ -1,11 +1,15 @@
 #include "mini_test.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "audio/audio_rx.hpp"
@@ -14,7 +18,9 @@
 #include "audio/master_clock.hpp"
 #include "audio/multi_device_matrix.hpp"
 #include "gui/app_config.hpp"
+#include "midi/midi_device_manager.hpp"
 #include "midi/midi_sync_engine.hpp"
+#include "midi/virtual_midi.hpp"
 #include "net/packet.hpp"
 
 TEST(midi_over_ip_audio_sync_and_matrix_routing) {
@@ -191,5 +197,112 @@ TEST(midi_over_ip_audio_sync_and_matrix_routing) {
     } else {
         std::error_code ec;
         fs::remove(cfg_path, ec);
+    }
+}
+
+TEST(virtual_midi_daw_port_visibility_and_loopback) {
+    using namespace lv;
+
+    struct Msg {
+        uint8_t st, d1, d2;
+    };
+    std::mutex mu;
+    std::vector<Msg> rx_from_daw;
+    std::vector<Msg> rx_in_daw;
+
+    VirtualMidiPort vport;
+    const bool opened = vport.open("LanVid MIDI", [&](uint8_t st, uint8_t d1, uint8_t d2, uint64_t) {
+        std::lock_guard<std::mutex> lk(mu);
+        rx_from_daw.push_back({st, d1, d2});
+    });
+
+    const auto vst = vport.status();
+    std::printf("    [VirtualMIDI] open=%d backend='%s' port='%s'\n",
+                opened ? 1 : 0, vst.backend_name.c_str(), vst.daw_port_name.c_str());
+
+    if (opened) {
+        CHECK(vport.is_open());
+        CHECK(!vst.daw_port_name.empty());
+
+        // 1. Verify "LanVid MIDI" is visible in OS MIDI enumeration (same API REAPER / Logic use).
+        const auto ins = list_midi_inputs();
+        const auto outs = list_midi_outputs();
+        int daw_in_idx = -1;
+        int daw_out_idx = -1;
+        for (const auto& d : ins) {
+            if (d.name == vst.daw_port_name) daw_in_idx = d.index;
+        }
+        for (const auto& d : outs) {
+            if (d.name == vst.daw_port_name) daw_out_idx = d.index;
+        }
+        CHECK(daw_in_idx >= 0);
+        CHECK(daw_out_idx >= 0);
+
+        // 2. Simulate a DAW opening "LanVid MIDI" (Input + Output) and test bidirectional Note On/Off/CC!
+        MidiInputPort daw_in;
+        MidiOutputPort daw_out;
+        const bool daw_in_ok = daw_in.open(daw_in_idx, vst.daw_port_name,
+                                           [&](uint8_t st, uint8_t d1, uint8_t d2, uint64_t) {
+                                               std::lock_guard<std::mutex> lk(mu);
+                                               rx_in_daw.push_back({st, d1, d2});
+                                           });
+        const bool daw_out_ok = daw_out.open(daw_out_idx, vst.daw_port_name);
+        CHECK(daw_in_ok);
+        CHECK(daw_out_ok);
+
+        // LanVid Studio -> DAW ("LanVid MIDI" Input)
+        CHECK(vport.send_to_daw(0x90, 60, 100));  // Note On C4
+        CHECK(vport.send_to_daw(0xB0, 74, 64));   // CC 74 Filter Cutoff
+        CHECK(vport.send_to_daw(0x80, 60, 0));    // Note Off C4
+
+        // DAW ("LanVid MIDI" Output) -> LanVid Studio
+        CHECK(daw_out.send_short(0x91, 64, 110));  // Note On E4 Ch 2
+        CHECK(daw_out.send_short(0x81, 64, 0));    // Note Off E4 Ch 2
+
+        // Wait up to 500 ms for OS MIDI delivery
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                if (rx_in_daw.size() >= 3 && rx_from_daw.size() >= 2) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        daw_in.close();
+        daw_out.close();
+
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            std::printf("    [VirtualMIDI loopback] LanVid->DAW=%zu msgs | DAW->LanVid=%zu msgs\n",
+                        rx_in_daw.size(), rx_from_daw.size());
+            CHECK(rx_in_daw.size() >= 3);
+            CHECK(rx_in_daw[0].st == 0x90 && rx_in_daw[0].d1 == 60 && rx_in_daw[0].d2 == 100);
+            CHECK(rx_in_daw[1].st == 0xB0 && rx_in_daw[1].d1 == 74 && rx_in_daw[1].d2 == 64);
+            CHECK(rx_in_daw[2].st == 0x80 && rx_in_daw[2].d1 == 60 && rx_in_daw[2].d2 == 0);
+
+            CHECK(rx_from_daw.size() >= 2);
+            CHECK(rx_from_daw[0].st == 0x91 && rx_from_daw[0].d1 == 64 && rx_from_daw[0].d2 == 110);
+            CHECK(rx_from_daw[1].st == 0x81 && rx_from_daw[1].d1 == 64 && rx_from_daw[1].d2 == 0);
+        }
+    }
+
+    vport.close();
+    CHECK(!vport.is_open());
+
+    // 3. Verify MultiDeviceAudioMatrix kVirtualDawMidi slot integration
+    MultiDeviceAudioMatrix mx;
+    const int net_rx = mx.add_midi_slot({0, MidiSlotType::kNetworkMidiRx, "Net MIDI RX", "", -1, 0, true});
+    const int daw_slot = mx.add_midi_slot(
+        {1, MidiSlotType::kVirtualDawMidi, "LanVid MIDI (DAW)", "LanVid MIDI", -1, 0, true});
+    CHECK(net_rx == 0 && daw_slot == 1);
+    CHECK(mx.set_midi_crosspoint(net_rx, daw_slot, 0, false));
+    mx.inject_midi_event(net_rx, 0x90, 60, 100, 5000);
+    const auto mst = mx.midi_slot_status(daw_slot);
+    CHECK(mst.active);
+    CHECK(mst.events_count == 1);
+    if (opened) {
+        CHECK(mst.connected);
+        CHECK(!mst.status_text.empty());
     }
 }

@@ -182,7 +182,7 @@ void deserialize_midi_slots(const std::string& raw, std::vector<MidiSlotConfig>&
         if (parts.size() < 7) continue;
         MidiSlotConfig s{};
         s.id = std::clamp(std::atoi(parts[0].c_str()), 0, kMatrixMaxMidiSlots - 1);
-        s.type = static_cast<MidiSlotType>(std::clamp(std::atoi(parts[1].c_str()), 0, 3));
+        s.type = static_cast<MidiSlotType>(std::clamp(std::atoi(parts[1].c_str()), 0, 4));
         s.port_index = uint8_t(std::clamp(std::atoi(parts[2].c_str()), 0, 15));
         s.active = std::atoi(parts[3].c_str()) != 0;
         s.device_index = std::atoi(parts[4].c_str());

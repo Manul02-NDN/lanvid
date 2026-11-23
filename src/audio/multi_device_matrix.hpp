@@ -26,10 +26,11 @@ constexpr int kMatrixMaxChannels = 64;
 constexpr uint32_t kMatrixSampleRate = 48000;
 
 enum class MidiSlotType : int {
-    kMidiInput = 0,     // OS physical/virtual MIDI input (keyboard, e-drums, controller)
-    kMidiOutput = 1,    // OS physical/virtual MIDI output (DAW, hardware synth)
-    kNetworkMidiTx = 2, // MIDI2 over IP outgoing bus
-    kNetworkMidiRx = 3  // MIDI2 over IP incoming bus
+    kMidiInput = 0,       // OS physical/virtual MIDI input (keyboard, e-drums, controller)
+    kMidiOutput = 1,      // OS physical/virtual MIDI output (DAW, hardware synth)
+    kNetworkMidiTx = 2,   // MIDI2 over IP outgoing bus
+    kNetworkMidiRx = 3,   // MIDI2 over IP incoming bus
+    kVirtualDawMidi = 4   // System virtual MIDI device ("LanVid MIDI" In/Out for DAWs)
 };
 
 struct MidiSlotConfig {
@@ -55,6 +56,8 @@ struct MidiSlotRuntimeStatus {
     bool connected = false;
     uint64_t events_count = 0;
     uint64_t last_activity_us = 0;  // for blinking MIDI ACTIVITY LED in GUI
+    std::string backend_name;
+    std::string status_text;
 };
 
 enum class MatrixSlotType : int {

@@ -167,6 +167,7 @@ if(WIN32)
   list(APPEND LV_CORE_SOURCES
     src/net/udp_socket_win32.cpp
     src/codec/hw_codec_win32.cpp
+    src/midi/virtual_midi_win.cpp
   )
   # Core SDK always links Winsock2 + Windows Media Foundation + D3D11/DXGI for HW H.264/H.265 codecs
   list(APPEND LV_PLATFORM_LIBS ws2_32 iphlpapi ole32 oleaut32 uuid d3d11 dxgi mf mfplat mfuuid winmm avrt)
@@ -186,7 +187,10 @@ if(WIN32)
 else()
   list(APPEND LV_CORE_SOURCES src/net/udp_socket_posix.cpp)
   if(APPLE)
-    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_apple.mm)
+    list(APPEND LV_CORE_SOURCES
+      src/codec/hw_codec_apple.mm
+      src/midi/virtual_midi_mac.mm
+    )
     list(APPEND LV_PLATFORM_LIBS
       "-framework VideoToolbox"
       "-framework CoreMedia"
@@ -200,10 +204,16 @@ else()
       string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -framework CoreAudio")
     endif()
   elseif(ANDROID)
-    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_android.cpp)
+    list(APPEND LV_CORE_SOURCES
+      src/codec/hw_codec_android.cpp
+      src/midi/virtual_midi_stub.cpp
+    )
     list(APPEND LV_PLATFORM_LIBS log mediandk)
   else()
-    list(APPEND LV_CORE_SOURCES src/codec/hw_codec_linux.cpp)
+    list(APPEND LV_CORE_SOURCES
+      src/codec/hw_codec_linux.cpp
+      src/midi/virtual_midi_stub.cpp
+    )
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
       pkg_check_modules(LIBAV QUIET libavcodec libavutil)

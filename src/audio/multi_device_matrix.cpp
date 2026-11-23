@@ -13,6 +13,7 @@
 #include "audio/planar_ring.hpp"
 #include "audio/stream_resampler.hpp"
 #include "midi/midi_device_manager.hpp"
+#include "midi/virtual_midi.hpp"
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -860,6 +861,7 @@ struct MultiDeviceAudioMatrix::Impl {
         MidiSlotConfig cfg{};
         std::unique_ptr<MidiInputPort> in_port;
         std::unique_ptr<MidiOutputPort> out_port;
+        std::unique_ptr<VirtualMidiPort> virt_port;
         std::atomic<uint64_t> events_count{0};
         std::atomic<uint64_t> last_activity_us{0};
     };
@@ -1441,6 +1443,12 @@ int MultiDeviceAudioMatrix::add_midi_slot(const MidiSlotConfig& cfg) {
         } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
             st.out_port = std::make_unique<MidiOutputPort>();
             st.out_port->open(st.cfg.device_index, st.cfg.device_name);
+        } else if (st.cfg.type == MidiSlotType::kVirtualDawMidi) {
+            st.virt_port = std::make_unique<VirtualMidiPort>();
+            st.virt_port->open(st.cfg.device_name.empty() ? "LanVid MIDI" : st.cfg.device_name,
+                               [this, target](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                                   inject_midi_event(target, s, d1, d2, ts);
+                               });
         }
     }
     return target;
@@ -1453,6 +1461,7 @@ bool MultiDeviceAudioMatrix::update_midi_slot(int slot_id, const MidiSlotConfig&
     if (!st.used) return false;
     st.in_port.reset();
     st.out_port.reset();
+    st.virt_port.reset();
     st.cfg = cfg;
     st.cfg.id = slot_id;
     if (st.cfg.active) {
@@ -1465,6 +1474,12 @@ bool MultiDeviceAudioMatrix::update_midi_slot(int slot_id, const MidiSlotConfig&
         } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
             st.out_port = std::make_unique<MidiOutputPort>();
             st.out_port->open(st.cfg.device_index, st.cfg.device_name);
+        } else if (st.cfg.type == MidiSlotType::kVirtualDawMidi) {
+            st.virt_port = std::make_unique<VirtualMidiPort>();
+            st.virt_port->open(st.cfg.device_name.empty() ? "LanVid MIDI" : st.cfg.device_name,
+                               [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                                   inject_midi_event(slot_id, s, d1, d2, ts);
+                               });
         }
     }
     return true;
@@ -1477,6 +1492,7 @@ bool MultiDeviceAudioMatrix::remove_midi_slot(int slot_id) {
     if (!st.used) return false;
     st.in_port.reset();
     st.out_port.reset();
+    st.virt_port.reset();
     st.used = false;
     auto& cps = impl_->midi_crosspoints;
     cps.erase(std::remove_if(cps.begin(), cps.end(), [slot_id](const MidiCrosspoint& c) {
@@ -1491,6 +1507,7 @@ void MultiDeviceAudioMatrix::clear_midi_slots() {
     for (auto& st : impl_->midi_slots) {
         st.in_port.reset();
         st.out_port.reset();
+        st.virt_port.reset();
         st.used = false;
     }
     impl_->midi_crosspoints.clear();
@@ -1585,6 +1602,8 @@ void MultiDeviceAudioMatrix::inject_midi_event(int src_slot_id, uint8_t status, 
             if (!dst.used || !dst.cfg.active) continue;
             if (dst.out_port && dst.out_port->is_open()) {
                 dst.out_port->send_short(status, d1, d2);
+            } else if (dst.virt_port && dst.virt_port->is_open()) {
+                dst.virt_port->send_to_daw(status, d1, d2);
             }
             dst.events_count.fetch_add(1, std::memory_order_relaxed);
             dst.last_activity_us.store(act_now, std::memory_order_relaxed);
@@ -1609,8 +1628,10 @@ void MultiDeviceAudioMatrix::send_midi_panic(int slot_id) {
             if (slot_id >= 0 && i != slot_id) continue;
             auto& st = impl_->midi_slots[i];
             if (!st.used || !st.cfg.active) continue;
-            if (st.cfg.type == MidiSlotType::kMidiOutput || st.cfg.type == MidiSlotType::kNetworkMidiTx) {
+            if (st.cfg.type == MidiSlotType::kMidiOutput || st.cfg.type == MidiSlotType::kNetworkMidiTx ||
+                st.cfg.type == MidiSlotType::kVirtualDawMidi) {
                 if (st.out_port && st.out_port->is_open()) st.out_port->send_panic();
+                if (st.virt_port && st.virt_port->is_open()) st.virt_port->send_panic_to_daw();
                 st.last_activity_us.store(act_now, std::memory_order_relaxed);
                 targets.emplace_back(i, st.cfg.port_index);
             }
@@ -1640,6 +1661,13 @@ MidiSlotRuntimeStatus MultiDeviceAudioMatrix::midi_slot_status(int slot_id) cons
         out.connected = st.in_port && st.in_port->is_open();
     } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
         out.connected = st.out_port && st.out_port->is_open();
+    } else if (st.cfg.type == MidiSlotType::kVirtualDawMidi) {
+        if (st.virt_port) {
+            const auto vst = st.virt_port->status();
+            out.connected = vst.open;
+            out.backend_name = vst.backend_name;
+            out.status_text = vst.status_text;
+        }
     } else {
         out.connected = st.cfg.active;
     }
