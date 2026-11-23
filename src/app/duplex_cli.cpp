@@ -3,6 +3,7 @@
 // with an optional 64x64 patchbay and Mute/Solo on either direction.
 #include "app/duplex_cli.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -30,6 +31,7 @@ void usage() {
         "  --bind <ip>                 local bind address (default 0.0.0.0)\n"
         "  --name <text>               name announced in LAN discovery (default: host name)\n"
         "  --no-discovery              do not announce this node on the LAN\n"
+        "  --rx-headroom <frames>      frames queued for the DAW inputs (default auto: max(3 x DAW buffer, 512))\n"
         "  --tx-route <s:d,...>        TX patch, 1-based (e.g. 1:2,2:1 swaps; 5:0 unroutes 5)\n"
         "  --rx-route <s:d,...>        RX patch, 1-based\n"
         "  --tx-mute <c,...> --rx-mute <c,...> --tx-solo <c,...> --rx-solo <c,...>   1-based channels\n"
@@ -106,6 +108,7 @@ int lv_cli_run_duplex(int argc, char** argv) {
         else if (a == "--bind") std::snprintf(cfg.bind_ip, sizeof(cfg.bind_ip), "%s", val());
         else if (a == "--name") std::snprintf(cfg.device_name, sizeof(cfg.device_name), "%s", val());
         else if (a == "--no-discovery") cfg.enable_discovery = 0;
+        else if (a == "--rx-headroom") cfg.rx_headroom_frames = uint32_t(std::max(0, std::atoi(val())));
         else if (a == "--duration") duration = std::atof(val());
         else if (a == "--list-nodes") list_nodes = true;
         else if (a == "--tx-route") { if (!parse_route(val(), tx_route)) { std::fprintf(stderr, "Bad --tx-route\n"); return 2; } tx_route_set = true; }

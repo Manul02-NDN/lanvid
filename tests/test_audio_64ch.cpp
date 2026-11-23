@@ -367,7 +367,9 @@ TEST(audio_64ch_c_api_udp_loopback) {
             bool any = false;
             for (int i = 0; i < kFrames; ++i) {
                 for (int c = 1; c < kCh; ++c)
-                    if (out[size_t(i) * kCh + c] != out[size_t(i) * kCh]) ++divergent;
+                    // A one-sample skew of this tone is ~2.5e-2; 2e-3 only tolerates the resampler's
+                    // interpolation rounding at the newest-data edge on loaded CI runners.
+                    if (std::fabs(out[size_t(i) * kCh + c] - out[size_t(i) * kCh]) > 2e-3f) ++divergent;
                 if (std::fabs(out[size_t(i) * kCh]) > 0.01f) any = true;
             }
             if (any) ++nonsilent;
