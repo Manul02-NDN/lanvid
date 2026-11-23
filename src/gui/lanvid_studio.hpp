@@ -71,6 +71,11 @@ private:
     void draw_top_bar();
     void draw_sidebar();
     void draw_studio_config_panel();
+    // Jitter-buffer latency mode (Fixed (Ethernet) / Adaptive (Wi-Fi)) + live "ACTUAL BUFFER" telemetry.
+    void draw_latency_mode_controls(const char* id, float combo_width);
+    void draw_actual_buffer_line();
+    void apply_latency_mode();
+    void poll_latency_telemetry(uint64_t now);
     void draw_segmented_vu(float dbfs, float width, float height);
     void draw_sender_tab();
     void draw_receiver_tab();
@@ -121,6 +126,10 @@ private:
     LvDuplexHandle* duplex_ = nullptr;
     bool duplex_running_ = false;
     LV_DuplexStats dpx_stats_{};
+    double actual_buf_ms_ = 0.0;       // measured jitter-buffer delay of the active receive path
+    uint32_t actual_target_ms_ = 0;    // delay it steers to (> latency when Adaptive has grown it)
+    bool actual_buf_valid_ = false;
+    uint64_t actual_buf_us_ = 0;
     uint64_t dpx_stats_us_ = 0;
     char dpx_peer_buf_[64]{};
     std::mutex nodes_mu_;

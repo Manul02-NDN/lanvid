@@ -90,6 +90,7 @@ TEST(multi_device_matrix_routing_and_summing) {
     saved.active_tab = 3;
     saved.matrix_buffer_size = 128;
     saved.matrix_feedback_guard = true;
+    saved.adaptive_jitter = 0;  // Fixed (Ethernet) must survive a restart
     saved.matrix_slots = mx.slots();
     saved.matrix_crosspoints = mx.crosspoints();
     CHECK(lv::gui::save_app_config(saved));
@@ -99,6 +100,7 @@ TEST(multi_device_matrix_routing_and_summing) {
     CHECK(loaded.audio_only == true);
     CHECK(loaded.active_tab == 3);
     CHECK(loaded.matrix_buffer_size == 128);
+    CHECK(loaded.adaptive_jitter == 0);
     CHECK(loaded.matrix_slots.size() == size_t(4));
     CHECK(loaded.matrix_crosspoints.size() == size_t(66));
     CHECK(loaded.matrix_slots[3].name == "Headphones");

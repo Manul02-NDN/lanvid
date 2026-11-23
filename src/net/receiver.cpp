@@ -20,6 +20,7 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
           return has_sender_ && sock_.send_to(d, n, sender_ep_) == int(n);
       }) {
     arx_.set_latency_ms(cfg.audio_latency_ms);
+    arx_.set_adaptive_jitter_enabled(cfg.audio_adaptive_jitter);
     assembler_.set_pli_callback([this](uint32_t) { send_pli_now(now_us()); });
 }
 

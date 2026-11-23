@@ -144,6 +144,28 @@ retry spacing = `latency·0.6 / attempts`; a hole is abandoned once its samples 
   `THREAD_TIME_CONSTRAINT_POLICY` (macOS), MMCSS "Pro Audio" + `timeBeginPeriod(1)` (Windows) or
   `SCHED_FIFO` when permitted (Linux).
 
+### 9. Jitter-buffer latency mode: Fixed vs Adaptive (receiver side, no wire change)
+
+The playout delay of the 64-channel `AudioSyncMatrix` runs in one of two modes, switchable live
+without restarting the stream:
+
+| Mode | Use | Behaviour |
+|---|---|---|
+| **Fixed (Ethernet)** | wired LAN, live monitoring | delay held at exactly `latency_ms`; only +/-100 ppm device-clock drift is tracked. Late packets are dropped, the buffer never floats. |
+| **Adaptive (Wi-Fi)** — default | Wi-Fi 6, shared links | delay grows within `[latency_ms .. 200 ms]` to `max(arrival-lag envelope + render block + 2 ms, 3 x RFC 3550 jitter + 2 ms)`. Growth uses up to 0.5 % time-stretch (identical for all channels, so phase lock is kept); after a 3 s hold the delay glides back at 0.4 ms/s through +/-0.05 % micro-resampling. |
+
+The arrival lag is `MasterClock position at arrival - end of the block's samples`, measured per directly
+received AUDIO2 packet (envelope: instant attack, 4 s release). Steps larger than 40 ms, a switch from a
+grown Adaptive buffer to Fixed and a consumer stall all re-anchor once with a 96-sample crossfade.
+
+`current_effective_latency_ms()` reports the measured delay (`MasterClock now - playout cursor`), shown in
+LanVid Studio as **ACTUAL BUFFER** (cyan = Fixed, green = Adaptive at nominal, amber = expanded by a burst).
+
+* C ABI: `LvReceiverConfig.adaptive_jitter`, `LV_DuplexConfig.adaptive_jitter` (both default 1),
+  `lv_receiver_set_adaptive_jitter()`, `lv_duplex_set_adaptive_jitter()`, `lv_receiver_get_effective_latency_ms()`,
+  `LvReceiverStats` / `LV_DuplexStats` `.effective_latency_ms`, `.effective_target_ms`, `.adaptive_jitter` (appended fields).
+* CLI: `receiver --fixed-latency`, `sender --duplex --fixed-latency`. Studio: `config.json` key `"adaptive_jitter"`.
+
 ## Platform Backends & Build
 
 | Feature | Windows | Linux | macOS |

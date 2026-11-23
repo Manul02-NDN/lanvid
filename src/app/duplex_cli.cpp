@@ -26,6 +26,8 @@ void usage() {
         "Full-duplex 64x64 AoIP node (virtual device <-> peer):\n"
         "  sender --duplex --host <PEER_IP> [--port 5004] [--listen-port 5005] [options]\n"
         "  --audio-latency <2..2000>   playout latency of the incoming bus (default 20)\n"
+        "  --fixed-latency             Fixed jitter buffer held at --audio-latency (wired Ethernet / live\n"
+        "                              monitoring); default Adaptive Wi-Fi (grows up to 200 ms on bursts)\n"
         "  --audio-rate <48000|96000>  bus sample rate (default 48000)\n"
         "  --audio-channels <1..64>    channels in each direction (default 64)\n"
         "  --bind <ip>                 local bind address (default 0.0.0.0)\n"
@@ -103,6 +105,7 @@ int lv_cli_run_duplex(int argc, char** argv) {
         else if (a == "--port") cfg.peer_port = uint16_t(std::atoi(val()));
         else if (a == "--listen-port") cfg.listen_port = uint16_t(std::atoi(val()));
         else if (a == "--audio-latency") cfg.latency_ms = uint32_t(std::atoi(val()));
+        else if (a == "--fixed-latency") cfg.adaptive_jitter = 0;
         else if (a == "--audio-rate") cfg.sample_rate = std::atoi(val());
         else if (a == "--audio-channels") cfg.num_channels = std::atoi(val());
         else if (a == "--bind") std::snprintf(cfg.bind_ip, sizeof(cfg.bind_ip), "%s", val());
@@ -155,9 +158,9 @@ int lv_cli_run_duplex(int argc, char** argv) {
 #if defined(SIGTERM)
     std::signal(SIGTERM, dpx_on_signal);
 #endif
-    std::printf("LanVid full-duplex %dx%d: DAW out -> %s:%u | :%u -> DAW in | %u ms @ %d Hz | discovery %s\n",
+    std::printf("LanVid full-duplex %dx%d: DAW out -> %s:%u | :%u -> DAW in | %u ms (%s) @ %d Hz | discovery %s\n",
                 cfg.num_channels, cfg.num_channels, cfg.peer_host, cfg.peer_port, cfg.listen_port, cfg.latency_ms,
-                cfg.sample_rate, cfg.enable_discovery ? "on" : "off");
+                cfg.adaptive_jitter ? "AUTO" : "FIXED", cfg.sample_rate, cfg.enable_discovery ? "on" : "off");
     std::fflush(stdout);
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -166,12 +169,13 @@ int lv_cli_run_duplex(int argc, char** argv) {
         LV_DuplexStats st{};
         lv_duplex_get_stats(h, &st);
         std::printf("[DUPLEX] DAW %s%s%s | %u Hz buf=%u | peer->us: clock %s rtt=%u us skew=%+.1f ppm pkts=%llu lost=%llu "
-                    "to_daw=%llu underruns=%llu | us->peer: pkts=%llu from_daw=%llu overruns=%llu pongs=%llu\n",
+                    "to_daw=%llu underruns=%llu buffer=%.1f ms (%s) | us->peer: pkts=%llu from_daw=%llu overruns=%llu pongs=%llu\n",
                     st.driver_connected ? "connected" : "not connected", st.driver_name[0] ? " via " : "",
                     st.driver_name, st.sample_rate, st.buffer_size, st.rx_clock_synced ? "synced" : "free-run",
                     st.rx_rtt_us, st.rx_clock_skew_ppm, (unsigned long long)st.rx_packets,
                     (unsigned long long)st.rx_lost, (unsigned long long)st.rx_frames_to_daw,
-                    (unsigned long long)st.rx_underruns, (unsigned long long)st.tx_packets,
+                    (unsigned long long)st.rx_underruns, st.effective_latency_ms, st.adaptive_jitter ? "AUTO" : "FIXED",
+                    (unsigned long long)st.tx_packets,
                     (unsigned long long)st.tx_frames_from_daw, (unsigned long long)st.tx_overruns,
                     (unsigned long long)st.tx_pongs_sent);
         std::fflush(stdout);

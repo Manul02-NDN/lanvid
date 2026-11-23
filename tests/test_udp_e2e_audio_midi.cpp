@@ -15,6 +15,7 @@
 
 #include "common/rt_thread.hpp"
 #include "lanvid/lanvid_sdk.h"
+#include "lanvid_c_api.h"
 #include "net/receiver.hpp"
 #include "net/sender.hpp"
 
@@ -211,7 +212,8 @@ TEST(udp_end_to_end_64ch_audio_and_midi_sync) {
     }
     // Drain: pull ~0.3 s more so the last Note Offs are dispatched.
     for (int b = 0; b < int(0.3 * kRate / kBlk); ++b) {
-        std::this_thread::sleep_for(std::chrono::microseconds(1000000ull * kBlk / kRate));
+        next += std::chrono::nanoseconds(1000000000ull * kBlk / kRate);  // paced like an audio callback
+        std::this_thread::sleep_until(next);
         {
             std::lock_guard<std::mutex> lk(ctx.mu);
             ctx.block_base = g;
@@ -271,6 +273,26 @@ TEST(udp_end_to_end_64ch_audio_and_midi_sync) {
     CHECK(synth_off >= 1);             // the hanging note 99 was released by the epoch reset
     CHECK(stuck == 0);                 // every Note On got its Note Off
     CHECK(active == 0);
+
+    // Real UDP, default Adaptive mode: the measured buffer sits at the 50 ms target (loopback = no
+    // jitter), and a live switch to Fixed keeps it there and is reported in the stats.
+    const double eff_adaptive = lv_receiver_get_effective_latency_ms(rx);
+    CHECK(lv_receiver_set_adaptive_jitter(rx, 0) == LV_OK);
+    std::vector<float> tail(size_t(kCh) * kBlk);
+    for (int i = 0; i < 40; ++i) {  // paced like an audio callback
+        next += std::chrono::nanoseconds(1000000000ull * kBlk / kRate);
+        std::this_thread::sleep_until(next);
+        lv_receiver_pop_audio_multichannel(rx, tail.data(), kCh, kBlk, LV_AUDIO_LAYOUT_PLANAR);
+    }
+    LvReceiverStats rs{};
+    lv_receiver_get_stats(rx, &rs);
+    std::printf("    [e2e udp] actual buffer: adaptive=%.2f ms -> fixed=%.2f ms (target %u ms, mode=%s)\n", eff_adaptive,
+                rs.effective_latency_ms, rs.effective_target_ms, rs.adaptive_jitter ? "AUTO" : "FIXED");
+    // (upper margin: the measurement includes how late the OS woke this "audio callback" thread)
+    CHECK(eff_adaptive > 45.0 && eff_adaptive < 75.0);
+    CHECK(rs.adaptive_jitter == 0);
+    CHECK(rs.effective_target_ms == 50);
+    CHECK(rs.effective_latency_ms > 45.0 && rs.effective_latency_ms < 75.0);
 
     lv_sender_destroy(tx);
     lv_receiver_destroy(rx);

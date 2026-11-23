@@ -210,6 +210,15 @@ LV_API int lv_duplex_send_midi(LvDuplexHandle* handle, uint8_t status, uint8_t d
                                uint64_t media_ts_us);
 LV_API void lv_duplex_set_midi_callback(LvDuplexHandle* handle, LV_MidiEventCallback cb, void* user_data);
 
+/* ---- Jitter-buffer latency mode (live, no stream restart; additive) ----
+ * enabled = 0: Fixed  - playout delay held exactly at the bus latency (wired Ethernet, live monitoring).
+ * enabled = 1: Adaptive Wi-Fi (default) - grows within [latency .. 200 ms] on jitter bursts (<= 0.5 %
+ *              time-stretch) and returns through +/-0.05 % micro-resampling. Works before or after start. */
+LV_API int lv_receiver_set_adaptive_jitter(LvReceiverHandle* handle, int enabled);
+/* Measured jitter-buffer playout delay in ms right now (0 when not running / not yet playing). */
+LV_API double lv_receiver_get_effective_latency_ms(LvReceiverHandle* handle);
+LV_API int lv_duplex_set_adaptive_jitter(LvDuplexHandle* handle, int enabled);
+
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active receivers and populates `out_peers` (up to `max_peers`).
  * Returns number of discovered peers (>= 0). Pass discovery_port=0 for default (5099). */

@@ -415,6 +415,20 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAudi
     return ctx->rx ? lv_receiver_set_audio_latency_ms(ctx->rx, uint32_t(ms)) : LV_ERR_NOT_INITIALIZED;
 }
 
+JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAdaptiveJitter(
+    JNIEnv*, jclass, jlong ptr, jboolean enabled) {
+    if (!ptr) return LV_ERR_INVALID_ARG;
+    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
+    return ctx->rx ? lv_receiver_set_adaptive_jitter(ctx->rx, enabled ? 1 : 0) : LV_ERR_NOT_INITIALIZED;
+}
+
+JNIEXPORT jdouble JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverGetEffectiveLatencyMs(
+    JNIEnv*, jclass, jlong ptr) {
+    if (!ptr) return 0.0;
+    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
+    return ctx->rx ? lv_receiver_get_effective_latency_ms(ctx->rx) : 0.0;
+}
+
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverPopAudioMultichannel(
     JNIEnv* env, jclass, jlong ptr, jfloatArray out, jint channels, jint frames) {
     if (!ptr || !out || channels <= 0 || frames <= 0 || jlong(channels) * frames > env->GetArrayLength(out))

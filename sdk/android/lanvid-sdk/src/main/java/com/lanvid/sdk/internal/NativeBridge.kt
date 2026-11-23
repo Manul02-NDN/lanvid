@@ -67,6 +67,8 @@ internal object NativeBridge {
         ptr: Long, sampleRate: Int, latencyMs: Int, channels: Int, blockFrames: Int
     ): Int
     @JvmStatic external fun receiverSetAudioLatency(ptr: Long, latencyMs: Int): Int
+    @JvmStatic external fun receiverSetAdaptiveJitter(ptr: Long, enabled: Boolean): Int
+    @JvmStatic external fun receiverGetEffectiveLatencyMs(ptr: Long): Double
     @JvmStatic external fun receiverPopAudioMultichannel(
         ptr: Long, out: FloatArray, channels: Int, frames: Int
     ): Int

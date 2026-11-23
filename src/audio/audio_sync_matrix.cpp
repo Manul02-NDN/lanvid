@@ -10,7 +10,14 @@ namespace {
 constexpr uint32_t kCrossfadeSamples = 96;
 constexpr double kMaxRatioOffset = 100e-6;          // +/-100 ppm (standard LAN)
 constexpr double kAdaptiveMaxRatioOffset = 500e-6;  // +/-0.05% (+/-500 ppm for Wi-Fi jitter absorption)
+constexpr double kAdaptiveGrowRatioOffset = 5000e-6; // +/-0.5% while the buffer grows (Wi-Fi burst)
 constexpr double kDeadbandSamples = 1.5;
+// Adaptive sizing: headroom = 3 x RFC 3550 jitter envelope + 2 ms guard.
+constexpr double kJitterMarginFactor = 3.0;
+constexpr double kJitterGuardMs = 2.0;
+constexpr double kJitterReleaseSec = 4.0;  // envelope release time constant
+constexpr double kGrowHoldSec = 3.0;       // keep the grown buffer at least this long after a burst
+constexpr double kShrinkMsPerSec = 0.4;    // < 0.5 ms/s = what +/-0.05% resampling can follow without lag
 
 inline uint32_t pow2_at_least(uint64_t v) {
     uint32_t p = 1;
@@ -43,6 +50,15 @@ AudioSyncMatrix::~AudioSyncMatrix() {
 void AudioSyncMatrix::reset() {
     started_ = false;
     err_filt_ = 0.0;
+    jitter_env_us_ = 0.0;
+    lag_env_samples_ = 0.0;
+    lag_peak_samples_.store(0, std::memory_order_relaxed);
+    hold_samples_ = 0;
+    eff_ms_ = double(latency_ms_.load(std::memory_order_relaxed));
+    eff_ms_pub_.store(eff_ms_, std::memory_order_relaxed);
+    effective_latency_ms_.store(latency_ms_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    actual_latency_ms_.store(0.0, std::memory_order_relaxed);
+    jitter_peak_us_.store(0, std::memory_order_relaxed);
     for (auto& c : ch_) {
         Ring* r = c.ring.load(std::memory_order_acquire);
         if (r) std::fill(r->tag.begin(), r->tag.end(), uint16_t(0));
@@ -68,7 +84,12 @@ void AudioSyncMatrix::request_epoch_reset() {
 void AudioSyncMatrix::set_target_latency_ms(uint32_t ms) {
     ms = std::clamp(ms, kMinLatencyMs, kMaxLatencyMs);
     if (latency_ms_.exchange(ms, std::memory_order_acq_rel) != ms) {
-        effective_latency_ms_.store(ms, std::memory_order_release);
+        // A new target is an explicit user action: re-anchor once (crossfaded) at the new delay. In
+        // Adaptive mode the extra jitter headroom is kept on top (consumer recomputes it next block).
+        if (!adaptive_jitter_.load(std::memory_order_acquire)) {
+            effective_latency_ms_.store(ms, std::memory_order_release);
+            eff_ms_pub_.store(double(ms), std::memory_order_release);
+        }
         latency_dirty_.store(true, std::memory_order_release);
     }
 }
@@ -79,31 +100,65 @@ void AudioSyncMatrix::set_adaptive_jitter(bool enabled, uint32_t min_ms, uint32_
     jitter_min_ms_.store(min_ms, std::memory_order_relaxed);
     jitter_max_ms_.store(max_ms, std::memory_order_relaxed);
     adaptive_jitter_.store(enabled, std::memory_order_release);
-    if (!enabled) {
-        effective_latency_ms_.store(latency_ms_.load(std::memory_order_relaxed), std::memory_order_release);
-    }
+    // Switching to Fixed is applied by the consumer on its next block: if the buffer had grown, it
+    // re-anchors (crossfaded) to exactly target_latency_ms instead of drifting back for minutes.
 }
 
 void AudioSyncMatrix::observe_network_jitter_us(uint32_t jitter_us) {
-    // Fast attack, slow decay envelope on network jitter
-    uint32_t prev = observed_jitter_us_.load(std::memory_order_relaxed);
-    uint32_t next = (jitter_us > prev) ? jitter_us : uint32_t(double(prev) * 0.995 + double(jitter_us) * 0.005);
-    observed_jitter_us_.store(next, std::memory_order_relaxed);
+    uint32_t prev = jitter_peak_us_.load(std::memory_order_relaxed);
+    while (jitter_us > prev &&
+           !jitter_peak_us_.compare_exchange_weak(prev, jitter_us, std::memory_order_relaxed)) {
+    }
+}
 
-    if (adaptive_jitter_.load(std::memory_order_acquire)) {
-        const uint32_t base = latency_ms_.load(std::memory_order_relaxed);
-        const uint32_t lo = jitter_min_ms_.load(std::memory_order_relaxed);
-        const uint32_t hi = jitter_max_ms_.load(std::memory_order_relaxed);
-        // Reserve ~2.5x measured jitter margin inside [min_ms, max_ms] without triggering hard reanchor.
-        const uint32_t margin_ms = uint32_t((uint64_t(next) * 5 + 1999) / 2000);
-        const uint32_t want = std::clamp(std::max(base, lo + margin_ms), lo, hi);
-        const uint32_t cur = effective_latency_ms_.load(std::memory_order_relaxed);
-        if (want > cur) {
-            effective_latency_ms_.store(want, std::memory_order_release);
-        } else if (want < cur && cur > base) {
-            effective_latency_ms_.store(cur - 1, std::memory_order_release);
+void AudioSyncMatrix::observe_arrival_lag_samples(int64_t lag) {
+    if (lag <= 0) return;
+    const uint32_t v = uint32_t(std::min<int64_t>(lag, int64_t(rate_) * 2));
+    uint32_t prev = lag_peak_samples_.load(std::memory_order_relaxed);
+    while (v > prev && !lag_peak_samples_.compare_exchange_weak(prev, v, std::memory_order_relaxed)) {
+    }
+}
+
+void AudioSyncMatrix::update_effective_latency(uint32_t frames, bool adaptive) {
+    const double base = double(latency_ms_.load(std::memory_order_relaxed));
+    const double dt = double(frames) / double(rate_);
+
+    // Jitter envelope: instant attack, exponential release (time based, independent of packet rate).
+    const double release = std::exp(-dt / kJitterReleaseSec);
+    const double peak = double(jitter_peak_us_.exchange(0, std::memory_order_relaxed));
+    jitter_env_us_ = std::max(peak, jitter_env_us_ * release);
+    jitter_env_pub_us_.store(jitter_env_us_, std::memory_order_relaxed);
+    const double lag_peak = double(lag_peak_samples_.exchange(0, std::memory_order_relaxed));
+    lag_env_samples_ = std::max(lag_peak, lag_env_samples_ * release);
+    lag_env_pub_ms_.store(lag_env_samples_ * 1000.0 / double(rate_), std::memory_order_relaxed);
+
+    if (!adaptive) {
+        eff_ms_ = base;
+        hold_samples_ = 0;
+    } else {
+        const double lo = std::max(base, double(jitter_min_ms_.load(std::memory_order_relaxed)));
+        const double hi = std::max(base, double(jitter_max_ms_.load(std::memory_order_relaxed)));
+        // Headroom from whichever estimate is larger: measured arrival lag (needs a synced MasterClock;
+        // covers one-way delay + packetization + jitter) or the RFC 3550 jitter rule of thumb.
+        const double block_ms = dt * 1000.0;
+        const double by_lag = lag_env_samples_ > 0.0
+                                  ? lag_env_samples_ * 1000.0 / double(rate_) + block_ms + kJitterGuardMs
+                                  : 0.0;
+        const double by_jitter = kJitterMarginFactor * jitter_env_us_ / 1000.0 + kJitterGuardMs;
+        const double want = std::clamp(std::ceil(std::max(by_lag, by_jitter)), lo, hi);
+        if (eff_ms_ < lo) eff_ms_ = lo;
+        if (eff_ms_ > hi) eff_ms_ = hi;
+        if (want > eff_ms_ + 0.25) {  // burst: grow at once (the cursor follows via +/-0.5% stretch)
+            eff_ms_ = want;
+            hold_samples_ = uint64_t(kGrowHoldSec * double(rate_));
+        } else if (hold_samples_ > 0) {
+            hold_samples_ = hold_samples_ > frames ? hold_samples_ - frames : 0;
+        } else if (want < eff_ms_) {  // calm again: glide back to the target below the resampler's speed
+            eff_ms_ = std::max(want, eff_ms_ - kShrinkMsPerSec * dt);
         }
     }
+    eff_ms_pub_.store(eff_ms_, std::memory_order_relaxed);
+    effective_latency_ms_.store(uint32_t(std::lround(eff_ms_)), std::memory_order_release);
 }
 
 void AudioSyncMatrix::write_frame_atomic(uint64_t ts, const float* const* planes,
@@ -183,10 +238,10 @@ bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, float& v) const {
 }
 
 int64_t AudioSyncMatrix::desired_cursor(const MasterClock& clk, uint64_t local_now_us) const {
-    const uint32_t eff_ms = adaptive_jitter_.load(std::memory_order_acquire)
-                                ? effective_latency_ms_.load(std::memory_order_acquire)
-                                : latency_ms_.load(std::memory_order_relaxed);
-    const int64_t lat = int64_t(eff_ms) * rate_ / 1000;
+    const double eff_ms = adaptive_jitter_.load(std::memory_order_acquire)
+                              ? eff_ms_pub_.load(std::memory_order_acquire)
+                              : double(latency_ms_.load(std::memory_order_relaxed));
+    const int64_t lat = int64_t(std::llround(eff_ms * double(rate_) / 1000.0));
     int64_t master;
     if (clk.synced()) {
         master = clk.master_samples(local_now_us, rate_);
@@ -209,11 +264,23 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         started_ = false;
         err_filt_ = 0.0;
         cursor_ = p.cursor;
+        actual_latency_ms_.store(0.0, std::memory_order_relaxed);
         return p;
     }
-    const int64_t desired = desired_cursor(clk, local_now_us);
-    const bool dirty = latency_dirty_.exchange(false, std::memory_order_acq_rel);
     const bool adaptive = adaptive_jitter_.load(std::memory_order_acquire);
+    const double prev_eff = eff_ms_;
+    update_effective_latency(frames, adaptive);
+    // Adaptive -> Fixed while the buffer was grown: snap (crossfaded) to exactly the fixed target.
+    const bool to_fixed = was_adaptive_ && !adaptive && std::fabs(prev_eff - eff_ms_) > 0.5;
+    was_adaptive_ = adaptive;
+    const int64_t desired = desired_cursor(clk, local_now_us);
+    const bool dirty = latency_dirty_.exchange(false, std::memory_order_acq_rel) || to_fixed;
+    const double master_now = clk.synced() ? double(clk.master_samples(local_now_us, rate_))
+                                           : double(newest_media_ts());
+    auto publish_actual = [&](double cursor) {
+        actual_latency_ms_.store(started_ ? std::max(0.0, (master_now - cursor) * 1000.0 / double(rate_)) : 0.0,
+                                 std::memory_order_relaxed);
+    };
     if (!started_) {
         if (!clk.synced() && newest_media_ts() == 0) {  // nothing to align to yet
             p.cursor = cursor_ = double(std::max<int64_t>(desired, 0));
@@ -225,13 +292,17 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         err_filt_ = 0.0;
         p.cursor = cursor_;
         p.ratio = 1.0;
+        publish_actual(p.cursor);
         return p;
     }
 
     const double err = double(desired) - cursor_;
     // In adaptive Wi-Fi jitter mode, absorb spikes up to 250 ms via smooth +/-0.05% micro-resampling
     // instead of triggering audible hard reanchors.
-    const double hard = double(rate_) * (adaptive ? 0.250 : 0.040);
+    // Both modes re-anchor (crossfaded) beyond 40 ms: a growth step that large (severe Wi-Fi burst) is
+    // applied at once, and a consumer stall can never leave the buffer far deeper than intended.
+    // Smaller errors are absorbed by the resampler (time-stretch while growing, micro-resampling back).
+    const double hard = double(rate_) * 0.040;
     if (dirty || std::fabs(err) > hard) {
         p.seek = true;
         p.old_cursor = cursor_;
@@ -240,6 +311,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         p.cursor = cursor_;
         p.ratio = 1.0;
         resyncs_.fetch_add(1, std::memory_order_relaxed);
+        publish_actual(p.cursor);
         return p;
     }
 
@@ -247,14 +319,18 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     const double alpha = std::min(1.0, double(frames) / (double(rate_) * 0.5));
     err_filt_ += (err - err_filt_) * alpha;
 
-    const double max_off = adaptive ? kAdaptiveMaxRatioOffset : kMaxRatioOffset;
+    // Adaptive: growing the buffer (cursor must slow down, err < 0) may stretch by up to 0.5% so a
+    // Wi-Fi burst is absorbed within seconds; returning to the target is limited to +/-0.05%.
+    const double max_slow = adaptive ? kAdaptiveGrowRatioOffset : kMaxRatioOffset;
+    const double max_fast = adaptive ? kAdaptiveMaxRatioOffset : kMaxRatioOffset;
     double off = 0.0;
     if (std::fabs(err_filt_) > kDeadbandSamples) {
-        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -max_off, max_off);
+        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -max_slow, max_fast);
     }
     p.cursor = cursor_;
     p.ratio = 1.0 + off;
     ratio_ppm_.store(off * 1e6, std::memory_order_relaxed);
+    publish_actual(p.cursor);
     return p;
 }
 

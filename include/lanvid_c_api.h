@@ -147,6 +147,8 @@ typedef struct LvReceiverConfig {
     uint16_t discovery_port; /* 0 -> default 5099 */
     char device_name[128]; /* optional friendly name for LAN discovery */
     int audio_only;        /* 1=drop video packets before reassembly/decoding (AoIP bridge) */
+    int adaptive_jitter;   /* 1=Adaptive Wi-Fi jitter buffer (default; grows target..200 ms on bursts),
+                              0=Fixed latency (wired Ethernet / live monitoring). Live: lv_receiver_set_adaptive_jitter */
 } LvReceiverConfig;
 
 typedef struct LvReceiverStats {
@@ -173,6 +175,10 @@ typedef struct LvReceiverStats {
     int codec_is_hardware;
     uint64_t pli_requests;
     char codec_backend[64];
+    /* Latency mode telemetry (appended) */
+    double effective_latency_ms;   /* measured 64ch jitter-buffer playout delay right now */
+    uint32_t effective_target_ms;  /* delay the buffer steers to (== bus latency in Fixed mode) */
+    int adaptive_jitter;           /* 1=Adaptive (Wi-Fi), 0=Fixed */
 } LvReceiverStats;
 
 /* ---- Core lifecycle & introspection ---- */
@@ -242,6 +248,8 @@ LV_API void lv_receiver_set_volume(LvReceiverHandle* handle, float volume);
 LV_API void lv_receiver_set_concealment(LvReceiverHandle* handle, int mode);
 LV_API int lv_receiver_save_screenshot(LvReceiverHandle* handle, const char* ppm_path);
 LV_API int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out);
+/* Latency mode, live (no stream restart): 1=Adaptive Wi-Fi, 0=Fixed. Returns LV_OK (0) or a negative error. */
+LV_API int lv_receiver_set_adaptive_jitter(LvReceiverHandle* handle, int enabled);
 
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active LanVid receivers and returns a heap-allocated JSON array.

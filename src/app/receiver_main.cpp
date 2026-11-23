@@ -40,6 +40,8 @@ void print_usage(const char* prog) {
         "  --audio-channels <1..64> Enable the 64-ch AoIP bus: per-channel telemetry + ch1/ch2 monitor (default: off)\n"
         "  --audio-latency <2..2000> AoIP playout latency in ms, phase-aligned across channels (default: 20)\n"
         "  --audio-rate <48000|96000> AoIP bus sample rate (default: 48000)\n"
+        "  --fixed-latency          Fixed AoIP jitter buffer held at --audio-latency (wired Ethernet / live\n"
+        "                           monitoring). Default: Adaptive Wi-Fi (grows up to 200 ms on jitter bursts)\n"
         "  --audio-device <dev>     default | virtual (default: default)\n"
         "                           virtual = deliver the phase-aligned bus to the OS virtual device \"LanVid\"\n"
         "                                     (DAW in-channels 1..N) via LanVidAudioBus_v1; implies --audio-channels 64\n"
@@ -111,6 +113,7 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--audio-channels") aoip_channels = std::atoi(need_val("--audio-channels"));
         else if (arg == "--audio-latency") rcfg.audio_latency_ms = uint32_t(std::clamp(std::atoi(need_val("--audio-latency")), 2, 2000));
+        else if (arg == "--fixed-latency") rcfg.audio_adaptive_jitter = false;
         else if (arg == "--audio-rate") rcfg.audio_sample_rate = uint32_t(std::atoi(need_val("--audio-rate")) == 96000 ? 96000 : 48000);
         else if (arg == "--audio-target-ms") rcfg.audio_target_ms = std::atof(need_val("--audio-target-ms"));
         else if (arg == "--preview" || arg == "--window") enable_preview = true;
@@ -244,9 +247,10 @@ int main(int argc, char** argv) {
 #endif
 
     if (audio_only) {
-        std::printf("LVSP Receiver (audio-only AoIP bridge) on %s:%u | video=off (packets dropped) | bus=%d ch, %u ms @ %u Hz%s\n",
+        std::printf("LVSP Receiver (audio-only AoIP bridge) on %s:%u | video=off (packets dropped) | bus=%d ch, %u ms (%s) @ %u Hz%s\n",
                     rcfg.bind_ip.c_str(), unsigned(receiver.local_port()), aoip_channels, rcfg.audio_latency_ms,
-                    rcfg.audio_sample_rate, audio_virtual ? " -> virtual device" : "");
+                    rcfg.audio_adaptive_jitter ? "AUTO" : "FIXED", rcfg.audio_sample_rate,
+                    audio_virtual ? " -> virtual device" : "");
     } else std::printf(
         "LVSP Receiver listening on %s:%u | timeout=%.1f ms | conceal=%s | preview=%s | audio=%s | kernel=%s\n",
         rcfg.bind_ip.c_str(), unsigned(receiver.local_port()),
@@ -308,9 +312,10 @@ int main(int argc, char** argv) {
                     nack += rs.nack_recovered;
                 }
                 const auto& mc = receiver.master_clock();
-                std::printf("[AUDIO64] ch active %d/%d | latency=%u ms | clk %s skew=%+.1f ppm rtt=%u us | "
+                std::printf("[AUDIO64] ch active %d/%d | latency=%u ms (%s) actual buffer=%.1f ms | clk %s skew=%+.1f ppm rtt=%u us | "
                             "lost=%llu fec_rec=%llu nack_rec=%llu underruns=%llu | resample=%+.1f ppm | L1=%.1f dBFS\n",
-                            active, n, receiver.audio_latency_ms(), mc.synced() ? "synced" : "free-run",
+                            active, n, receiver.audio_latency_ms(), receiver.audio_adaptive_jitter() ? "AUTO" : "FIXED",
+                            receiver.audio_effective_latency_ms(), mc.synced() ? "synced" : "free-run",
                             mc.skew_ppm(), mc.min_rtt_us(), (unsigned long long)lost, (unsigned long long)fec,
                             (unsigned long long)nack, (unsigned long long)under,
                             receiver.audio_matrix().resample_ppm(),

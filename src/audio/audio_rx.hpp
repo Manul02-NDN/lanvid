@@ -40,6 +40,13 @@ public:
     void set_latency_ms(uint32_t ms);
     uint32_t latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
 
+    // Fixed (false: delay held at latency_ms, for wired Ethernet / live monitoring) vs Adaptive Wi-Fi
+    // (true: buffer grows within [latency_ms .. 200 ms] on jitter bursts and glides back). Live, any thread.
+    void set_adaptive_jitter_enabled(bool enabled) { matrix_.set_adaptive_jitter_enabled(enabled); }
+    bool adaptive_jitter_enabled() const { return matrix_.adaptive_jitter_enabled(); }
+    // Measured playout delay of the jitter buffer right now (ms), see AudioSyncMatrix.
+    double current_effective_latency_ms() const { return matrix_.current_effective_latency_ms(); }
+
     // kAudio2 datagram body (after the 28-byte LVSP header). Returns false if rejected.
     bool on_packet(const PacketHeader& h, const uint8_t* payload, size_t len, uint64_t local_now_us);
     // Periodic (<= every few ms): NACK scheduling and loss bookkeeping.

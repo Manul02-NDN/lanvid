@@ -277,6 +277,11 @@ bool load_app_config(AppConfig& cfg) {
     read_int(j, "audio_codec", cfg.audio_codec);
     read_int(j, "aoip_channels", cfg.aoip_channels);
     read_int(j, "aoip_latency_ms", cfg.aoip_latency_ms);
+    {
+        bool b = cfg.adaptive_jitter != 0;  // accepts 0/1 as well as true/false
+        read_bool(j, "adaptive_jitter", b);
+        cfg.adaptive_jitter = b ? 1 : 0;
+    }
     read_bool(j, "aoip_tone", cfg.aoip_tone);
     read_int(j, "aoip_source", cfg.aoip_source);
     read_int(j, "aoip_output", cfg.aoip_output);
@@ -310,6 +315,7 @@ bool load_app_config(AppConfig& cfg) {
     cfg.volume = std::clamp(cfg.volume, 0.0f, 1.5f);
     cfg.aoip_channels = std::clamp(cfg.aoip_channels, 1, 64);
     cfg.aoip_latency_ms = std::clamp(cfg.aoip_latency_ms, 2, 2000);
+    cfg.adaptive_jitter = cfg.adaptive_jitter != 0 ? 1 : 0;
     cfg.audio_codec = std::clamp(cfg.audio_codec, 0, 3);
     cfg.aoip_source = std::clamp(cfg.aoip_source, 0, 1);
     cfg.aoip_output = std::clamp(cfg.aoip_output, 0, 1);
@@ -359,6 +365,7 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"audio_codec\": " << cfg.audio_codec << ",\n"
         << "  \"aoip_channels\": " << cfg.aoip_channels << ",\n"
         << "  \"aoip_latency_ms\": " << cfg.aoip_latency_ms << ",\n"
+        << "  \"adaptive_jitter\": " << cfg.adaptive_jitter << ",\n"
         << "  \"aoip_tone\": " << (cfg.aoip_tone ? "true" : "false") << ",\n"
         << "  \"aoip_source\": " << cfg.aoip_source << ",\n"
         << "  \"aoip_output\": " << cfg.aoip_output << ",\n"

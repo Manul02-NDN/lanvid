@@ -47,6 +47,10 @@ class LanVidReceiver : Closeable {
 
     /** Live latency change 2..2000 ms without reconnecting. */
     fun setAudioLatencyMs(latencyMs: Int) { if (handle != 0L) NativeBridge.receiverSetAudioLatency(handle, latencyMs) }
+    /** Latency mode, live: true = Adaptive Wi-Fi (default), false = Fixed (Ethernet / live monitoring). */
+    fun setAdaptiveJitter(enabled: Boolean) { if (handle != 0L) NativeBridge.receiverSetAdaptiveJitter(handle, enabled) }
+    /** Measured jitter-buffer playout delay in ms (0.0 before playout starts). */
+    val effectiveLatencyMs: Double get() = if (handle != 0L) NativeBridge.receiverGetEffectiveLatencyMs(handle) else 0.0
 
     /** Renders [frames] sample-aligned interleaved Float32 frames for channels 0 until [channels]. */
     fun popAudioMultichannel(out: FloatArray, channels: Int, frames: Int): Int =

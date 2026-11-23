@@ -47,12 +47,34 @@ public:
     void write_frame_atomic(uint64_t media_ts, const float* const* planes, uint32_t num_channels, uint32_t frames);
 
     // ---- Latency & Adaptive Wi-Fi Jitter Buffer control ----
+    //
+    //   Fixed mode    (adaptive off, wired Ethernet / live monitoring): the playout delay is held at exactly
+    //                 target_latency_ms; only the +/-100 ppm device-clock drift is tracked.
+    //   Adaptive mode (Wi-Fi 6): the delay grows within [target_latency_ms .. max_ms] (default 200 ms) as
+    //                 soon as the measured network jitter needs more headroom (up to +/-0.5% time-stretch,
+    //                 identical for all channels), and after the burst it returns to the target slowly through
+    //                 +/-0.05% micro-resampling - no reanchor, no click.
     void set_target_latency_ms(uint32_t ms);
     uint32_t target_latency_ms() const { return latency_ms_.load(std::memory_order_relaxed); }
+    // Delay the buffer is currently steering towards (== target in Fixed mode, >= target in Adaptive mode).
     uint32_t effective_latency_ms() const { return effective_latency_ms_.load(std::memory_order_relaxed); }
-    // Enables adaptive Wi-Fi jitter buffer (min_ms..max_ms, default 5..200 ms) with smooth +/-0.05% micro-resampling.
-    void set_adaptive_jitter(bool enabled, uint32_t min_ms = 5, uint32_t max_ms = 200);
+    // Measured playout delay right now: master clock position minus the playout cursor, in ms
+    // (0 until playout has started). This is the "actual buffer" shown in the UI.
+    double current_effective_latency_ms() const { return actual_latency_ms_.load(std::memory_order_relaxed); }
+    void set_adaptive_jitter_enabled(bool enabled) { set_adaptive_jitter(enabled, kMinLatencyMs, kAdaptiveMaxMs); }
+    bool adaptive_jitter_enabled() const { return adaptive_jitter_.load(std::memory_order_acquire); }
+    // Adaptive range: [max(target, min_ms) .. max(target, max_ms)].
+    void set_adaptive_jitter(bool enabled, uint32_t min_ms = kMinLatencyMs, uint32_t max_ms = kAdaptiveMaxMs);
+    // Network thread: RFC 3550 inter-arrival jitter of any stream (us). Cheap, lock-free.
     void observe_network_jitter_us(uint32_t jitter_us);
+    // Network thread: how late a directly received block arrived = MasterClock position at arrival minus
+    // the end of its samples (one-way delay + packetization + jitter). Adaptive mode sizes the buffer so
+    // the worst recent arrival still lands before its playout: delay >= lag envelope + render block + 2 ms.
+    void observe_arrival_lag_samples(int64_t lag_samples);
+    double arrival_lag_envelope_ms() const { return lag_env_pub_ms_.load(std::memory_order_relaxed); }
+    // Jitter envelope (fast attack / ~4 s release) the adaptive mode sizes the buffer from.
+    uint32_t jitter_envelope_us() const { return uint32_t(jitter_env_pub_us_.load(std::memory_order_relaxed)); }
+    static constexpr uint32_t kAdaptiveMaxMs = 200;
     // Strict inter-channel atomic frame lock: if any active channel is missing at sample `pos`,
     // all active channels output 0 together so zero inter-track skew is mathematically guaranteed.
     void set_atomic_frame_lock(bool enabled) { atomic_frame_lock_.store(enabled, std::memory_order_release); }
@@ -128,8 +150,13 @@ private:
     std::atomic<bool> latency_dirty_{true};
     std::atomic<bool> adaptive_jitter_{false};
     std::atomic<uint32_t> jitter_min_ms_{5};
-    std::atomic<uint32_t> jitter_max_ms_{200};
-    std::atomic<uint32_t> observed_jitter_us_{0};
+    std::atomic<uint32_t> jitter_max_ms_{kAdaptiveMaxMs};
+    std::atomic<uint32_t> jitter_peak_us_{0};       // max jitter reported since the last rendered block
+    std::atomic<double> jitter_env_pub_us_{0.0};
+    std::atomic<uint32_t> lag_peak_samples_{0};    // max arrival lag since the last rendered block
+    std::atomic<double> lag_env_pub_ms_{0.0};
+    std::atomic<double> eff_ms_pub_{50.0};          // consumer's steering target (fractional ms)
+    std::atomic<double> actual_latency_ms_{0.0};
     std::atomic<bool> atomic_frame_lock_{false};
     std::atomic<bool> epoch_reset_req_{false};
     std::atomic<uint64_t> epoch_resets_{0};
@@ -140,6 +167,12 @@ private:
     bool started_ = false;
     double cursor_ = 0.0;
     double err_filt_ = 0.0;
+    double jitter_env_us_ = 0.0;     // consumer-side envelope
+    double lag_env_samples_ = 0.0;   // consumer-side arrival-lag envelope
+    double eff_ms_ = 50.0;           // consumer-side adaptive steering target
+    uint64_t hold_samples_ = 0;      // no shrinking while > 0 (after a growth step)
+    bool was_adaptive_ = false;
+    void update_effective_latency(uint32_t frames, bool adaptive);
     std::atomic<double> cursor_pub_{0.0};
     std::atomic<double> ratio_ppm_{0.0};
     std::atomic<uint64_t> resyncs_{0};

@@ -133,6 +133,18 @@ public final class LanVidReceiver {
         _ = lv_receiver_set_audio_latency_ms(h, ms)
     }
 
+    /// Latency mode, live: `true` = Adaptive Wi-Fi (default), `false` = Fixed (Ethernet / live monitoring).
+    public func setAdaptiveJitter(_ enabled: Bool) {
+        guard let h = handle else { return }
+        _ = lv_receiver_set_adaptive_jitter(h, enabled ? 1 : 0)
+    }
+
+    /// Measured jitter-buffer playout delay in milliseconds (0 before playout starts).
+    public var effectiveLatencyMs: Double {
+        guard let h = handle else { return 0 }
+        return lv_receiver_get_effective_latency_ms(h)
+    }
+
     /// Pull sample-aligned Float32 frames for channels 0..<channels (call from an AVAudioSourceNode
     /// render block). `planar == true` writes channel-major (`out[ch * frames + i]`).
     @discardableResult

@@ -345,6 +345,10 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_receiver_configure_audio_bus.restype = ctypes.c_int
     lib.lv_receiver_set_audio_latency_ms.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.lv_receiver_set_audio_latency_ms.restype = ctypes.c_int
+    lib.lv_receiver_set_adaptive_jitter.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.lv_receiver_set_adaptive_jitter.restype = ctypes.c_int
+    lib.lv_receiver_get_effective_latency_ms.argtypes = [ctypes.c_void_p]
+    lib.lv_receiver_get_effective_latency_ms.restype = ctypes.c_double
     lib.lv_receiver_set_multichannel_audio_callback.argtypes = [ctypes.c_void_p, MC_AUDIO_CB_TYPE, ctypes.c_void_p]
     lib.lv_receiver_set_multichannel_audio_callback.restype = ctypes.c_int
     lib.lv_receiver_pop_audio_multichannel.argtypes = [
@@ -612,6 +616,16 @@ class LanVidReceiver:
         rc = self._lib.lv_receiver_set_audio_latency_ms(self._handle, int(latency_ms))
         if rc != LV_OK:
             raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def set_adaptive_jitter(self, enabled: bool) -> None:
+        """Latency mode, live: True = Adaptive Wi-Fi (default), False = Fixed (Ethernet / live monitoring)."""
+        rc = self._lib.lv_receiver_set_adaptive_jitter(self._handle, 1 if enabled else 0)
+        if rc != LV_OK:
+            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
+
+    def effective_latency_ms(self) -> float:
+        """Measured jitter-buffer playout delay in ms right now (0.0 before playout starts)."""
+        return float(self._lib.lv_receiver_get_effective_latency_ms(self._handle))
 
     def pop_audio_multichannel(self, num_channels: int, num_frames: int):
         """Returns a `(num_frames, num_channels)` float32 array (or list of floats without numpy)."""

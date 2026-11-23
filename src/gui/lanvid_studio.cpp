@@ -450,6 +450,7 @@ void LanVidStudioApp::start_duplex() {
     dc.latency_ms = uint32_t(std::clamp(cfg_.aoip_latency_ms, 2, 2000));
     dc.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
     dc.audio_codec = std::clamp(cfg_.audio_codec, 0, 3);
+    dc.adaptive_jitter = cfg_.adaptive_jitter ? 1 : 0;
     const int rc = lv_duplex_start(duplex_, &dc);
     duplex_running_ = rc == LV_OK;
     if (duplex_running_) {
@@ -594,6 +595,8 @@ void LanVidStudioApp::draw_duplex_tab() {
         if (duplex_running_) lv_duplex_set_latency_ms(duplex_, uint32_t(cfg_.aoip_latency_ms));
         config_dirty_ = true;
     }
+    draw_latency_mode_controls("DpxLatMode", ImGui::CalcItemWidth());
+    draw_actual_buffer_line();
     if (ImGui::Combo("Audio Compression", &cfg_.audio_codec, kAudioCodecItems, 4)) {
         if (sender_) lv_sender_set_audio_codec(sender_, cfg_.audio_codec);
         if (duplex_running_) lv_duplex_set_audio_codec(duplex_, cfg_.audio_codec);
@@ -825,16 +828,89 @@ void LanVidStudioApp::draw_sidebar() {
 
     // Bottom connection & latency indicator pinned to bottom of sidebar
     const float rem = ImGui::GetContentRegionAvail().y;
-    if (rem > 64.0f) ImGui::Dummy(ImVec2(1.0f, rem - 60.0f));
+    if (rem > 86.0f) ImGui::Dummy(ImVec2(1.0f, rem - 82.0f));  // room for status + 1-2 latency lines
     ImGui::Separator();
     ImGui::Spacing();
     const bool any_active = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
     ImGui::TextColored(any_active ? kColGreen : kColTextMuted, "%s", any_active ? "● Connected" : "● Standby");
-    ImGui::TextColored(kColTextMuted, "LATENCY: %d ms", cfg_.aoip_latency_ms);
+    {
+        const char* lat_mode = cfg_.adaptive_jitter ? "(AUTO)" : "(FIXED)";
+        char lat[48];
+        if (actual_buf_valid_) std::snprintf(lat, sizeof(lat), "LATENCY: %.0f ms", actual_buf_ms_);
+        else std::snprintf(lat, sizeof(lat), "LATENCY: %d ms", cfg_.aoip_latency_ms);
+        const float need = ImGui::CalcTextSize(lat).x + ImGui::GetStyle().ItemSpacing.x + ImGui::CalcTextSize(lat_mode).x;
+        ImGui::TextColored(kColTextMuted, "%s", lat);
+        if (need <= ImGui::GetContentRegionAvail().x) ImGui::SameLine();  // one line when it fits
+        ImGui::TextColored(cfg_.adaptive_jitter ? kColGreen : kColCyan, "%s", lat_mode);
+    }
 
     ImGui::EndChild();
     ImGui::PopStyleVar();
     ImGui::PopStyleColor();
+}
+
+void LanVidStudioApp::apply_latency_mode() {
+    cfg_.adaptive_jitter = cfg_.adaptive_jitter ? 1 : 0;
+    // Live: no stream restart. On an idle receiver handle the choice is kept for the next start.
+    if (receiver_) lv_receiver_set_adaptive_jitter(receiver_, cfg_.adaptive_jitter);
+    if (duplex_) lv_duplex_set_adaptive_jitter(duplex_, cfg_.adaptive_jitter);
+}
+
+void LanVidStudioApp::poll_latency_telemetry(uint64_t now) {
+    if (now - actual_buf_us_ < 100000ull) return;  // 10 Hz
+    actual_buf_us_ = now;
+    actual_buf_valid_ = false;
+    if (duplex_running_ && duplex_) {
+        lv_duplex_get_stats(duplex_, &dpx_stats_);
+        dpx_stats_us_ = now;
+        actual_buf_ms_ = dpx_stats_.effective_latency_ms;
+        actual_target_ms_ = dpx_stats_.effective_target_ms;
+        actual_buf_valid_ = dpx_stats_.running && actual_buf_ms_ > 0.0;
+    } else if (receiver_running_ && receiver_) {
+        actual_buf_ms_ = lv_receiver_get_effective_latency_ms(receiver_);
+        actual_target_ms_ = rx_stats_.effective_target_ms;
+        actual_buf_valid_ = actual_buf_ms_ > 0.0;
+    }
+}
+
+void LanVidStudioApp::draw_actual_buffer_line() {
+    if (!actual_buf_valid_) {
+        ImGui::TextColored(kColTextMuted, "ACTUAL BUFFER: -- ms");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("No AoIP stream is being played out yet.");
+        return;
+    }
+    ImVec4 col = kColCyan;  // Fixed: held at the configured latency
+    const char* state = "fixed";
+    if (cfg_.adaptive_jitter) {
+        const double lat = double(cfg_.aoip_latency_ms);
+        const bool grown = double(actual_target_ms_) > lat + 0.5 ||
+                           actual_buf_ms_ > lat + std::max(1.5, 0.05 * lat);
+        col = grown ? kColAmber : kColGreen;
+        state = grown ? "expanded (Wi-Fi burst)" : "nominal";
+    }
+    ImGui::TextColored(col, "ACTUAL BUFFER: %.1f ms", actual_buf_ms_);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Measured jitter-buffer playout delay: %.1f ms (%s)\nTarget: %d ms%s", actual_buf_ms_, state,
+                          cfg_.aoip_latency_ms,
+                          cfg_.adaptive_jitter ? ", Adaptive range up to 200 ms" : ", Fixed");
+}
+
+void LanVidStudioApp::draw_latency_mode_controls(const char* id, float combo_width) {
+    ImGui::PushID(id);
+    int mode = cfg_.adaptive_jitter ? 1 : 0;
+    const char* items[] = {"Fixed (Ethernet)", "Adaptive (Wi-Fi)"};
+    ImGui::SetNextItemWidth(combo_width);
+    if (ImGui::Combo(combo_width < 0.0f ? "##LatencyMode" : "Latency Mode", &mode, items, 2)) {
+        cfg_.adaptive_jitter = mode;
+        apply_latency_mode();
+        config_dirty_ = true;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fixed (Ethernet): the buffer is held exactly at the selected latency - wired LAN, live monitoring.\n"
+                          "Adaptive (Wi-Fi): grows up to 200 ms on Wi-Fi jitter bursts and glides back via +/-0.05%%\n"
+                          "micro-resampling. Switches live, without restarting the stream.");
+    if (combo_width < 0.0f) ImGui::TextDisabled("Latency Mode");
+    ImGui::PopID();
 }
 
 void LanVidStudioApp::draw_studio_config_panel() {
@@ -902,6 +978,9 @@ void LanVidStudioApp::draw_studio_config_panel() {
     if (ImGui::SmallButton("10 ms")) { cfg_.aoip_latency_ms = 10; config_dirty_ = true; }
     ImGui::SameLine();
     if (ImGui::SmallButton("20 ms")) { cfg_.aoip_latency_ms = 20; config_dirty_ = true; }
+
+    draw_latency_mode_controls("CfgLatMode", -1.0f);
+    draw_actual_buffer_line();
 
     int buf_idx = (cfg_.matrix_buffer_size <= 128) ? 0 : (cfg_.matrix_buffer_size <= 256 ? 1 : 2);
     const char* buf_items[] = {"Buffer: 128 (2.7 ms)", "Buffer: 256 (5.3 ms)", "Buffer: 512 (10.7 ms)"};
@@ -1531,6 +1610,7 @@ void LanVidStudioApp::start_receiver() {
     rc.enable_audio = 1;
     rc.enable_discovery = 1;
     rc.audio_only = cfg_.audio_only ? 1 : 0;
+    rc.adaptive_jitter = cfg_.adaptive_jitter ? 1 : 0;
 
     apply_receiver_bus();
 
@@ -1691,6 +1771,8 @@ void LanVidStudioApp::poll_telemetry_and_frames() {
             receiver_tex_->update(receiver_frame_buf_.data(), w, h);
         }
     }
+
+    poll_latency_telemetry(now);
 
     // Update stats + rolling graphs every 500 ms
     if (now - last_stat_poll_us_ >= 500000ull) {
@@ -2048,7 +2130,9 @@ void LanVidStudioApp::draw_sender_tab() {
 
 void LanVidStudioApp::draw_receiver_tab() {
     // Top compact control bar
-    ImGui::BeginChild("##RxControls", ImVec2(0, 54), true, ImGuiWindowFlags_NoScrollbar);
+    // Two rows: transport / view controls, then the AoIP bus (channels, latency, latency mode, actual buffer).
+    ImGui::BeginChild("##RxControls", ImVec2(0, ImGui::GetFrameHeightWithSpacing() * 2.0f + 18.0f), true,
+                      ImGuiWindowFlags_NoScrollbar);
     ImGui::SetNextItemWidth(86.0f);
     if (ImGui::InputInt("Порт", &cfg_.listen_port, 0, 0)) {
         cfg_.listen_port = std::clamp(cfg_.listen_port, 1024, 65535);
@@ -2113,7 +2197,6 @@ void LanVidStudioApp::draw_receiver_tab() {
         ImGui::SetTooltip("Аналог CLI --audio-only: ігнорувати відеопакети до декодування (чистий AoIP-міст).");
     }
 
-    ImGui::SameLine();
     ImGui::SetNextItemWidth(90.0f);
     int bus_idx = 1;
     for (int i = 0; i < 5; ++i) if (kBusChoices[i] == cfg_.aoip_channels) bus_idx = i;
@@ -2130,6 +2213,11 @@ void LanVidStudioApp::draw_receiver_tab() {
         config_dirty_ = true;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", latency_mode_label(cfg_.aoip_latency_ms));
+    ImGui::SameLine();
+    draw_latency_mode_controls("RxLatMode", 160.0f);
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    draw_actual_buffer_line();
     ImGui::EndChild();
 
     // 64-channel LED meter grid (phase-aligned playout bus)

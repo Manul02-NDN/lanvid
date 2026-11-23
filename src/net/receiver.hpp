@@ -35,6 +35,7 @@ struct ReceiverConfig {
     uint32_t audio_sample_rate = 48000;      // 64-channel bus rate (48000 / 96000)
     uint32_t audio_latency_ms = 20;          // 2..2000 ms multichannel playout latency
     bool audio_only = false;                 // drop video slices before reassembly/decoding (AoIP bridge)
+    bool audio_adaptive_jitter = true;       // true = Adaptive Wi-Fi jitter buffer, false = Fixed latency
 };
 
 struct ClockSyncInfo {
@@ -80,6 +81,12 @@ public:
     // ---- 64-channel phase-coherent audio bus ----
     void set_audio_latency_ms(uint32_t ms) { arx_.set_latency_ms(ms); }
     uint32_t audio_latency_ms() const { return arx_.latency_ms(); }
+    // Latency mode (live): Fixed (Ethernet / live monitoring) or Adaptive (Wi-Fi, grows up to 200 ms).
+    void set_audio_adaptive_jitter(bool enabled) { arx_.set_adaptive_jitter_enabled(enabled); }
+    bool audio_adaptive_jitter() const { return arx_.adaptive_jitter_enabled(); }
+    // Measured playout delay of the 64-channel jitter buffer (ms) and the delay it currently steers to.
+    double audio_effective_latency_ms() const { return arx_.current_effective_latency_ms(); }
+    uint32_t audio_effective_target_ms() const { return matrix_.effective_latency_ms(); }
     // Renders `frames` synchronised frames for channels [0, num_channels) (interleaved or planar), then
     // dispatches every MIDI2 event that falls inside this block (sample offset given to the callback).
     void pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames);

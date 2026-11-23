@@ -33,6 +33,7 @@ struct AppConfig {
     int audio_codec = 0;       // 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM
     int aoip_channels = 8;     // 2 / 8 / 16 / 32 / 64
     int aoip_latency_ms = 20;  // 2 (ultra-low) .. 2000 (bulletproof)
+    int adaptive_jitter = 1;   // 1 = Adaptive (Wi-Fi) jitter buffer, 0 = Fixed (Ethernet / live monitoring)
     bool aoip_tone = false;    // sender: N-channel test tone bus
     int aoip_source = 0;       // sender: 0=Built-in Test Tone Generator, 1=Virtual Audio Device
     int aoip_output = 0;       // receiver: 0=meters only, 1=Virtual Audio Device

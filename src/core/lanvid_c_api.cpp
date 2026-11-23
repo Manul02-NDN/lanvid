@@ -216,6 +216,7 @@ struct LvReceiverHandle {
     std::atomic<int> state{LV_STATE_STOPPED};
     std::atomic<float> volume{1.0f};
     std::atomic<bool> audio_started{false};
+    std::atomic<int> adaptive_jitter{1};  // 1=Adaptive Wi-Fi (default), 0=Fixed; survives restarts
     bool connected_notified = false;
 
     // Zero-copy SDK callbacks
@@ -999,6 +1000,20 @@ int lv_receiver_set_audio_latency_ms(LvReceiverHandle* handle, uint32_t latency_
     return LV_OK;
 }
 
+int lv_receiver_set_adaptive_jitter(LvReceiverHandle* handle, int enabled) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    handle->adaptive_jitter.store(enabled ? 1 : 0, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    if (handle->receiver) handle->receiver->set_audio_adaptive_jitter(enabled != 0);
+    return LV_OK;
+}
+
+double lv_receiver_get_effective_latency_ms(LvReceiverHandle* handle) {
+    if (!handle) return 0.0;
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    return handle->receiver ? handle->receiver->audio_effective_latency_ms() : 0.0;
+}
+
 int lv_receiver_set_multichannel_audio_callback(LvReceiverHandle* handle, LV_MultichannelAudioCallback cb,
                                                 void* user_data) {
     if (!handle) return LV_ERR_INVALID_ARG;
@@ -1187,6 +1202,7 @@ int lv_sdk_receiver_start(LvReceiverHandle* handle, const LV_ReceiverConfig* cfg
     rcfg.audio_target_ms = cfg->audio_target_ms > 0.0 ? cfg->audio_target_ms : 12.0;
     rcfg.audio_sample_rate = handle->bus_cfg.sample_rate == 96000 ? 96000u : 48000u;
     rcfg.audio_latency_ms = std::clamp<uint32_t>(handle->bus_cfg.latency_ms, 2, 2000);
+    rcfg.audio_adaptive_jitter = handle->adaptive_jitter.load(std::memory_order_acquire) != 0;
 
     return handle->start_common(rcfg, cfg->enable_os_audio != 0, cfg->enable_discovery != 0,
                                 cfg->discovery_port, cfg->device_name);
@@ -1377,6 +1393,7 @@ void lv_duplex_config_default(LV_DuplexConfig* cfg) {
     cfg->num_channels = 64;
     cfg->discovery_port = lv::kDiscoveryPort;
     cfg->enable_discovery = 1;
+    cfg->adaptive_jitter = 1;
 }
 
 LvDuplexHandle* lv_duplex_create(void) { return new (std::nothrow) LvDuplexHandle(); }
@@ -1407,6 +1424,7 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
     h->rx = lv_receiver_create();
     lv_receiver_set_midi_callback(h->rx, h->midi_cb, h->midi_ud);
     lv_receiver_configure_audio_bus(h->rx, &bus);
+    lv_receiver_set_adaptive_jitter(h->rx, cfg->adaptive_jitter);
     LV_ReceiverConfig rc;
     lv_sdk_receiver_config_default(&rc);
     std::snprintf(rc.bind_ip, sizeof(rc.bind_ip), "%s", cfg->bind_ip[0] ? cfg->bind_ip : "0.0.0.0");
@@ -1530,6 +1548,14 @@ int lv_duplex_set_latency_ms(LvDuplexHandle* h, uint32_t ms) {
     return LV_OK;
 }
 
+int lv_duplex_set_adaptive_jitter(LvDuplexHandle* h, int enabled) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    h->cfg.adaptive_jitter = enabled ? 1 : 0;
+    if (h->rx) lv_receiver_set_adaptive_jitter(h->rx, h->cfg.adaptive_jitter);
+    return LV_OK;
+}
+
 int lv_duplex_set_audio_codec(LvDuplexHandle* h, int codec) {
     if (!h || codec < 0 || codec > 3) return LV_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lk(h->api_mu);
@@ -1543,6 +1569,8 @@ int lv_duplex_get_stats(LvDuplexHandle* h, LV_DuplexStats* out) {
     std::memset(out, 0, sizeof(*out));
     std::lock_guard<std::mutex> lk(h->api_mu);
     out->running = h->running.load() ? 1 : 0;
+    out->adaptive_jitter = h->cfg.adaptive_jitter ? 1 : 0;
+    out->effective_target_ms = h->cfg.latency_ms;
     if (!out->running) return LV_ERR_NOT_RUNNING;
 #ifdef LV_HAVE_SHM_BUS
     const auto rs = h->rx_host.status();
@@ -1564,6 +1592,8 @@ int lv_duplex_get_stats(LvDuplexHandle* h, LV_DuplexStats* out) {
         out->rx_clock_synced = mc.synced() ? 1 : 0;
         out->rx_rtt_us = mc.min_rtt_us();
         out->rx_clock_skew_ppm = mc.skew_ppm();
+        out->effective_latency_ms = h->rx->receiver->audio_effective_latency_ms();
+        out->effective_target_ms = h->rx->receiver->audio_effective_target_ms();
         for (uint16_t c = 0; c < uint16_t(h->cfg.num_channels); ++c) {
             const auto st = h->rx->receiver->audio_channel_rx_stats(c);
             out->rx_packets += st.packets_rx;
@@ -1702,6 +1732,7 @@ void lv_receiver_config_default(LvReceiverConfig* cfg) {
     cfg->audio_target_ms = 12.0;
     cfg->enable_discovery = 1;
     cfg->discovery_port = lv::kDiscoveryPort;
+    cfg->adaptive_jitter = 1;
 }
 
 int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
@@ -1948,6 +1979,8 @@ int lv_receiver_start(LvReceiverHandle* handle, const LvReceiverConfig* cfg) {
     rcfg.audio_sample_rate = handle->bus_cfg.sample_rate == 96000 ? 96000u : 48000u;
     rcfg.audio_latency_ms = std::clamp<uint32_t>(handle->bus_cfg.latency_ms, 2, 2000);
     rcfg.audio_only = (cfg->audio_only != 0);
+    handle->adaptive_jitter.store(cfg->adaptive_jitter != 0 ? 1 : 0, std::memory_order_release);
+    rcfg.audio_adaptive_jitter = cfg->adaptive_jitter != 0;
 
     const bool auto_os_audio = (cfg->enable_audio != 0 && cfg->external_audio_pull == 0);
     return handle->start_common(rcfg, auto_os_audio, cfg->enable_discovery != 0,
@@ -1985,7 +2018,10 @@ int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out) {
     if (handle->receiver) {
         out->audio_packets_lost = handle->receiver->audio_stats().packets_lost;
         out->pli_requests = handle->receiver->assembler_stats().pli_requests;
+        out->effective_latency_ms = handle->receiver->audio_effective_latency_ms();
+        out->effective_target_ms = handle->receiver->audio_effective_target_ms();
     }
+    out->adaptive_jitter = handle->adaptive_jitter.load(std::memory_order_acquire);
     return 1;
 }
 

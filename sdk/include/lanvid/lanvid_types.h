@@ -260,6 +260,8 @@ typedef struct LV_DuplexConfig {
     uint32_t rx_headroom_frames; /* frames kept queued for the DAW inputs (0 = auto: max(3 x DAW buffer, 512));
                                     raise on busy hosts to avoid underruns, at the cost of latency */
     int32_t audio_codec;         /* 0=PCM32F, 1=PCM24, 2=PCM16, 3=Opus/ADPCM */
+    int32_t adaptive_jitter;     /* (appended) 1=Adaptive Wi-Fi jitter buffer (lv_duplex_config_default),
+                                    0=Fixed latency (wired Ethernet / live monitoring) */
 } LV_DuplexConfig;
 
 typedef struct LV_DuplexStats {
@@ -287,6 +289,10 @@ typedef struct LV_DuplexStats {
     uint64_t stream_epoch_resets; /* peer restarts handled (FEC / dedup / jitter / clock reset) */
     uint32_t active_midi_notes;   /* notes currently held on the receive side */
     uint32_t reserved_midi;
+    /* Latency mode telemetry (appended) */
+    double effective_latency_ms;  /* measured peer->us jitter-buffer playout delay right now */
+    uint32_t effective_target_ms; /* delay the buffer steers to (== latency_ms in Fixed mode) */
+    int32_t adaptive_jitter;      /* 1=Adaptive (Wi-Fi), 0=Fixed */
 } LV_DuplexStats;
 
 /* MIDI2 event delivered to the application, sample-aligned to the audio playout. */

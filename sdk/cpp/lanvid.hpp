@@ -292,6 +292,13 @@ public:
         const int rc = lv_receiver_set_audio_latency_ms(handle_, ms);
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
     }
+    // Latency mode, live: true = Adaptive Wi-Fi (default), false = Fixed (Ethernet / live monitoring).
+    Result<void> set_adaptive_jitter(bool enabled) {
+        const int rc = lv_receiver_set_adaptive_jitter(handle_, enabled ? 1 : 0);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
+    // Measured jitter-buffer playout delay in ms (0 before playout starts).
+    double effective_latency_ms() const { return lv_receiver_get_effective_latency_ms(handle_); }
     void on_multichannel_audio(MultichannelCallback cb) {
         mc_cb_ = std::move(cb);
         lv_receiver_set_multichannel_audio_callback(handle_, mc_cb_ ? &Receiver::mc_trampoline : nullptr, this);

@@ -164,7 +164,10 @@ bool AudioRxEngine::is_expired(const Stream& s, uint32_t seq, uint64_t now) cons
     if (s.chunk == 0) return false;
     const int64_t ts = int64_t(s.ref_ts) + int64_t(int32_t(seq - s.ref_seq)) * int64_t(s.chunk);
     const uint32_t rate = matrix_.sample_rate();
-    const int64_t lat = int64_t(latency_ms_.load(std::memory_order_relaxed)) * rate / 1000;
+    // Effective delay (== target in Fixed mode; grown target in Adaptive mode, so packets the expanded
+    // buffer can still play are neither counted late nor given up on).
+    const uint32_t lat_ms = std::max(latency_ms_.load(std::memory_order_relaxed), matrix_.effective_latency_ms());
+    const int64_t lat = int64_t(lat_ms) * rate / 1000;
     if (clock_.synced()) {
         const int64_t target = clock_.master_samples(now, rate) - lat;
         return ts + int64_t(s.chunk) <= target;
@@ -292,6 +295,11 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
             matrix_.observe_network_jitter_us(j_us);
         }
         s.has_transit = true;
+        if (!via_nack && clock_.synced()) {
+            // Arrival lag vs the MasterClock (what the playout delay must cover for this block).
+            matrix_.observe_arrival_lag_samples(clock_.master_samples(now, matrix_.sample_rate()) -
+                                                int64_t(ah.media_timestamp_samples + ah.num_samples));
+        }
         s.prev_transit = transit;
     }
 
