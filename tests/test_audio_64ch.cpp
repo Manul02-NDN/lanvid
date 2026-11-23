@@ -330,7 +330,9 @@ TEST(audio_64ch_c_api_udp_loopback) {
 
     LV_AudioBusConfig bus;
     lv_audio_bus_config_default(&bus);
-    bus.latency_ms = 20;
+    // 50 ms: this loop paces itself with sleep_until(5 ms), which lasts ~15.6 ms at the default Windows
+    // timer resolution, so pushes arrive in bursts; 20 ms left single-channel packets late on CI runners.
+    bus.latency_ms = 50;
     REQUIRE(lv_receiver_configure_audio_bus(rx, &bus) == LV_OK);
     REQUIRE(lv_sender_configure_audio_bus(tx, &bus) == LV_OK);
 
