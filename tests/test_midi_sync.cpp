@@ -619,8 +619,8 @@ TEST(personal_monitor_bus_64ch_to_stereo_dsp_and_remote_control) {
     };
     const double base_rms_l = rms_of(out_l);
     const double base_rms_r = rms_of(out_r);
-    CHECK(base_rms_l > 0.20);
-    CHECK(base_rms_r > 0.10);
+    CHECK(base_rms_l > 0.14);  // bus carries -3 dB of mix headroom
+    CHECK(base_rms_r > 0.07);
 
     // Enable 3-band EQ (+12 dB Mid @ 1000 Hz) + HPF (250 Hz) -> 1 kHz Left boosts, 200 Hz Right attenuates!
     PersonalMonitorDspParams dsp{};

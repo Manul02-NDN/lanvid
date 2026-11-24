@@ -15,6 +15,15 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 // -0.5 dBFS protective brickwall ceiling = 10^(-0.5/20)
 constexpr float kBrickwallCeiling = 0.94406088f;
+constexpr float kBusHeadroom = 0.70794578f;   // -3 dB: a sum of several 0 dBFS channels stays inside the chain
+constexpr float kSatKnee = 0.80f;             // soft saturator: transparent below, tanh-rounded above
+
+inline float soft_sat(float x) {
+    const float a = std::fabs(x);
+    if (a <= kSatKnee) return x;
+    const float y = kSatKnee + (1.0f - kSatKnee) * std::tanh((a - kSatKnee) / (1.0f - kSatKnee));
+    return x < 0.0f ? -y : y;
+}
 
 inline float db_to_lin(float db) {
     if (db <= -60.0f) return 0.0f;
@@ -96,7 +105,7 @@ void calc_high_shelf(float fs, float fc, float gain_db, float& b0, float& b1, fl
 
 PersonalMonitorBus::PersonalMonitorBus(uint32_t sample_rate)
     : sample_rate_(sample_rate ? sample_rate : 48000) {
-    // 5 ms smooth time constant -> ~99% converged within 5 ms (click-free parameter changes).
+    // 1.2 ms smooth time constant (~5 ms to settle): click-free parameter changes.
     const float tau_samples = std::max(1.0f, float(sample_rate_) * 0.0012f);
     smooth_alpha_ = 1.0f - std::exp(-1.0f / tau_samples);
     reset();
@@ -110,6 +119,9 @@ void PersonalMonitorBus::reset() {
     eq_high_.reset_state();
     comp_env_ = 0.0f;
     lim_gain_ = 1.0f;
+    la_l_.fill(0.0f); la_r_.fill(0.0f); la_req_.fill(1.0f); la_env_.fill(1.0f);
+    la_env_sum_ = float(kLookahead);
+    la_pos_ = 0;
     initialized_ = false;
     recompute_targets_locked();
     cur_gain_l_ = tgt_gain_l_;
@@ -227,7 +239,7 @@ void PersonalMonitorBus::process_block(const float* const* in_planes, int num_in
     const float comp_att = std::exp(-1.0f / std::max(1.0f, dsp_.comp_attack_ms * 0.001f * fs));
     const float comp_rel = std::exp(-1.0f / std::max(1.0f, dsp_.comp_release_ms * 0.001f * fs));
     const float comp_makeup = db_to_lin(dsp_.comp_makeup_db);
-    const float lim_rel = std::exp(-1.0f / std::max(1.0f, 0.030f * fs));  // 30 ms limiter release
+    const float lim_rel = std::exp(-1.0f / std::max(1.0f, 0.080f * fs));  // 80 ms limiter release (no pumping)
 
     float worst_gr_db = 0.0f;
 
@@ -246,6 +258,9 @@ void PersonalMonitorBus::process_block(const float* const* in_planes, int num_in
                 r += s * cur_gain_r_[c];
             }
         }
+
+        l *= kBusHeadroom;
+        r *= kBusHeadroom;
 
         // 2. Smooth biquad coefficients & run HPF + 3-band EQ
         hpf_.step_smooth(alpha);
@@ -280,16 +295,30 @@ void PersonalMonitorBus::process_block(const float* const* in_planes, int num_in
         l *= cur_master_gain_;
         r *= cur_master_gain_;
 
-        // 5. Protective Brickwall Limiter (-0.5 dBFS ceiling for ear safety)
-        const float peak = std::max(std::fabs(l), std::fabs(r));
-        const float req_lim = (peak > kBrickwallCeiling) ? (kBrickwallCeiling / peak) : 1.0f;
-        if (req_lim < lim_gain_) {
-            lim_gain_ = req_lim;  // instant attack (brickwall)
-        } else {
-            lim_gain_ = lim_rel * lim_gain_ + (1.0f - lim_rel) * 1.0f;
-        }
-        l = std::clamp(l * lim_gain_, -kBrickwallCeiling, kBrickwallCeiling);
-        r = std::clamp(r * lim_gain_, -kBrickwallCeiling, kBrickwallCeiling);
+        // 5. Soft saturator (tanh knee): rounds residual overs instead of hard-clipping them.
+        l = soft_sat(l);
+        r = soft_sat(r);
+
+        // 6. Lookahead peak limiter (~1 ms): gain is computed on the undelayed signal and applied to the
+        //    delayed one, so the attack is a smooth ramp that is already complete when the peak arrives.
+        const uint32_t wp = la_pos_;
+        la_l_[wp] = l;
+        la_r_[wp] = r;
+        const float pk = std::max(std::fabs(l), std::fabs(r));
+        la_req_[wp] = (pk > kBrickwallCeiling) ? (kBrickwallCeiling / pk) : 1.0f;
+        float m = 1.0f;  // sliding minimum over the last kLookahead samples
+        for (uint32_t k = 0; k < kLookahead; ++k) m = std::min(m, la_req_[(wp + kLookaheadBuf - k) % kLookaheadBuf]);
+        // Instant-down / slow-up release envelope, never above the sliding minimum.
+        const float rise = lim_rel * lim_gain_ + (1.0f - lim_rel);
+        lim_gain_ = std::min(m, rise);
+        // Boxcar smoothing of the envelope (running sum) turns the instant drop into a kLookahead-sample ramp.
+        la_env_sum_ += lim_gain_ - la_env_[wp];
+        la_env_[wp] = lim_gain_;
+        const float g = la_env_sum_ / float(kLookahead);
+        const uint32_t rp = (wp + kLookaheadBuf - (kLookahead - 1)) % kLookaheadBuf;
+        l = std::clamp(la_l_[rp] * g, -kBrickwallCeiling, kBrickwallCeiling);
+        r = std::clamp(la_r_[rp] * g, -kBrickwallCeiling, kBrickwallCeiling);
+        la_pos_ = (wp + 1) % kLookaheadBuf;
 
         out_l[i] = l;
         out_r[i] = r;

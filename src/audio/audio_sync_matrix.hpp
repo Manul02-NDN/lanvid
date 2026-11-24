@@ -128,6 +128,10 @@ private:
         uint64_t seen_write_count = 0;
         int64_t active_left = 0;
         bool in_gap = false;
+        float gap_hold = 0.0f;           // last played value, decays through a gap
+        float gap_from = 0.0f;
+        float gap_decay = 0.93f;         // per-sample (~2 ms to -60 dB at 48 kHz)
+        uint32_t gap_fadein = 1u << 30;  // samples since the gap ended
         std::atomic<float> level_db{-120.0f};
         std::atomic<bool> active{false};
         std::atomic<uint64_t> underruns{0};

@@ -8,7 +8,8 @@ namespace lv {
 
 namespace {
 constexpr uint32_t kCrossfadeSamples = 96;
-constexpr double kRatioLimit = 500e-6;              // hard limit: ratio always within 0.9995 .. 1.0005
+constexpr double kRatioLimit = 2000e-6;             // hard limit: ratio always within 0.998 .. 1.002 (+/-0.2 %)
+constexpr uint32_t kGapFadeSamples = 96;           // 2 ms fade-out / fade-in around a gap (no click)
 constexpr double kGrowJumpSec = 0.010;              // adaptive growth beyond 10 ms: one crossfaded re-anchor
 constexpr double kDeadbandSamples = 1.5;
 // Adaptive sizing: headroom = 3 x RFC 3550 jitter envelope + 2 ms guard.
@@ -296,7 +297,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     }
 
     const double err = double(desired) - cursor_;
-    // The micro-resampler only ever corrects up to +/-500 ppm (0.9995 .. 1.0005): it can never lock into
+    // The micro-resampler only ever corrects up to +/-2000 ppm (0.998 .. 1.002): it can never lock into
     // an audible slow-down. Anything it cannot absorb is re-anchored once with a 96-sample crossfade:
     //  * |error| > 40 ms in either mode (consumer stall, clock jump, latency change),
     //  * Adaptive growth > 10 ms (a Wi-Fi burst needs the deeper buffer now, not after a minute of stretch).
@@ -392,9 +393,19 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
                 if (!c.in_gap) gap_event = true;
                 c.in_gap = true;
             }
-            v = 0.0f;
+            // Gap: decay the last played value over 2 ms instead of a hard step to zero.
+            c.gap_hold *= c.gap_decay;
+            v = c.gap_hold;
+            c.gap_fadein = 0;
         } else {
             c.in_gap = false;
+            if (c.gap_fadein < kGapFadeSamples) {
+                // Resume after a gap: ramp in from the decayed tail (no step, even after a long gap).
+                if (c.gap_fadein == 0) c.gap_from = c.gap_hold;
+                const float w = float(++c.gap_fadein) / float(kGapFadeSamples);
+                v = c.gap_from * (1.0f - w) + v * w;
+            }
+            c.gap_hold = v;
         }
         dst[size_t(i) * stride] = v;
         peak = std::max(peak, std::fabs(v));

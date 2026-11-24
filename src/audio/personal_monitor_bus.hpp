@@ -119,7 +119,7 @@ private:
     void recompute_targets_locked();
 
     uint32_t sample_rate_ = 48000;
-    float smooth_alpha_ = 0.02f;  // 5 ms time constant @ 48 kHz
+    float smooth_alpha_ = 0.02f;  // ~1.2 ms time constant @ 48 kHz
     mutable std::mutex mu_;
 
     std::array<PersonalMonitorChannelMix, kMonitorMaxInputChannels> ch_mix_{};
@@ -138,6 +138,11 @@ private:
 
     float comp_env_ = 0.0f;
     float lim_gain_ = 1.0f;
+    static constexpr uint32_t kLookahead = 48;     // 1 ms @ 48 kHz
+    static constexpr uint32_t kLookaheadBuf = kLookahead;
+    std::array<float, kLookaheadBuf> la_l_{}, la_r_{}, la_req_{}, la_env_{};
+    float la_env_sum_ = float(kLookahead);
+    uint32_t la_pos_ = 0;
     float cur_master_gain_ = 1.0f;
     float tgt_master_gain_ = 1.0f;
     bool initialized_ = false;

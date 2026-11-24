@@ -17,6 +17,15 @@
 #include "common/clock.hpp"
 #include "lanvid/lanvid_sdk.h"
 #include "net/mdns_advertiser.hpp"
+#include "audio/audio_reliability.hpp"
+#include "audio/audio_rx.hpp"
+#include "audio/audio_sync_matrix.hpp"
+#include "audio/audio_tx.hpp"
+#include "audio/master_clock.hpp"
+#include "net/packet.hpp"
+#include <algorithm>
+#include <map>
+#include <random>
 #if defined(__APPLE__)
 #include <arpa/inet.h>
 #include <dns_sd.h>
@@ -292,4 +301,136 @@ TEST(monitor_discovery_and_handshake_across_interfaces) {
     stop_srv.store(true);
     srv_thread.join();
     srv.stop();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Monitor audio quality: no clipping of a hot 64->2 sum, and a long Wi-Fi-like playout (consumer clock
+// +120 ppm fast, 2 % packet loss, 0..2 ms jitter) without discontinuities, zero-gaps or latency creep.
+// Virtual time: deterministic, no sockets, no sleeps.
+// ---------------------------------------------------------------------------------------------
+TEST(monitor_bus_hot_sum_never_clips) {
+    lv::PersonalMonitorBus bus(48000);
+    constexpr int kCh = 16;
+    constexpr uint32_t kFrames = 480;
+    std::vector<std::vector<float>> in(kCh, std::vector<float>(kFrames));
+    std::vector<const float*> planes(kCh);
+    for (int c = 0; c < kCh; ++c) planes[c] = in[c].data();
+    std::vector<float> l(kFrames), r(kFrames);
+    float peak = 0.0f, max_step = 0.0f, prev = 0.0f;
+    for (int blk = 0; blk < 200; ++blk) {
+        for (int c = 0; c < kCh; ++c)
+            for (uint32_t i = 0; i < kFrames; ++i) {
+                const double t = double(blk * kFrames + i) / 48000.0;
+                in[c][i] = float(std::sin(2.0 * 3.14159265358979 * (220.0 + 37.0 * c) * t));  // 0 dBFS each
+            }
+        bus.process_block(planes.data(), kCh, l.data(), r.data(), kFrames);
+        for (uint32_t i = 0; i < kFrames; ++i) {
+            peak = std::max({peak, std::fabs(l[i]), std::fabs(r[i])});
+            if (blk > 2) max_step = std::max(max_step, std::fabs(l[i] - prev));
+            prev = l[i];
+        }
+    }
+    std::printf("    [monitor bus] 16 x 0 dBFS sum: peak=%.4f max_step=%.4f\n", peak, max_step);
+    CHECK(peak <= 0.9441f);        // brickwall ceiling, never above full scale
+    CHECK(max_step < 0.5f);        // no hard-clip steps
+}
+
+namespace {
+struct DriftSim {
+    static constexpr uint32_t kRate = 48000;
+    static constexpr int64_t kOff = 5'000'000;
+    lv::MasterClock clk;
+    lv::AudioSyncMatrix mat{kRate};
+    lv::AudioTxEngine tx;
+    lv::AudioRxEngine rx;
+    std::multimap<double, std::vector<uint8_t>> q;  // arrival (true us) -> datagram
+    std::mt19937 rng{2024};
+    double true_us = 1'000'000.0;
+    double drift = 120e-6;
+    uint64_t lt() const { return uint64_t(true_us * (1.0 + drift)); }
+
+    DriftSim()
+        : tx(kRate, lv::kDefaultMtu, [this](const uint8_t* d, size_t n) {
+              if (std::uniform_real_distribution<double>(0, 1)(rng) < 0.02) return true;  // 2 % loss
+              q.insert({true_us + 1000.0 + double(rng() % 2000), std::vector<uint8_t>(d, d + n)});
+              return true;
+          }),
+          rx(mat, clk, [](const uint8_t*, size_t) { return true; }) {
+        clk.set_fixed_offset(kOff);
+    }
+    void deliver() {
+        while (!q.empty() && q.begin()->first <= true_us) {
+            auto dg = std::move(q.begin()->second);
+            q.erase(q.begin());
+            lv::PacketHeader h;
+            const uint8_t* pl = nullptr;
+            if (lv::parse_packet(dg.data(), dg.size(), h, &pl) == lv::PacketParseStatus::kOk &&
+                h.type == lv::PacketType::kAudio2)
+                rx.on_packet(h, pl, h.payload_size, lt());
+        }
+    }
+};
+}  // namespace
+
+TEST(monitor_playout_drift_120ppm_loss_2pct_is_seamless) {
+    DriftSim s;
+    s.mat.set_target_latency_ms(15);
+    s.rx.set_latency_ms(15);
+    s.rx.set_adaptive_jitter_enabled(false);
+    s.tx.set_latency_ms(15);
+    s.tx.set_codec_profile(lv::audio_codec_profile_from_bitrate(128));  // Opus CELT
+
+    constexpr uint32_t kSend = 120;   // 2.5 ms
+    constexpr uint32_t kPop = 128;    // phone callback
+    const double send_period = 1e6 * kSend / 48000.0;
+    const double pop_period = 1e6 * kPop / (48000.0 * (1.0 + s.drift));  // consumer crystal runs fast
+    double next_send = s.true_us, next_pop = s.true_us + 40'000.0;
+    const double end_us = s.true_us + 60'000'000.0;  // 60 s
+    std::vector<float> out(kPop);
+    float prev = 0.0f, peak = 0.0f, max_step = 0.0f;
+    uint64_t pops = 0, zero_run = 0, max_zero_run = 0, big_steps = 0;
+    double lat_min = 1e9, lat_max = 0.0;
+    std::vector<float> blk(kSend);
+    while (s.true_us < end_us) {
+        s.true_us = std::min(next_send, next_pop);
+        if (s.true_us >= next_send) {
+            const uint64_t ts0 = uint64_t((int64_t(s.true_us) + DriftSim::kOff) * 48000 / 1'000'000) - kSend;
+            for (uint32_t i = 0; i < kSend; ++i)
+                blk[i] = 0.5f * float(std::sin(2.0 * 3.14159265358979 * 1000.0 * double(ts0 + i) / 48000.0));
+            s.tx.push_channel(0, blk.data(), kSend, lv::AudioFormat2::kFloat32, ts0, uint32_t(s.true_us));
+            next_send += send_period;
+        }
+        s.deliver();
+        s.rx.service(s.lt());
+        if (s.true_us >= next_pop) {
+            s.mat.pop_interleaved(s.clk, s.lt(), out.data(), 1, kPop);
+            next_pop += pop_period;
+            ++pops;
+            if (pops > 1500) {  // after start-up + settling (~4 s)
+                for (uint32_t i = 0; i < kPop; ++i) {
+                    peak = std::max(peak, std::fabs(out[i]));
+                    const float st = std::fabs(out[i] - prev);
+                    max_step = std::max(max_step, st);
+                    if (st > 0.25f) ++big_steps;
+                    zero_run = (out[i] == 0.0f) ? zero_run + 1 : 0;
+                    max_zero_run = std::max(max_zero_run, zero_run);
+                    prev = out[i];
+                }
+                const double lat = s.mat.current_effective_latency_ms();
+                lat_min = std::min(lat_min, lat);
+                lat_max = std::max(lat_max, lat);
+            } else {
+                prev = out[kPop - 1];
+            }
+        }
+    }
+    std::printf("    [monitor drift] 60 s, +120 ppm, 2%% loss: peak=%.3f max_step=%.3f big_steps=%llu zero_run=%llu "
+                "latency=%.1f..%.1f ms resyncs=%llu ppm=%.0f\n",
+                peak, max_step, (unsigned long long)big_steps, (unsigned long long)max_zero_run, lat_min, lat_max,
+                (unsigned long long)s.mat.resync_count(), s.mat.resample_ppm());
+    CHECK(peak <= 1.0f);
+    CHECK(big_steps == 0);          // no click-sized discontinuities (1 kHz @ 0.5 FS has steps <= 0.07)
+    CHECK(max_zero_run < 8);        // no zero-filled holes
+    CHECK(lat_min >= 3.0 && lat_max <= 40.0);  // latency stays bounded (no creep)
+    CHECK(s.mat.resync_count() <= 3);
 }

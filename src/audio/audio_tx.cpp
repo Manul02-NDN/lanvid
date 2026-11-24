@@ -254,6 +254,8 @@ struct AudioTxEngine::Stream {
             opus_encoder_ctl(opus_enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
             opus_encoder_ctl(opus_enc, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
             opus_encoder_ctl(opus_enc, OPUS_SET_LSB_DEPTH(24));
+            opus_encoder_ctl(opus_enc, OPUS_SET_INBAND_FEC(1));         // honoured when the mode allows (LBRR)
+            opus_encoder_ctl(opus_enc, OPUS_SET_PACKET_LOSS_PERC(5));  // expected Wi-Fi loss: tunes CELT stability
             opus_encoder_ctl(opus_enc, OPUS_SET_VBR(1));
             opus_encoder_ctl(opus_enc, OPUS_SET_VBR_CONSTRAINT(1));  // constrained VBR: tight Wi-Fi rate + optimal SNR
             opus_bitrate_bps = 0;
