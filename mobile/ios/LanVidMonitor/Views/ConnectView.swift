@@ -52,7 +52,7 @@ struct ConnectView: View {
                                 Image(systemName: "desktopcomputer").foregroundStyle(Theme.accent2)
                                 VStack(alignment: .leading) {
                                     Text(s.name).foregroundStyle(Theme.text)
-                                    Text("\(s.host):\(s.port)").font(.caption).foregroundStyle(Theme.muted)
+                                    Text(verbatim: "\(s.host):\(s.port)").font(.caption).foregroundStyle(Theme.muted)
                                 }
                                 Spacer()
                                 Text(engine.connected?.id == s.id ? tr("Підключено", "Connected") : tr("Підключити", "Connect"))

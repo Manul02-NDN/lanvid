@@ -43,6 +43,8 @@ struct MixView: View {
             }
         }
         .padding(.vertical)
+        // Fill the whole tab (otherwise the short content is centered and the rest of the tab stays black).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.bg.ignoresSafeArea())
     }
 }

@@ -421,13 +421,8 @@ final class MonitorEngine: ObservableObject {
     }
 }
 
-/// Device name for kHello (shown in LanVid Studio's phone list; max 15 bytes on the wire).
+/// Default device name for kHello (shown in LanVid Studio's phone list; max 15 bytes on the wire). Generic on
+/// purpose: the host name can contain the owner's real name; the user can change it in Settings.
 enum UIDeviceName {
-    static var current: String {
-        #if canImport(UIKit)
-        return String(ProcessInfo.processInfo.hostName.split(separator: ".").first ?? "iPhone")
-        #else
-        return "iPhone"
-        #endif
-    }
+    static var current: String { "iPhone" }
 }
