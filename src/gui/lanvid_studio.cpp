@@ -1472,6 +1472,20 @@ void LanVidStudioApp::draw_sidebar() {
     ImGui::SameLine(0.0f, 4.0f);
     ImGui::TextColored(kColTextMain, "Studio");
     ImGui::TextColored(kColTextMuted, "v%s", LANVID_VERSION_STRING);
+    ImGui::SameLine(0.0f, 6.0f);
+    {
+        const bool synced_live = sender_running_ || receiver_running_ || duplex_running_ || monitor_server_.is_running();
+        const ImVec2 sp = ImGui::GetCursorScreenPos();
+        const char* badge = synced_live ? "Synced" : "Active";
+        const ImVec2 bsz = ImGui::CalcTextSize(badge);
+        ImDrawList* bdl = ImGui::GetWindowDrawList();
+        bdl->AddRectFilled(ImVec2(sp.x, sp.y - 1.0f), ImVec2(sp.x + bsz.x + 12.0f, sp.y + bsz.y + 3.0f),
+                           IM_COL32(16, 185, 129, 42), 9.0f);
+        bdl->AddRect(ImVec2(sp.x, sp.y - 1.0f), ImVec2(sp.x + bsz.x + 12.0f, sp.y + bsz.y + 3.0f),
+                     IM_COL32(16, 185, 129, 175), 9.0f, 0, 1.0f);
+        bdl->AddText(ImVec2(sp.x + 6.0f, sp.y + 1.0f), IM_COL32(16, 185, 129, 255), badge);
+        ImGui::Dummy(ImVec2(bsz.x + 14.0f, bsz.y + 3.0f));
+    }
     ImGui::EndGroup();
 
     ImGui::Spacing();
@@ -1567,15 +1581,16 @@ void LanVidStudioApp::draw_sidebar() {
     dl->AddRectFilled(bp0, bp1, ImGui::ColorConvertFloat4ToU32(kColCard), 14.0f);
     dl->AddRect(bp0, bp1, ImGui::ColorConvertFloat4ToU32(kColBorder), 14.0f, 0, 1.0f);
 
-    const bool any_active = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
+    const bool any_active = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running() ||
+                            monitor_server_.is_running();
     dl->AddCircleFilled(ImVec2(bp0.x + 14.0f, bp0.y + 19.0f), 4.5f,
                         ImGui::ColorConvertFloat4ToU32(any_active ? kColGreen : kColTextMuted));
     dl->AddText(ImVec2(bp0.x + 25.0f, bp0.y + 12.0f),
                 ImGui::ColorConvertFloat4ToU32(any_active ? kColGreen : kColTextMuted),
-                any_active ? "На зв'язку" : "Очікування");
-    char lat_txt[48];
-    if (actual_buf_valid_) std::snprintf(lat_txt, sizeof(lat_txt), "Затримка: %.0f мс", actual_buf_ms_);
-    else std::snprintf(lat_txt, sizeof(lat_txt), "Затримка: %d мс", cfg_.aoip_latency_ms);
+                any_active ? "Connected" : "Очікування");
+    char lat_txt[64];
+    if (actual_buf_valid_) std::snprintf(lat_txt, sizeof(lat_txt), "LATENCY: %.1f ms", actual_buf_ms_);
+    else std::snprintf(lat_txt, sizeof(lat_txt), "LATENCY: %d ms", cfg_.aoip_latency_ms);
     dl->AddText(ImVec2(bp0.x + 14.0f, bp0.y + 34.0f), ImGui::ColorConvertFloat4ToU32(kColTextMuted), lat_txt);
     const char* lat_mode = cfg_.adaptive_jitter ? "Авто для Wi-Fi" : "Фіксована (кабель)";
     dl->AddText(ImVec2(bp0.x + 14.0f, bp0.y + 52.0f),
@@ -3684,38 +3699,89 @@ void LanVidStudioApp::draw_add_device_popups() {
 
 void LanVidStudioApp::draw_connect_tab() {
     const float total_w = ImGui::GetContentRegionAvail().x;
-    const float left_w = std::max(440.0f, total_w * 0.56f);
+    const float board_w = std::max(480.0f, total_w * 0.62f);
 
-    // ---- LEFT COLUMN: Quick Start, Role, One-Click Start, Auto-Discovery ----
-    begin_glass_card("##ConnectMain", ImVec2(left_w, 0));
+    // Helper: animated cubic Bezier patch cable with glowing traffic dot + pill label
+    auto draw_animated_bezier_cable = [](ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col,
+                                         const char* badge, bool active, float speed, bool reverse_dot) {
+        const float dx = std::max(55.0f, std::fabs(p1.x - p0.x) * 0.45f);
+        const ImVec2 cp0(p0.x + dx, p0.y);
+        const ImVec2 cp1(p1.x - dx, p1.y);
+        // Subtle glow under cable
+        const ImU32 glow_col = (col & 0x00FFFFFFu) | (active ? 0x44000000u : 0x1E000000u);
+        dl->AddBezierCubic(p0, cp0, cp1, p1, glow_col, active ? 7.0f : 4.5f, 36);
+        dl->AddBezierCubic(p0, cp0, cp1, p1, active ? col : ((col & 0x00FFFFFFu) | 0x88000000u),
+                           active ? 2.6f : 1.8f, 36);
 
-    ImGui::TextColored(kColAccentPurp, "1. Що має робити цей комп'ютер?");
-    ImGui::Spacing();
-    const float role_gap = 10.0f;
-    const float role_w = std::max(120.0f, (ImGui::GetContentRegionAvail().x - role_gap * 2.0f) / 3.0f);
-    if (selectable_choice_card("##RoleSend", "Віддавати звук", "З цього ПК -> у мережу",
-                               cfg_.connect_role == 0, ImVec2(role_w, 60.0f))) {
-        cfg_.connect_role = 0;
-        config_dirty_ = true;
+        // Moving traffic pulse dot along cubic Bezier
+        if (active) {
+            const float raw_t = std::fmod(float(ImGui::GetTime()) * speed, 1.0f);
+            const float t = reverse_dot ? (1.0f - raw_t) : raw_t;
+            const float u = 1.0f - t;
+            const ImVec2 dot(
+                u * u * u * p0.x + 3.0f * u * u * t * cp0.x + 3.0f * u * t * t * cp1.x + t * t * t * p1.x,
+                u * u * u * p0.y + 3.0f * u * u * t * cp0.y + 3.0f * u * t * t * cp1.y + t * t * t * p1.y);
+            dl->AddCircleFilled(dot, 6.5f, (col & 0x00FFFFFFu) | 0x55000000u);
+            dl->AddCircleFilled(dot, 3.6f, IM_COL32(255, 255, 255, 245));
+        }
+
+        // Midpoint pill badge
+        if (badge && badge[0]) {
+            const ImVec2 mid(
+                0.125f * p0.x + 0.375f * cp0.x + 0.375f * cp1.x + 0.125f * p1.x,
+                0.125f * p0.y + 0.375f * cp0.y + 0.375f * cp1.y + 0.125f * p1.y);
+            const ImVec2 tsz = ImGui::CalcTextSize(badge);
+            const ImVec2 b0(mid.x - tsz.x * 0.5f - 8.0f, mid.y - tsz.y * 0.5f - 3.0f);
+            const ImVec2 b1(mid.x + tsz.x * 0.5f + 8.0f, mid.y + tsz.y * 0.5f + 3.0f);
+            dl->AddRectFilled(b0, b1, g_dark_theme ? IM_COL32(20, 18, 34, 235) : IM_COL32(250, 248, 255, 242), 10.0f);
+            dl->AddRect(b0, b1, col, 10.0f, 0, 1.1f);
+            dl->AddText(ImVec2(b0.x + 8.0f, b0.y + 3.0f),
+                        g_dark_theme ? IM_COL32(236, 233, 255, 245) : IM_COL32(48, 38, 92, 245), badge);
+        }
+    };
+
+    // Snapshot live peers, cameras, monitors & audio slots
+    const auto studio_cams = tally_intercom_.is_running() ? tally_intercom_.studio_cameras()
+                                                          : std::vector<StudioCameraInfo>{};
+    const auto mon_phones = monitor_server_.is_running() ? monitor_server_.clients()
+                                                         : std::vector<MonitorClientInfo>{};
+    const auto slots = audio_matrix_.slots();
+    std::string remote_name = "Віддалена студія (LAN)";
+    std::string remote_ip = (cfg_.connect_role == 2) ? std::string(dpx_peer_buf_) : std::string(ip_buf_);
+    int remote_ch = cfg_.aoip_channels;
+    {
+        std::lock_guard<std::mutex> lk(nodes_mu_);
+        if (!nodes_.empty()) {
+            remote_name = nodes_[0].name;
+            remote_ip = nodes_[0].ip;
+            remote_ch = nodes_[0].channels;
+        }
     }
-    ImGui::SameLine(0.0f, role_gap);
-    if (selectable_choice_card("##RoleRecv", "Приймати звук", "З мережі -> на цей ПК",
-                               cfg_.connect_role == 1, ImVec2(role_w, 60.0f))) {
-        cfg_.connect_role = 1;
-        config_dirty_ = true;
-    }
-    ImGui::SameLine(0.0f, role_gap);
-    if (selectable_choice_card("##RoleDpx", "Обидва напрямки", "Студійний міст 64x64",
-                               cfg_.connect_role == 2, ImVec2(role_w, 60.0f))) {
-        cfg_.connect_role = 2;
-        config_dirty_ = true;
+    if (remote_name == "Віддалена студія (LAN)") {
+        std::lock_guard<std::mutex> lk(disc_mu_);
+        if (!discovered_.empty()) {
+            remote_name = discovered_[0].device_name;
+            remote_ip = discovered_[0].ip;
+        }
     }
 
-    ImGui::Spacing();
     const bool role_running = (cfg_.connect_role == 0) ? sender_running_
                                                        : (cfg_.connect_role == 1 ? receiver_running_ : duplex_running_);
+
+    // ---- LEFT / CENTER: INTERACTIVE NETWORK CONNECTION BOARD ----
+    begin_glass_card("##ConnectBoardRoot", ImVec2(board_w, 0));
+
+    // Board header bar
+    ImGui::TextColored(kColAccentPurp, "МЕРЕЖЕВА ДОШКА ПІДКЛЮЧЕНЬ (LAN TOPOLOGY)");
+    ImGui::SameLine(std::max(300.0f, ImGui::GetContentRegionAvail().x - 240.0f));
+    const bool is_scanning = scanning_.load() || nodes_scanning_.load();
+    if (status_pill_button(is_scanning ? "Пошук..." : "Знайти", false, ImVec2(82.0f, 26.0f))) {
+        start_lan_scan();
+        scan_aoip_nodes();
+    }
+    ImGui::SameLine(0.0f, 6.0f);
     if (!role_running) {
-        if (gradient_pill_button("Підключитись / Старт", ImVec2(-1, 48.0f), kColAccentBlue, kColAccentPurp)) {
+        if (gradient_pill_button("Старт", ImVec2(128.0f, 26.0f), kColAccentBlue, kColAccentPurp)) {
             if (cfg_.connect_role == 0) {
                 start_sender();
                 if (!audio_matrix_.is_running()) audio_matrix_.start();
@@ -3728,115 +3794,241 @@ void LanVidStudioApp::draw_connect_tab() {
             }
         }
     } else {
-        if (gradient_pill_button("Зупинити з'єднання", ImVec2(-1, 48.0f), kColPink, kColRed)) {
+        if (gradient_pill_button("Зупинити", ImVec2(128.0f, 26.0f), kColPink, kColRed)) {
             if (cfg_.connect_role == 0) stop_sender();
             else if (cfg_.connect_role == 1) stop_receiver();
             else stop_duplex();
         }
     }
-    if (cfg_.connect_role == 0) {
-        ImGui::TextDisabled("Надсилаємо на: %s:%d  (Ваш IP: %s)", ip_buf_, cfg_.dest_port, local_lan_ip_.c_str());
-    } else if (cfg_.connect_role == 1) {
-        ImGui::TextDisabled("Слухаємо UDP порт: %d  (Введіть на відправнику IP: %s)", cfg_.listen_port, local_lan_ip_.c_str());
+
+    ImGui::Spacing();
+
+    // Interactive Topology Canvas (ImDrawList)
+    const float canvas_h = std::max(300.0f, ImGui::GetContentRegionAvail().y - 118.0f);
+    const ImVec2 c_p0 = ImGui::GetCursorScreenPos();
+    const float c_w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 c_p1(c_p0.x + c_w, c_p0.y + canvas_h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Subtle soft-lavender studio dot-grid background
+    dl->AddRectFilled(c_p0, c_p1,
+                      g_dark_theme ? IM_COL32(18, 16, 29, 230) : IM_COL32(244, 240, 255, 220), 16.0f);
+    dl->AddRect(c_p0, c_p1, ImGui::ColorConvertFloat4ToU32(kColBorder), 16.0f, 0, 1.1f);
+    const ImU32 grid_col = g_dark_theme ? IM_COL32(139, 92, 246, 26) : IM_COL32(124, 58, 237, 28);
+    for (float gx = c_p0.x + 24.0f; gx < c_p1.x - 12.0f; gx += 28.0f) {
+        for (float gy = c_p0.y + 24.0f; gy < c_p1.y - 12.0f; gy += 28.0f) {
+            dl->AddCircleFilled(ImVec2(gx, gy), 1.3f, grid_col);
+        }
+    }
+
+    auto draw_topology_node = [&](int node_id, ImVec2 pos, ImVec2 sz, const char* title, const char* subtitle,
+                                  const char* badge, ImU32 accent, bool tally_border, ImU32 tally_col) {
+        const bool sel = (connect_selected_node_ == node_id);
+        const ImVec2 p1(pos.x + sz.x, pos.y + sz.y);
+        ImGui::SetCursorScreenPos(pos);
+        ImGui::PushID(4000 + node_id);
+        if (ImGui::InvisibleButton("##TopoNode", sz)) {
+            connect_selected_node_ = node_id;
+        }
+        const bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+
+        draw_soft_shadow(dl, pos, p1, 14.0f, sel ? 0.9f : 0.45f);
+        const ImU32 bg = g_dark_theme ? IM_COL32(27, 24, 44, 245) : IM_COL32(255, 255, 255, 248);
+        dl->AddRectFilled(pos, p1, bg, 14.0f);
+        const ImU32 border = tally_border ? tally_col : (sel || hov ? accent : ImGui::ColorConvertFloat4ToU32(kColBorder));
+        dl->AddRect(pos, p1, border, 14.0f, 0, (tally_border || sel) ? 2.4f : 1.1f);
+
+        // Accent top pill bar
+        dl->AddRectFilled(ImVec2(pos.x + 12.0f, pos.y + 10.0f), ImVec2(pos.x + 16.0f, pos.y + sz.y - 10.0f), accent, 3.0f);
+        dl->AddText(ImVec2(pos.x + 24.0f, pos.y + 11.0f), ImGui::ColorConvertFloat4ToU32(kColTextMain), title);
+        dl->AddText(ImVec2(pos.x + 24.0f, pos.y + 30.0f), ImGui::ColorConvertFloat4ToU32(kColTextMuted), subtitle);
+        if (badge && badge[0]) {
+            const ImVec2 bsz = ImGui::CalcTextSize(badge);
+            const ImVec2 bp0(pos.x + 24.0f, pos.y + sz.y - 24.0f);
+            const ImVec2 bp1(bp0.x + bsz.x + 12.0f, bp0.y + 16.0f);
+            dl->AddRectFilled(bp0, bp1, (accent & 0x00FFFFFFu) | 0x33000000u, 8.0f);
+            dl->AddText(ImVec2(bp0.x + 6.0f, bp0.y + 1.0f), accent, badge);
+        }
+        // Connection port dots (left & right)
+        dl->AddCircleFilled(ImVec2(pos.x, pos.y + sz.y * 0.5f), 4.5f, accent);
+        dl->AddCircleFilled(ImVec2(p1.x, pos.y + sz.y * 0.5f), 4.5f, accent);
+    };
+
+    const float node_w = std::clamp(c_w * 0.36f, 175.0f, 235.0f);
+    const float node_h = 74.0f;
+    const float left_x = c_p0.x + 20.0f;
+    const float right_x = c_p1.x - node_w - 20.0f;
+
+    // Left Column Nodes: 1) Local Host, 2) Studio Audio Interface (Virtual ASIO / CoreAudio)
+    const ImVec2 local_pos(left_x, c_p0.y + 28.0f);
+    const ImVec2 audio_pos(left_x, c_p0.y + canvas_h - node_h - 28.0f);
+
+    // Right Column Nodes: 1) Remote Studio PC/Mac, 2) Mobile Camera / Monitor (Tally + Intercom)
+    const ImVec2 remote_pos(right_x, c_p0.y + 28.0f);
+    const ImVec2 mobile_pos(right_x, c_p0.y + canvas_h - node_h - 28.0f);
+
+    // Draw animated Bezier cables first (behind node cards)
+    const ImU32 col_violet = IM_COL32(139, 92, 246, 255);
+    const ImU32 col_teal = IM_COL32(20, 184, 166, 255);
+    const ImU32 col_indigo = IM_COL32(99, 102, 241, 255);
+
+    char main_cable_lbl[64];
+    const double disp_lat = actual_buf_valid_ ? actual_buf_ms_ : double(cfg_.aoip_latency_ms);
+    if (cfg_.midi_only) {
+        std::snprintf(main_cable_lbl, sizeof(main_cable_lbl), "MIDI Only · %.1f ms", disp_lat);
+    } else if (cfg_.audio_only) {
+        std::snprintf(main_cable_lbl, sizeof(main_cable_lbl), "%dch AoIP · %.0f ms · 48k", cfg_.aoip_channels, disp_lat);
     } else {
-        ImGui::TextDisabled("TX -> %s:%d  |  RX <- :%d (Ваш IP: %s)",
-                            dpx_peer_buf_, cfg_.dpx_peer_port, cfg_.dpx_listen_port, local_lan_ip_.c_str());
+        std::snprintf(main_cable_lbl, sizeof(main_cable_lbl), "4K Video + %dch AoIP", cfg_.aoip_channels);
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    // Cable 1: Local Host <-> Remote Studio
+    draw_animated_bezier_cable(
+        dl,
+        ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.42f),
+        ImVec2(remote_pos.x, remote_pos.y + node_h * 0.42f),
+        col_violet, main_cable_lbl, role_running, 0.45f, cfg_.connect_role == 1);
 
-    // ---- Automatic LAN / Bonjour Discovery (1 click) ----
-    ImGui::TextColored(kColAccentPurp, "2. Пристрої поруч у мережі (Автопошук)");
-    ImGui::SameLine(std::max(260.0f, ImGui::GetWindowWidth() - 190.0f));
-    const bool is_scanning = scanning_.load() || nodes_scanning_.load();
-    if (gradient_pill_button(is_scanning ? "Пошук..." : "Знайти пристрої", ImVec2(165.0f, 28.0f),
-                             kColAccentBlue, kColAccentInd)) {
-        start_lan_scan();
-        scan_aoip_nodes();
-    }
-    ImGui::Spacing();
+    // Cable 2: Local Host <-> Mobile Camera / Personal Monitor (Tally + Intercom + IFB)
+    const bool mobile_active = !studio_cams.empty() || !mon_phones.empty() || monitor_server_.is_running();
+    const char* mob_lbl = !studio_cams.empty() ? "Tally · Duplex Intercom"
+                                               : (!mon_phones.empty() ? "Personal Monitor IFB" : "UDP :5020 / :5022");
+    draw_animated_bezier_cable(
+        dl,
+        ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.68f),
+        ImVec2(mobile_pos.x, mobile_pos.y + node_h * 0.50f),
+        col_teal, mob_lbl, mobile_active, 0.38f, false);
 
-    begin_glass_card("##DiscoveredCards", ImVec2(0, 136.0f), true);
-    int found_total = 0;
-    {
-        std::lock_guard<std::mutex> lk(disc_mu_);
-        for (size_t i = 0; i < discovered_.size(); ++i) {
-            const auto& d = discovered_[i];
-            ++found_total;
-            char title[128], sub[128];
-            std::snprintf(title, sizeof(title), "%s (%s)", d.device_name.c_str(), d.os.c_str());
-            std::snprintf(sub, sizeof(sub), "%s:%u  ·  пінг %u мс  ·  клік щоб обрати",
-                          d.ip.c_str(), unsigned(d.stream_port), unsigned(d.rtt_ms));
-            const bool is_sel = (cfg_.dest_ip == d.ip && cfg_.dest_port == int(d.stream_port));
-            ImGui::PushID(int(i) + 100);
-            if (selectable_choice_card("##DiscPeer", title, sub, is_sel, ImVec2(-1, 56.0f))) {
-                cfg_.dest_ip = d.ip;
-                cfg_.dest_port = int(d.stream_port);
-                std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", d.ip.c_str());
-                std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", d.ip.c_str());
-                config_dirty_ = true;
-                toast_msg_ = "Обрано пристрій: " + d.device_name + " (" + d.ip + ")";
-                toast_until_us_ = now_us() + 2500000ull;
-            }
-            ImGui::PopID();
+    // Cable 3: Audio Interface <-> Local Host (64ch Virtual Bus)
+    draw_animated_bezier_cable(
+        dl,
+        ImVec2(audio_pos.x + node_w * 0.5f, audio_pos.y),
+        ImVec2(local_pos.x + node_w * 0.5f, local_pos.y + node_h),
+        col_indigo, "64ch Bus · MIDI", audio_matrix_.is_running() || duplex_running_, 0.55f, false);
+
+    // Draw the 4 primary topology node cards
+    char local_sub[96];
+    std::snprintf(local_sub, sizeof(local_sub), "%s · %s", local_host_name().c_str(), local_lan_ip_.c_str());
+    draw_topology_node(0, local_pos, ImVec2(node_w, node_h),
+                       "LanVid Studio (This PC)", local_sub, "64ch IN/OUT · Host",
+                       col_violet, false, 0);
+
+    char audio_sub[96];
+    std::snprintf(audio_sub, sizeof(audio_sub), "Virtual ASIO / CoreAudio (%zu слотів)", slots.size());
+    draw_topology_node(2, audio_pos, ImVec2(node_w, node_h),
+                       "Studio Audio Interface", audio_sub,
+                       audio_matrix_.is_running() ? "64ch Active" : "Ready",
+                       col_indigo, false, 0);
+
+    char rem_sub[96], rem_badge[48];
+    std::snprintf(rem_sub, sizeof(rem_sub), "%s:%d",
+                  remote_ip.empty() ? "192.168.1.x" : remote_ip.c_str(),
+                  cfg_.connect_role == 2 ? cfg_.dpx_peer_port : cfg_.dest_port);
+    std::snprintf(rem_badge, sizeof(rem_badge), "%dch AoIP · %s", remote_ch, role_running ? "Synced" : "Standby");
+    draw_topology_node(1, remote_pos, ImVec2(node_w, node_h),
+                       remote_name.c_str(), rem_sub, rem_badge,
+                       role_running ? IM_COL32(16, 185, 129, 255) : col_violet, false, 0);
+
+    // Mobile Camera / Personal Monitor node (shows live Tally color border!)
+    std::string mob_title = "iPhone / Android Studio";
+    char mob_sub[96] = "Monitor :5020 · Tally :5022";
+    const char* mob_badge = "Personal Monitor · Tally";
+    bool mob_tally_border = false;
+    ImU32 mob_tally_col = col_teal;
+    if (!studio_cams.empty()) {
+        const auto& c = studio_cams[0];
+        mob_title = c.label.empty() ? ("CAM " + std::to_string(c.camera_id)) : c.label;
+        std::snprintf(mob_sub, sizeof(mob_sub), "%s · %u%% · %d°C",
+                      c.address.c_str(), unsigned(c.battery_pct), int(c.temp_c));
+        if (c.tally_state == kTallyProgram) {
+            mob_badge = "ON AIR (PGM) · Intercom";
+            mob_tally_border = true;
+            mob_tally_col = IM_COL32(239, 68, 68, 255);
+        } else if (c.tally_state == kTallyPreview) {
+            mob_badge = "PREVIEW (PVW) · Intercom";
+            mob_tally_border = true;
+            mob_tally_col = IM_COL32(16, 185, 129, 255);
+        } else {
+            mob_badge = "STANDBY · Duplex Intercom";
         }
+    } else if (!mon_phones.empty()) {
+        mob_title = mon_phones[0].name;
+        std::snprintf(mob_sub, sizeof(mob_sub), "%s · %u ms", mon_phones[0].address.c_str(),
+                      unsigned(mon_phones[0].latency_ms));
+        mob_badge = "Personal Monitor Active";
     }
-    {
-        std::lock_guard<std::mutex> lk(nodes_mu_);
-        for (size_t i = 0; i < nodes_.size(); ++i) {
-            const auto& nd = nodes_[i];
-            ++found_total;
-            char title[128], sub[160];
-            std::snprintf(title, sizeof(title), "%s (AoIP %u кан.)", nd.name, nd.channels);
-            std::snprintf(sub, sizeof(sub), "%s:%u  ·  %s  ·  клік щоб обрати",
-                          nd.ip, nd.rx_port, nd.driver_connected ? "DAW підключена" : "Готовий");
-            const bool is_sel = (std::strcmp(dpx_peer_buf_, nd.ip) == 0);
-            ImGui::PushID(int(i) + 500);
-            if (selectable_choice_card("##AoipPeer", title, sub, is_sel, ImVec2(-1, 56.0f))) {
-                std::snprintf(ip_buf_, sizeof(ip_buf_), "%s", nd.ip);
-                std::snprintf(dpx_peer_buf_, sizeof(dpx_peer_buf_), "%s", nd.ip);
-                cfg_.dest_ip = nd.ip;
-                cfg_.dpx_peer_host = nd.ip;
-                cfg_.dest_port = nd.rx_port;
-                cfg_.dpx_peer_port = nd.rx_port;
-                if (nd.duplex && nd.tx_port) cfg_.dpx_listen_port = nd.tx_port;
-                config_dirty_ = true;
-                toast_msg_ = std::string("Обрано AoIP-вузол: ") + nd.name;
-                toast_until_us_ = now_us() + 2500000ull;
-            }
-            ImGui::PopID();
-        }
-    }
-    if (found_total == 0) {
-        ImGui::TextDisabled("Поки що не знайдено інших комп'ютерів із LanVid у вашій мережі.");
-        ImGui::TextDisabled("Натисніть «Знайти пристрої» або введіть IP-адресу вручну нижче.");
-    }
-    end_glass_card();
+    draw_topology_node(10, mobile_pos, ImVec2(node_w, node_h),
+                       mob_title.c_str(), mob_sub, mob_badge,
+                       col_teal, mob_tally_border, mob_tally_col);
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Ввести IP-адресу та порт вручну")) {
-        ImGui::SetNextItemWidth(200.0f);
+    ImGui::SetCursorScreenPos(ImVec2(c_p0.x, c_p1.y + 8.0f));
+
+    // ---- BOTTOM QUICK ACTION PILL BAR ----
+    auto find_slot_by_type = [&](MatrixSlotType t, MatrixSlotRole role_hint = MatrixSlotRole::kDuplex,
+                                 bool check_role = false) -> int {
+        for (const auto& s : slots) {
+            if (s.type == t && (!check_role || s.role == role_hint)) return s.id;
+        }
+        return -1;
+    };
+    const int net_id = find_slot_by_type(MatrixSlotType::kNetworkAoip);
+    const int daw_id = find_slot_by_type(MatrixSlotType::kVirtualBus);
+    const int mon_id = find_slot_by_type(MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput, true);
+
+    if (status_pill_button("Слухати на ПК", cfg_.connect_role == 1, ImVec2(0, 28))) {
+        cfg_.connect_role = 1;
+        audio_matrix_.apply_preset(0, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+        toast_msg_ = "Режим: Слухати на ПК (Мережа -> Навушники + DAW)";
+        toast_until_us_ = now_us() + 2400000ull;
+    }
+    ImGui::SameLine(0.0f, 6.0f);
+    if (status_pill_button("Студійний міст 1:1", cfg_.connect_role == 2, ImVec2(0, 28))) {
+        cfg_.connect_role = 2;
+        audio_matrix_.apply_preset(1, net_id, daw_id, mon_id);
+        config_dirty_ = true;
+        toast_msg_ = "Режим: Студійний міст 1:1 (64x64 Full-Duplex)";
+        toast_until_us_ = now_us() + 2400000ull;
+    }
+    ImGui::SameLine(0.0f, 6.0f);
+    if (status_pill_button("Камера + інтерком", tally_intercom_.is_running(), ImVec2(0, 28))) {
+        if (!tally_intercom_.is_running()) tally_intercom_.start_studio(kDefaultTallyIntercomPort);
+        connect_selected_node_ = 10;
+        toast_msg_ = "Tally & Duplex Intercom активний на UDP :" + std::to_string(tally_intercom_.bound_port());
+        toast_until_us_ = now_us() + 2400000ull;
+    }
+    ImGui::SameLine(0.0f, 6.0f);
+    if (status_pill_button("Очистити все", false, ImVec2(0, 28))) {
+        req_open_clear_all_popup_ = true;
+    }
+    ImGui::SameLine(0.0f, 6.0f);
+    if (gradient_pill_button("+ Add Network Device", ImVec2(0, 28), kColAccentBlue, kColAccentInd)) {
+        connect_show_manual_ip_ = !connect_show_manual_ip_;
+    }
+
+    if (connect_show_manual_ip_) {
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(160.0f);
         if (cfg_.connect_role == 2) {
             if (ImGui::InputText("IP партнера", dpx_peer_buf_, sizeof(dpx_peer_buf_))) config_dirty_ = true;
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(92.0f);
-            if (ImGui::InputInt("Порт TX", &cfg_.dpx_peer_port, 0, 0)) {
+            ImGui::SetNextItemWidth(76.0f);
+            if (ImGui::InputInt("TX", &cfg_.dpx_peer_port, 0, 0)) {
                 cfg_.dpx_peer_port = std::clamp(cfg_.dpx_peer_port, 1024, 65535);
                 config_dirty_ = true;
             }
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(92.0f);
-            if (ImGui::InputInt("Порт RX", &cfg_.dpx_listen_port, 0, 0)) {
+            ImGui::SetNextItemWidth(76.0f);
+            if (ImGui::InputInt("RX", &cfg_.dpx_listen_port, 0, 0)) {
                 cfg_.dpx_listen_port = std::clamp(cfg_.dpx_listen_port, 1024, 65535);
                 config_dirty_ = true;
             }
         } else {
             if (ImGui::InputText("IP отримувача", ip_buf_, sizeof(ip_buf_))) config_dirty_ = true;
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(96.0f);
-            if (ImGui::InputInt("Порт UDP", &cfg_.dest_port, 0, 0)) {
+            ImGui::SetNextItemWidth(86.0f);
+            if (ImGui::InputInt("Порт", &cfg_.dest_port, 0, 0)) {
                 cfg_.dest_port = std::clamp(cfg_.dest_port, 1024, 65535);
                 cfg_.listen_port = cfg_.dest_port;
                 config_dirty_ = true;
@@ -3844,31 +4036,71 @@ void LanVidStudioApp::draw_connect_tab() {
         }
     }
 
-    ImGui::Spacing();
-    if (ImGui::CollapsingHeader("Відеопотік, прев'ю та просунуті параметри")) {
-        if (cfg_.connect_role == 0) {
-            draw_sender_tab();
-        } else if (cfg_.connect_role == 1) {
-            draw_receiver_tab();
-        } else {
-            draw_duplex_tab();
-        }
-    }
-
     end_glass_card();
 
-    // ---- RIGHT COLUMN: 3 Large Telemetry Donut Gauges + Live Quick Summary ----
+    // ---- RIGHT INSPECTOR PANEL: Студійний моніторинг & Налаштування ----
     ImGui::SameLine();
-    begin_glass_card("##ConnectTelemetry", ImVec2(0, 0));
-    draw_gradient_icon_tile("##TelIcon", IconKind::kWaveform, 32.0f, cfg_.aoip_channels, false);
-    ImGui::SameLine();
-    ImGui::BeginGroup();
-    ImGui::TextColored(kColTextMain, "Стан з'єднання в реальному часі");
-    ImGui::TextDisabled("Якість мережі · Затримка · Трафік");
-    ImGui::EndGroup();
-    ImGui::Separator();
-    ImGui::Spacing();
+    begin_glass_card("##ConnectInspector", ImVec2(0, 0));
 
+    // 1. CONNECTED Block
+    ImGui::TextColored(kColAccentPurp, "CONNECTED");
+    ImGui::SameLine(std::max(120.0f, ImGui::GetContentRegionAvail().x - 110.0f));
+    ImGui::TextColored(role_running ? kColGreen : kColTextMuted,
+                       role_running ? "● Synced" : "○ Standby");
+    ImGui::Text("%s (%s)", remote_name.c_str(), remote_ip.empty() ? "LAN" : remote_ip.c_str());
+    draw_audio_bitrate_pills("ConnectBitrate");
+    ImGui::Separator();
+
+    // 2. STUDIO CAMERAS · TALLY & INTERCOM Block
+    ImGui::TextColored(kColAccentPurp, "STUDIO CAMERAS · TALLY & INTERCOM");
+    if (!tally_intercom_.is_running()) {
+        if (status_pill_button("Увімкнути Tally & Intercom (UDP :5022)", false, ImVec2(-1, 28))) {
+            tally_intercom_.start_studio(kDefaultTallyIntercomPort);
+        }
+    } else {
+        uint32_t cam_id = studio_cams.empty() ? 1u : studio_cams[0].camera_id;
+        uint8_t cur_tally = studio_cams.empty() ? kTallyStandby : studio_cams[0].tally_state;
+        const std::string cam_lbl = studio_cams.empty() ? "CAM 1" : studio_cams[0].label;
+        if (!studio_cams.empty()) {
+            ImGui::TextDisabled("%s  ·  Bat %u%%  ·  %d°C  ·  %s",
+                                cam_lbl.c_str(), unsigned(studio_cams[0].battery_pct),
+                                int(studio_cams[0].temp_c),
+                                studio_cams[0].operator_speaking ? "🎙 Operator Talking" : "Idle");
+        } else {
+            ImGui::TextDisabled("Очікування камер на %s:%u...", local_lan_ip_.c_str(),
+                                unsigned(tally_intercom_.bound_port()));
+        }
+        if (status_pill_button("STBY", cur_tally == kTallyStandby, ImVec2(62, 26))) {
+            tally_intercom_.studio_set_camera_tally(cam_id, kTallyStandby, cam_lbl, false);
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        if (status_pill_button("PVW", cur_tally == kTallyPreview, ImVec2(62, 26))) {
+            tally_intercom_.studio_set_camera_tally(cam_id, kTallyPreview, cam_lbl, false);
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        if (status_pill_button("PGM", cur_tally == kTallyProgram, ImVec2(62, 26))) {
+            tally_intercom_.studio_set_camera_tally(cam_id, kTallyProgram, cam_lbl, false);
+        }
+        ImGui::SameLine(0.0f, 8.0f);
+        if (status_pill_button(intercom_all_call_ ? "TALK ●" : "TALK", intercom_all_call_, ImVec2(76, 26))) {
+            intercom_all_call_ = !intercom_all_call_;
+            tally_intercom_.studio_set_camera_intercom(cam_id, intercom_all_call_, true, intercom_all_call_);
+            tally_intercom_.set_intercom_state(intercom_all_call_, intercom_listen_muted_, intercom_ifb_gain_, 0.0f);
+        }
+        ImGui::SameLine(0.0f, 4.0f);
+        if (status_pill_button(intercom_latch_mode_ ? "Latch" : "PTT", intercom_latch_mode_, ImVec2(56, 26))) {
+            intercom_latch_mode_ = !intercom_latch_mode_;
+        }
+        ImGui::TextDisabled("Director Voice:");
+        ImGui::SameLine();
+        draw_segmented_vu(tally_intercom_.tx_peak_dbfs(), std::max(100.0f, ImGui::GetContentRegionAvail().x - 8.0f), 10.0f);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    // 3. LIVE TELEMETRY (3 Circular Donut Gauges + Volume / Ducking / Mute Panic)
+    ImGui::TextColored(kColAccentPurp, "LIVE TELEMETRY");
     const double total_mbps = tx_stats_.tx_mbps + rx_stats_.rx_mbps + dpx_tx_mbps_ + dpx_rx_mbps_;
     const double loss_pct = std::clamp(receiver_running_ ? rx_stats_.loss_pct : tx_stats_.rx_loss_pct, 0.0, 100.0);
     const double health_pct = std::clamp(100.0 - loss_pct, 0.0, 100.0);
@@ -3878,51 +4110,42 @@ void LanVidStudioApp::draw_connect_tab() {
     const float lat_frac = float(std::clamp(buf_ms / 100.0, 0.05, 1.0));
 
     const float gw_avail = ImGui::GetContentRegionAvail().x;
-    const float ggap = 10.0f;
-    const float card_w = std::max(100.0f, (gw_avail - ggap * 2.0f) / 3.0f);
-    const float card_h = 136.0f;
+    const float ggap = 8.0f;
+    const float card_w = std::max(84.0f, (gw_avail - ggap * 2.0f) / 3.0f);
+    const float card_h = 118.0f;
 
-    char hlth_val[24];
+    char hlth_val[24], lat_val[24], tr_val[24];
     std::snprintf(hlth_val, sizeof(hlth_val), "%.0f%%", health_pct);
-    draw_ring_gauge("Якість мережі", hlth_val, loss_pct > 0.5 ? "Втрати" : "Чудово",
-                    float(health_pct / 100.0), card_w, card_h, loss_pct > 1.0, true);
-
-    ImGui::SameLine(0.0f, ggap);
-    char lat_val[24];
     std::snprintf(lat_val, sizeof(lat_val), "%.0f", buf_ms);
-    draw_ring_gauge("Затримка", lat_val, "мс", lat_frac, card_w, card_h, buf_ms > 50.0, false);
-
-    ImGui::SameLine(0.0f, ggap);
-    char tr_val[24], tr_sub[24];
     std::snprintf(tr_val, sizeof(tr_val), "%.1f", total_mbps);
-    std::snprintf(tr_sub, sizeof(tr_sub), "Mbps");
-    draw_ring_gauge("Трафік", tr_val, tr_sub, std::max(0.06f, bw_frac), card_w, card_h, bw_frac > 0.85f, false);
+
+    draw_ring_gauge("Network", hlth_val, loss_pct > 0.5 ? "Loss" : "OK",
+                    float(health_pct / 100.0), card_w, card_h, loss_pct > 1.0, true);
+    ImGui::SameLine(0.0f, ggap);
+    draw_ring_gauge("Latency", lat_val, "ms", lat_frac, card_w, card_h, buf_ms > 50.0, false);
+    ImGui::SameLine(0.0f, ggap);
+    draw_ring_gauge("Traffic", tr_val, "Mbps", std::max(0.06f, bw_frac), card_w, card_h, bw_frac > 0.85f, false);
 
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::SliderFloat("##MasterVol", &connect_master_vol_, 0.0f, 1.5f, "Volume: %.0f%%")) {
+        if (receiver_) lv_receiver_set_volume(receiver_, connect_mute_panic_ ? 0.0f : connect_master_vol_);
+    }
+    ImGui::SetNextItemWidth(-1);
+    ImGui::SliderFloat("##DuckDb", &connect_ducking_db_, -24.0f, 0.0f, "Ducking: %.0f dB");
 
-    // Quick status summary + instant bitrate selector
-    begin_glass_card("##QuickSummary", ImVec2(0, 210.0f), true);
-    ImGui::TextColored(kColAccentPurp, "Бітрейт кодування на канал");
-    draw_audio_bitrate_pills("ConnectBitrate");
-    ImGui::Separator();
-    ImGui::Text("Канали: %d кан. @ 48 кГц  ·  Режим: %s (%d мс)",
-                cfg_.aoip_channels,
-                cfg_.adaptive_jitter ? "Авто для Wi-Fi" : "Фіксована для кабелю", cfg_.aoip_latency_ms);
-    ImGui::Text("Активні маршрути: %zu аудіо  ·  %zu MIDI",
-                audio_matrix_.crosspoints().size(), audio_matrix_.midi_crosspoints().size());
-    ImGui::Spacing();
-    if (status_pill_button("Відкрити маршрути ->", false, ImVec2(0, 28))) { cfg_.active_tab = 1; config_dirty_ = true; }
-    ImGui::SameLine();
-    if (status_pill_button("Налаштування ->", false, ImVec2(0, 28))) { cfg_.active_tab = 3; config_dirty_ = true; }
-    end_glass_card();
+    if (status_pill_button(connect_mute_panic_ ? "PANIC MUTED (Click to Unmute)" : "Mute / Panic",
+                           connect_mute_panic_, ImVec2(-1, 28))) {
+        connect_mute_panic_ = !connect_mute_panic_;
+        if (receiver_) lv_receiver_set_volume(receiver_, connect_mute_panic_ ? 0.0f : connect_master_vol_);
+        if (connect_mute_panic_) audio_matrix_.send_midi_panic(-1);
+    }
 
-    // Compact live meters preview if receiver is running
-    if (receiver_running_) {
-        ImGui::Spacing();
-        ImGui::TextColored(kColAccentPurp, "Живі рівні каналів");
-        draw_aoip_meter_grid();
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Відеопотік та розширені параметри")) {
+        if (cfg_.connect_role == 0) draw_sender_tab();
+        else if (cfg_.connect_role == 1) draw_receiver_tab();
+        else draw_duplex_tab();
     }
 
     end_glass_card();
@@ -4384,12 +4607,22 @@ void LanVidStudioApp::draw_patchbay_tab() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // ---- 2. MODE & SCALE CONTROLS ----
-    if (status_pill_button("Аудіо-маршрути", matrix_patch_mode_ == 0, ImVec2(0, 30))) matrix_patch_mode_ = 0;
+    // ---- 2. MODE & VIEW SWITCHER (Visual Patchbay <-> Detailed 64x64 Matrix <-> MIDI) ----
+    if (status_pill_button("Візуальний Patchbay", matrix_patch_mode_ == 0 && patchbay_view_mode_ == 0, ImVec2(0, 30))) {
+        matrix_patch_mode_ = 0;
+        patchbay_view_mode_ = 0;
+    }
     ImGui::SameLine();
-    if (status_pill_button("MIDI-маршрути", matrix_patch_mode_ == 1, ImVec2(0, 30))) matrix_patch_mode_ = 1;
+    if (status_pill_button("Матриця 64×64 (Детально)", matrix_patch_mode_ == 0 && patchbay_view_mode_ == 1, ImVec2(0, 30))) {
+        matrix_patch_mode_ = 0;
+        patchbay_view_mode_ = 1;
+    }
+    ImGui::SameLine();
+    if (status_pill_button("MIDI-маршрути", matrix_patch_mode_ == 1, ImVec2(0, 30))) {
+        matrix_patch_mode_ = 1;
+    }
 
-    if (matrix_patch_mode_ == 0) {
+    if (matrix_patch_mode_ == 0 && patchbay_view_mode_ == 1) {
         ImGui::SameLine(0.0f, 18.0f);
         if (status_pill_button("Стерео-пари (1-2, 3-4...)", cfg_.matrix_stereo_pairs, ImVec2(0, 30))) {
             cfg_.matrix_stereo_pairs = true;
@@ -4400,6 +4633,269 @@ void LanVidStudioApp::draw_patchbay_tab() {
             cfg_.matrix_stereo_pairs = false;
             config_dirty_ = true;
         }
+    }
+
+    // ---- MODE A: VISUAL AUDIO PATCHBAY BOARD (Drag-and-Drop Bezier Cables + DSP Inspector) ----
+    if (matrix_patch_mode_ == 0 && patchbay_view_mode_ == 0) {
+        ImGui::Spacing();
+        const float avail_w = ImGui::GetContentRegionAvail().x;
+        const float insp_w = std::clamp(avail_w * 0.30f, 250.0f, 320.0f);
+        const float board_w = std::max(380.0f, avail_w - insp_w - 10.0f);
+        const float board_h = std::max(300.0f, ImGui::GetContentRegionAvail().y - 44.0f);
+
+        std::vector<MatrixSlotConfig> src_slots, dst_slots;
+        for (const auto& s : slots) {
+            if (s.role != MatrixSlotRole::kOutput) src_slots.push_back(s);
+            if (s.role != MatrixSlotRole::kInput) dst_slots.push_back(s);
+        }
+        const auto links = audio_matrix_.slot_patch_links();
+        if (patch_sel_src_ < 0 && !links.empty()) {
+            patch_sel_src_ = links[0].src_slot;
+            patch_sel_dst_ = links[0].dst_slot;
+        }
+
+        // Left/Center Visual Patchbay Canvas
+        begin_glass_card("##VisualPatchBoard", ImVec2(board_w, board_h), true);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float cw = ImGui::GetContentRegionAvail().x;
+        const float ch = ImGui::GetContentRegionAvail().y;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Column headers
+        const float col_w = std::clamp(cw * 0.34f, 155.0f, 220.0f);
+        const float left_x = p0.x + 8.0f;
+        const float right_x = p0.x + cw - col_w - 8.0f;
+        dl->AddText(ImVec2(left_x + 4.0f, p0.y), ImGui::ColorConvertFloat4ToU32(kColAccentInd), "ДЖЕРЕЛА / SOURCES");
+        dl->AddText(ImVec2(right_x + 4.0f, p0.y), ImGui::ColorConvertFloat4ToU32(kColAccentPurp), "ПРИЙМАЧІ / DESTINATIONS");
+
+        struct PortPos { int slot_id; ImVec2 pos; };
+        std::vector<PortPos> src_ports, dst_ports;
+
+        const float card_h = 62.0f;
+        const float card_gap = 10.0f;
+        float sy = p0.y + 24.0f;
+        for (const auto& s : src_slots) {
+            const ImVec2 cp0(left_x, sy);
+            const ImVec2 cp1(left_x + col_w, sy + card_h);
+            const ImVec2 port(cp1.x, sy + card_h * 0.5f);
+            src_ports.push_back({s.id, port});
+
+            const bool is_drag = (patch_drag_src_slot_ == s.id);
+            const auto st = audio_matrix_.slot_status(s.id);
+            dl->AddRectFilled(cp0, cp1, g_dark_theme ? IM_COL32(27, 24, 44, 240) : IM_COL32(255, 255, 255, 246), 12.0f);
+            dl->AddRect(cp0, cp1, is_drag ? IM_COL32(139, 92, 246, 255) : ImGui::ColorConvertFloat4ToU32(kColBorder),
+                        12.0f, 0, is_drag ? 2.2f : 1.0f);
+            dl->AddText(ImVec2(cp0.x + 10.0f, cp0.y + 8.0f), ImGui::ColorConvertFloat4ToU32(kColTextMain), s.name.c_str());
+            char sb[48];
+            std::snprintf(sb, sizeof(sb), "%d ch · %s", s.channels, st.connected ? "Active" : "Ready");
+            dl->AddText(ImVec2(cp0.x + 10.0f, cp0.y + 26.0f), ImGui::ColorConvertFloat4ToU32(kColTextMuted), sb);
+
+            // Mini live VU bar
+            const float norm = std::clamp((std::max(st.peak_in_dbfs, st.peak_out_dbfs) + 54.0f) / 54.0f, 0.0f, 1.0f);
+            dl->AddRectFilled(ImVec2(cp0.x + 10.0f, cp1.y - 12.0f), ImVec2(cp1.x - 20.0f, cp1.y - 6.0f),
+                              IM_COL32(120, 120, 150, 45), 3.0f);
+            if (norm > 0.02f) {
+                dl->AddRectFilled(ImVec2(cp0.x + 10.0f, cp1.y - 12.0f),
+                                  ImVec2(cp0.x + 10.0f + (cp1.x - cp0.x - 30.0f) * norm, cp1.y - 6.0f),
+                                  IM_COL32(16, 185, 129, 230), 3.0f);
+            }
+
+            // Draggable output port button
+            ImGui::SetCursorScreenPos(ImVec2(cp0.x, cp0.y));
+            ImGui::PushID(7000 + s.id);
+            ImGui::InvisibleButton("##SrcPort", ImVec2(col_w + 10.0f, card_h));
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+                patch_drag_src_slot_ = s.id;
+            }
+            ImGui::PopID();
+            dl->AddCircleFilled(port, 6.0f, IM_COL32(139, 92, 246, 255));
+            dl->AddCircleFilled(port, 2.6f, IM_COL32(255, 255, 255, 240));
+            sy += card_h + card_gap;
+        }
+
+        float dy = p0.y + 24.0f;
+        int hovered_dst_slot = -1;
+        for (const auto& d : dst_slots) {
+            const ImVec2 cp0(right_x, dy);
+            const ImVec2 cp1(right_x + col_w, dy + card_h);
+            const ImVec2 port(cp0.x, dy + card_h * 0.5f);
+            dst_ports.push_back({d.id, port});
+
+            ImGui::SetCursorScreenPos(ImVec2(cp0.x - 10.0f, cp0.y));
+            ImGui::PushID(7200 + d.id);
+            ImGui::InvisibleButton("##DstPort", ImVec2(col_w + 10.0f, card_h));
+            const bool hov = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            if (hov) hovered_dst_slot = d.id;
+            ImGui::PopID();
+
+            const auto st = audio_matrix_.slot_status(d.id);
+            dl->AddRectFilled(cp0, cp1, g_dark_theme ? IM_COL32(27, 24, 44, 240) : IM_COL32(255, 255, 255, 246), 12.0f);
+            dl->AddRect(cp0, cp1, (patch_drag_src_slot_ >= 0 && hov) ? IM_COL32(20, 184, 166, 255)
+                                                                     : ImGui::ColorConvertFloat4ToU32(kColBorder),
+                        12.0f, 0, (patch_drag_src_slot_ >= 0 && hov) ? 2.4f : 1.0f);
+            dl->AddText(ImVec2(cp0.x + 14.0f, cp0.y + 8.0f), ImGui::ColorConvertFloat4ToU32(kColTextMain), d.name.c_str());
+            char db[48];
+            std::snprintf(db, sizeof(db), "%d ch · %s", d.channels, st.connected ? "Active" : "Ready");
+            dl->AddText(ImVec2(cp0.x + 14.0f, cp0.y + 26.0f), ImGui::ColorConvertFloat4ToU32(kColTextMuted), db);
+            dl->AddCircleFilled(port, 6.0f, IM_COL32(20, 184, 166, 255));
+            dl->AddCircleFilled(port, 2.6f, IM_COL32(255, 255, 255, 240));
+            dy += card_h + card_gap;
+        }
+
+        // Complete drag-and-drop cable creation on mouse release
+        if (patch_drag_src_slot_ >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            if (hovered_dst_slot >= 0) {
+                const int nch = (patch_block_mode_ == 0) ? 2 : 64;
+                const auto res = audio_matrix_.connect_slot_block(patch_drag_src_slot_, hovered_dst_slot, nch,
+                                                                  matrix_new_gain_db_, false, false);
+                if (res == CrosspointResult::kBlockedFeedbackLoop) {
+                    toast_msg_ = "Feedback Loop Guard: заблоковано петлю зворотного зв'язку!";
+                } else if (res == CrosspointResult::kOk) {
+                    patch_sel_src_ = patch_drag_src_slot_;
+                    patch_sel_dst_ = hovered_dst_slot;
+                    matrix_active_preset_ = -1;
+                    config_dirty_ = true;
+                    toast_msg_ = "Маршрут створено (" + std::to_string(nch) + " ch)";
+                }
+                toast_until_us_ = now_us() + 2500000ull;
+            }
+            patch_drag_src_slot_ = -1;
+        }
+
+        auto find_port = [](const std::vector<PortPos>& vec, int id, ImVec2& out) -> bool {
+            for (const auto& p : vec) if (p.slot_id == id) { out = p.pos; return true; }
+            return false;
+        };
+
+        // Draw active Bezier cables from unified audio_matrix_.slot_patch_links()
+        for (size_t i = 0; i < links.size(); ++i) {
+            const auto& lk = links[i];
+            ImVec2 a{}, b{};
+            if (!find_port(src_ports, lk.src_slot, a) || !find_port(dst_ports, lk.dst_slot, b)) continue;
+            const bool sel = (lk.src_slot == patch_sel_src_ && lk.dst_slot == patch_sel_dst_);
+            const ImU32 col = lk.all_muted ? IM_COL32(239, 68, 68, 220)
+                                           : (sel ? IM_COL32(16, 185, 129, 255) : IM_COL32(139, 92, 246, 235));
+            const float dx = std::max(50.0f, std::fabs(b.x - a.x) * 0.45f);
+            const ImVec2 cp0(a.x + dx, a.y), cp1(b.x - dx, b.y);
+            dl->AddBezierCubic(a, cp0, cp1, b, (col & 0x00FFFFFFu) | 0x38000000u, sel ? 8.0f : 5.5f, 32);
+            dl->AddBezierCubic(a, cp0, cp1, b, col, sel ? 3.0f : 2.1f, 32);
+
+            // Clickable midpoint badge to select cable in right inspector
+            const ImVec2 mid(0.125f * a.x + 0.375f * cp0.x + 0.375f * cp1.x + 0.125f * b.x,
+                             0.125f * a.y + 0.375f * cp0.y + 0.375f * cp1.y + 0.125f * b.y);
+            char lbl[40];
+            if (lk.all_muted) std::snprintf(lbl, sizeof(lbl), "MUTE (%dch)", lk.channel_count);
+            else std::snprintf(lbl, sizeof(lbl), "%dch · %.0f dB", lk.channel_count, lk.gain_db);
+            const ImVec2 tsz = ImGui::CalcTextSize(lbl);
+            const ImVec2 b0(mid.x - tsz.x * 0.5f - 7.0f, mid.y - tsz.y * 0.5f - 3.0f);
+            const ImVec2 b1(mid.x + tsz.x * 0.5f + 7.0f, mid.y + tsz.y * 0.5f + 3.0f);
+            ImGui::SetCursorScreenPos(b0);
+            ImGui::PushID(7600 + int(i));
+            if (ImGui::InvisibleButton("##CableHit", ImVec2(b1.x - b0.x, b1.y - b0.y))) {
+                patch_sel_src_ = lk.src_slot;
+                patch_sel_dst_ = lk.dst_slot;
+            }
+            ImGui::PopID();
+            dl->AddRectFilled(b0, b1, g_dark_theme ? IM_COL32(20, 18, 34, 240) : IM_COL32(252, 250, 255, 245), 9.0f);
+            dl->AddRect(b0, b1, col, 9.0f, 0, sel ? 1.8f : 1.0f);
+            dl->AddText(ImVec2(b0.x + 7.0f, b0.y + 3.0f),
+                        g_dark_theme ? IM_COL32(240, 238, 255, 245) : IM_COL32(45, 35, 88, 245), lbl);
+        }
+
+        // Live preview cable while dragging
+        if (patch_drag_src_slot_ >= 0) {
+            ImVec2 a{};
+            if (find_port(src_ports, patch_drag_src_slot_, a)) {
+                const ImVec2 b = ImGui::GetMousePos();
+                const float dx = std::max(45.0f, std::fabs(b.x - a.x) * 0.45f);
+                dl->AddBezierCubic(a, ImVec2(a.x + dx, a.y), ImVec2(b.x - dx, b.y), b,
+                                   IM_COL32(20, 184, 166, 235), 2.8f, 28);
+            }
+        }
+        (void)ch;
+        end_glass_card();
+
+        // Right Inspector: Керування маршрутом & DSP
+        ImGui::SameLine();
+        begin_glass_card("##PatchInspector", ImVec2(0, board_h), true);
+        ImGui::TextColored(kColAccentPurp, "КЕРУВАННЯ МАРШРУТОМ & DSP");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        const SlotPatchLink* sel_link = nullptr;
+        for (const auto& lk : links) {
+            if (lk.src_slot == patch_sel_src_ && lk.dst_slot == patch_sel_dst_) { sel_link = &lk; break; }
+        }
+        if (sel_link) {
+            float g = sel_link->gain_db;
+            bool m = sel_link->all_muted;
+            ImGui::Text("Активний кабель: Slot %d -> Slot %d (%d ch)",
+                        sel_link->src_slot, sel_link->dst_slot, sel_link->channel_count);
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::SliderFloat("##PatchGain", &g, -60.0f, 12.0f, "Patch Gain: %.1f dB")) {
+                audio_matrix_.set_slot_block_gain_mute(sel_link->src_slot, sel_link->dst_slot, g, m);
+                config_dirty_ = true;
+            }
+            if (status_pill_button(m ? "UNMUTE" : "MUTE", m, ImVec2(100, 28))) {
+                audio_matrix_.set_slot_block_gain_mute(sel_link->src_slot, sel_link->dst_slot, g, !m);
+                config_dirty_ = true;
+            }
+            ImGui::SameLine();
+            if (status_pill_button(patch_solo_active_ ? "SOLO ON" : "SOLO", patch_solo_active_, ImVec2(100, 28))) {
+                patch_solo_active_ = !patch_solo_active_;
+                for (const auto& other : links) {
+                    const bool is_this = (other.src_slot == sel_link->src_slot && other.dst_slot == sel_link->dst_slot);
+                    audio_matrix_.set_slot_block_gain_mute(other.src_slot, other.dst_slot, other.gain_db,
+                                                           patch_solo_active_ ? !is_this : false);
+                }
+                config_dirty_ = true;
+            }
+            ImGui::Spacing();
+            if (status_pill_button("Видалити маршрут", false, ImVec2(-1, 28))) {
+                audio_matrix_.disconnect_slot_block(sel_link->src_slot, sel_link->dst_slot);
+                patch_sel_src_ = patch_sel_dst_ = -1;
+                config_dirty_ = true;
+            }
+        } else {
+            ImGui::TextDisabled("Перетягніть кабель від Джерела до Приймача або клікніть по кабелю.");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool guard = audio_matrix_.feedback_guard();
+        if (studio_toggle("##LoopGuard", &guard, kColGreen)) {
+            audio_matrix_.set_feedback_guard(guard);
+            config_dirty_ = true;
+        }
+        ImGui::SameLine();
+        ImGui::Text("Feedback Loop Guard");
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Режим нових кабелів:");
+        if (status_pill_button("Стерео (Ch 1-2)", patch_block_mode_ == 0, ImVec2(0, 26))) patch_block_mode_ = 0;
+        ImGui::SameLine();
+        if (status_pill_button("64ch 1:1", patch_block_mode_ == 1, ImVec2(0, 26))) patch_block_mode_ = 1;
+        ImGui::Spacing();
+        if (gradient_pill_button("Поканально (Матриця 64×64) ->", ImVec2(-1, 30), kColAccentBlue, kColAccentPurp)) {
+            patchbay_view_mode_ = 1;
+            cfg_.matrix_stereo_pairs = false;
+        }
+        end_glass_card();
+
+        // Bottom quick preset bar
+        ImGui::Spacing();
+        if (status_pill_button("Стерео-пари / Поканально (Матриця 64×64)", false, ImVec2(0, 28))) {
+            patchbay_view_mode_ = 1;
+        }
+        ImGui::SameLine(0.0f, 8.0f);
+        if (status_pill_button("+ Додати пристрій", false, ImVec2(0, 28))) {
+            req_open_add_audio_popup_ = true;
+        }
+        end_glass_card();
+        return;
     }
 
     // ---- MIDI PATCHBAY VIEW ----

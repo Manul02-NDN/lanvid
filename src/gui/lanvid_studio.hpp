@@ -237,6 +237,20 @@ private:
     int midi_channel_filter_ = 0;   // 0 = All, 1..16 = Ch 1..16
     float matrix_new_gain_db_ = 0.0f;
 
+    // Interactive Network Board (Connect) & Visual Audio Patchbay state
+    int connect_selected_node_ = 1;      // 0=Local, 1=Remote Studio, 2=Audio I/O, 10+=Mobile Cam/Monitor
+    bool connect_show_manual_ip_ = false;
+    float connect_master_vol_ = 1.0f;
+    float connect_ducking_db_ = -12.0f;
+    bool connect_mute_panic_ = false;
+    bool intercom_latch_mode_ = false;
+    int patchbay_view_mode_ = 0;         // 0 = Visual Patchbay, 1 = Detailed 64x64 Matrix
+    int patch_drag_src_slot_ = -1;
+    int patch_sel_src_ = -1;
+    int patch_sel_dst_ = -1;
+    int patch_block_mode_ = 1;           // 0 = Stereo (Ch 1-2), 1 = 64ch 1:1
+    bool patch_solo_active_ = false;
+
     // UI status / toast notifications & root-level popup triggers
     std::string toast_msg_;
     uint64_t toast_until_us_ = 0;

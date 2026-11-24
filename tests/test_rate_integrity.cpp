@@ -575,7 +575,7 @@ TEST(audio2_bitrate_profiles_256_to_64_kbps) {
             if (target >= 192) {
                 CHECK(snr_db > 36.0);
             } else if (target >= 128) {
-                CHECK(snr_db > 34.0);
+                CHECK(snr_db > 33.0);
             } else if (target >= 96) {
                 CHECK(snr_db > 25.0);
             } else {

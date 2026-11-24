@@ -1167,8 +1167,15 @@ CrosspointResult MultiDeviceAudioMatrix::set_crosspoint(int src_slot, int src_ch
     if (src_ch >= impl_->slots[src_slot].cfg.channels || dst_ch >= impl_->slots[dst_slot].cfg.channels) {
         return CrosspointResult::kInvalidSlotOrChannel;
     }
-    if (src_slot == dst_slot && impl_->feedback_guard && !allow_feedback) {
-        return CrosspointResult::kBlockedFeedbackLoop;
+    if (impl_->feedback_guard && !allow_feedback) {
+        const auto& scfg = impl_->slots[src_slot].cfg;
+        const auto& dcfg = impl_->slots[dst_slot].cfg;
+        const bool same_slot = (src_slot == dst_slot);
+        const bool same_hw_device =
+            (!scfg.device_id.empty() && scfg.device_id == dcfg.device_id);
+        if (same_slot || same_hw_device) {
+            return CrosspointResult::kBlockedFeedbackLoop;
+        }
     }
     for (auto& cp : impl_->crosspoints) {
         if (cp.src_slot == src_slot && cp.src_ch == src_ch && cp.dst_slot == dst_slot && cp.dst_ch == dst_ch) {
@@ -1212,6 +1219,85 @@ void MultiDeviceAudioMatrix::clear_crosspoints() {
 std::vector<MatrixCrosspoint> MultiDeviceAudioMatrix::crosspoints() const {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->crosspoints;
+}
+
+CrosspointResult MultiDeviceAudioMatrix::connect_slot_block(int src_slot, int dst_slot, int max_channels,
+                                                            float gain_db, bool mute, bool allow_feedback) {
+    if (src_slot < 0 || src_slot >= kMatrixMaxSlots || dst_slot < 0 || dst_slot >= kMatrixMaxSlots ||
+        max_channels <= 0) {
+        return CrosspointResult::kInvalidSlotOrChannel;
+    }
+    int n_ch = 0;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (!impl_->slots[src_slot].used || !impl_->slots[dst_slot].used) {
+            return CrosspointResult::kInvalidSlotOrChannel;
+        }
+        const auto& scfg = impl_->slots[src_slot].cfg;
+        const auto& dcfg = impl_->slots[dst_slot].cfg;
+        if (impl_->feedback_guard && !allow_feedback) {
+            if (src_slot == dst_slot || (!scfg.device_id.empty() && scfg.device_id == dcfg.device_id)) {
+                return CrosspointResult::kBlockedFeedbackLoop;
+            }
+        }
+        n_ch = std::min({max_channels, scfg.channels, dcfg.channels, kMatrixMaxChannels});
+    }
+    if (n_ch <= 0) return CrosspointResult::kInvalidSlotOrChannel;
+    disconnect_slot_block(src_slot, dst_slot);
+    for (int ch = 0; ch < n_ch; ++ch) {
+        const auto res = set_crosspoint(src_slot, ch, dst_slot, ch, gain_db, mute, allow_feedback);
+        if (res != CrosspointResult::kOk) return res;
+    }
+    return CrosspointResult::kOk;
+}
+
+bool MultiDeviceAudioMatrix::disconnect_slot_block(int src_slot, int dst_slot) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    auto& cps = impl_->crosspoints;
+    const size_t before = cps.size();
+    cps.erase(std::remove_if(cps.begin(), cps.end(), [&](const MatrixCrosspoint& c) {
+                  return c.src_slot == src_slot && c.dst_slot == dst_slot;
+              }),
+              cps.end());
+    return cps.size() != before;
+}
+
+bool MultiDeviceAudioMatrix::set_slot_block_gain_mute(int src_slot, int dst_slot, float gain_db, bool mute) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    bool touched = false;
+    const float clamped = std::clamp(gain_db, -96.0f, 12.0f);
+    for (auto& cp : impl_->crosspoints) {
+        if (cp.src_slot == src_slot && cp.dst_slot == dst_slot) {
+            cp.gain_db = clamped;
+            cp.mute = mute;
+            touched = true;
+        }
+    }
+    return touched;
+}
+
+std::vector<SlotPatchLink> MultiDeviceAudioMatrix::slot_patch_links() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    std::vector<SlotPatchLink> out;
+    for (const auto& cp : impl_->crosspoints) {
+        SlotPatchLink* found = nullptr;
+        for (auto& link : out) {
+            if (link.src_slot == cp.src_slot && link.dst_slot == cp.dst_slot) {
+                found = &link;
+                break;
+            }
+        }
+        if (!found) {
+            out.push_back({cp.src_slot, cp.dst_slot, 1, cp.gain_db, cp.mute, cp.mute});
+        } else {
+            found->gain_db = (found->gain_db * float(found->channel_count) + cp.gain_db) /
+                             float(found->channel_count + 1);
+            found->channel_count += 1;
+            found->any_muted = found->any_muted || cp.mute;
+            found->all_muted = found->all_muted && cp.mute;
+        }
+    }
+    return out;
 }
 
 void MultiDeviceAudioMatrix::set_feedback_guard(bool enabled) {

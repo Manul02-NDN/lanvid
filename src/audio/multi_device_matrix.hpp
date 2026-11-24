@@ -94,6 +94,16 @@ struct MatrixCrosspoint {
     bool mute = false;
 };
 
+// Aggregated Visual Patchbay cable derived live from the 64x64 crosspoint table.
+struct SlotPatchLink {
+    int src_slot = -1;
+    int dst_slot = -1;
+    int channel_count = 0;
+    float gain_db = 0.0f;
+    bool any_muted = false;
+    bool all_muted = false;
+};
+
 struct MatrixSlotRuntimeStatus {
     int id = 0;
     bool active = false;
@@ -162,6 +172,13 @@ public:
     bool has_crosspoint(int src_slot, int src_ch, int dst_slot, int dst_ch, MatrixCrosspoint* out = nullptr) const;
     void clear_crosspoints();
     std::vector<MatrixCrosspoint> crosspoints() const;
+
+    // Visual Patchbay block operations (directly synchronized with the 64x64 crosspoint table).
+    CrosspointResult connect_slot_block(int src_slot, int dst_slot, int max_channels,
+                                        float gain_db = 0.0f, bool mute = false, bool allow_feedback = false);
+    bool disconnect_slot_block(int src_slot, int dst_slot);
+    bool set_slot_block_gain_mute(int src_slot, int dst_slot, float gain_db, bool mute);
+    std::vector<SlotPatchLink> slot_patch_links() const;
 
     // Global Feedback Loop Guard toggle (default: true = guard enabled, blocks self-loop unless confirmed).
     void set_feedback_guard(bool enabled);

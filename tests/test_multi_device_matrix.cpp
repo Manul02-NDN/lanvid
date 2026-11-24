@@ -116,3 +116,54 @@ TEST(multi_device_matrix_routing_and_summing) {
 
     std::printf("    [matrix] 1-to-many + many-to-1 summing (0.30+0.20=0.50) + mute + feedback guard + config persistence OK\n");
 }
+
+TEST(patchbay_visual_sync_with_64x64_matrix_and_feedback_loop_guard) {
+    using namespace lv;
+
+    MultiDeviceAudioMatrix mx;
+    const int net = mx.add_slot({0, MatrixSlotType::kNetworkAoip, MatrixSlotRole::kDuplex, "Network AoIP", "", -1, 64, 256, true});
+    const int daw = mx.add_slot({0, MatrixSlotType::kVirtualBus, MatrixSlotRole::kDuplex, "REAPER Virtual ASIO", "", -1, 64, 256, true});
+    const int usb_in = mx.add_slot({0, MatrixSlotType::kSystemAudio, MatrixSlotRole::kInput, "USB Mic In", "usb-focusrite-2i2", -1, 2, 256, true});
+    const int usb_out = mx.add_slot({0, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput, "USB Headphones", "usb-focusrite-2i2", -1, 2, 256, true});
+    const int phones = mx.add_slot({0, MatrixSlotType::kSystemAudio, MatrixSlotRole::kOutput, "PC Headphones", "realtek-hd-out", -1, 2, 256, true});
+    CHECK(net >= 0 && daw >= 0 && usb_in >= 0 && usb_out >= 0 && phones >= 0);
+
+    // 1. Visual Patchbay 64ch block -> syncs 64 crosspoints in 64x64 Matrix
+    CHECK(mx.connect_slot_block(net, daw, 64, 0.0f, false) == CrosspointResult::kOk);
+    CHECK(mx.crosspoints().size() == 64u);
+    auto links = mx.slot_patch_links();
+    CHECK(links.size() == 1u);
+    CHECK(links[0].src_slot == net && links[0].dst_slot == daw && links[0].channel_count == 64);
+
+    // 2. Visual Patchbay Stereo Ch 1-2 block -> syncs 2 crosspoints in 64x64 Matrix
+    CHECK(mx.connect_slot_block(net, phones, 2, -3.5f, false) == CrosspointResult::kOk);
+    CHECK(mx.crosspoints().size() == 66u);
+    links = mx.slot_patch_links();
+    CHECK(links.size() == 2u);
+
+    // 3. Detailed 64x64 Matrix edit (remove Ch 63) -> immediately reflected in Visual Patchbay link count!
+    CHECK(mx.remove_crosspoint(net, 63, daw, 63));
+    links = mx.slot_patch_links();
+    CHECK(links[0].channel_count == 63);
+
+    // 4. Visual Patchbay Gain & Mute -> updates all crosspoints in 64x64 Matrix simultaneously
+    CHECK(mx.set_slot_block_gain_mute(net, daw, -6.0f, true));
+    MatrixCrosspoint cp0{};
+    CHECK(mx.has_crosspoint(net, 0, daw, 0, &cp0));
+    CHECK(std::fabs(cp0.gain_db - (-6.0f)) < 0.01f && cp0.mute);
+    links = mx.slot_patch_links();
+    CHECK(links[0].all_muted && std::fabs(links[0].gain_db - (-6.0f)) < 0.01f);
+
+    // 5. Feedback Loop Guard: blocks BOTH self-loop AND same physical device loop!
+    mx.set_feedback_guard(true);
+    CHECK(mx.connect_slot_block(daw, daw, 64) == CrosspointResult::kBlockedFeedbackLoop);
+    CHECK(mx.connect_slot_block(usb_in, usb_out, 2) == CrosspointResult::kBlockedFeedbackLoop);
+    CHECK(mx.set_crosspoint(usb_in, 0, usb_out, 0) == CrosspointResult::kBlockedFeedbackLoop);
+
+    // Disabling Feedback Loop Guard explicitly permits the route
+    mx.set_feedback_guard(false);
+    CHECK(mx.connect_slot_block(usb_in, usb_out, 2) == CrosspointResult::kOk);
+    CHECK(mx.disconnect_slot_block(usb_in, usb_out));
+
+    std::printf("    [patchbay<->matrix] 64ch+Stereo sync, gain/mute propagation & same-device Feedback Loop Guard OK\n");
+}
