@@ -56,6 +56,13 @@ public:
     // new sender epoch. Network thread only. Statistics counters are kept (cumulative).
     void reset_transport();
 
+    // One-way clock (receivers without a ping exchange, e.g. LanVid Monitor phones): the MasterClock is
+    // derived from the media timestamps themselves - offset = max(media_end - arrival) over the last
+    // ~2 s, i.e. the minimum-delay envelope. Bursts only ever add delay, so they never drag the playout
+    // position; sender/phone crystal drift is followed as the window slides. Network thread only.
+    void set_one_way_clock_sync(bool enabled) { one_way_ = enabled; }
+    bool one_way_clock_sync() const { return one_way_; }
+
     AudioChannelRxStats channel_stats(uint16_t channel_index) const;
     uint64_t rate_mismatch_drops() const { return rate_drops_.load(std::memory_order_relaxed); }
     uint32_t active_channel_count() const;
@@ -81,6 +88,15 @@ private:
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
     std::atomic<int16_t> channel_to_stream_[kMaxAudioChannels];
     std::vector<float> scratch_;
+
+    void one_way_observe(double media_end_us, uint64_t now);
+    bool one_way_ = false;
+    bool ow_have_ = false;
+    double ow_applied_ = 0.0;
+    double ow_win_[4] = {0, 0, 0, 0};
+    double ow_cur_ = -1e300;
+    uint64_t ow_win_start_ = 0;
+    int ow_win_n_ = 0;
 };
 
 }  // namespace lv

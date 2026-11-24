@@ -377,6 +377,7 @@ TEST(monitor_playout_drift_120ppm_loss_2pct_is_seamless) {
     s.mat.set_target_latency_ms(15);
     s.rx.set_latency_ms(15);
     s.rx.set_adaptive_jitter_enabled(false);
+    s.mat.set_max_resample_ppm(2000.0);  // as PersonalMonitorClient
     s.tx.set_latency_ms(15);
     s.tx.set_codec_profile(lv::audio_codec_profile_from_bitrate(128));  // Opus CELT
 
@@ -433,4 +434,148 @@ TEST(monitor_playout_drift_120ppm_loss_2pct_is_seamless) {
     CHECK(max_zero_run < 8);        // no zero-filled holes
     CHECK(lat_min >= 3.0 && lat_max <= 40.0);  // latency stays bounded (no creep)
     CHECK(s.mat.resync_count() <= 3);
+}
+
+// Wi-Fi burst delivery (power-save / airtime stalls): every 300 ms the link holds packets for 25 ms and then
+// delivers them in one clump. Target buffer 20 ms, Fixed mode, exactly the phone's receive path (one-way
+// clock from the packet timestamps + 75 % prefill hysteresis). After the first stall teaches the cushion,
+// the buffer must never fall to 0 ("Waiting for audio"), never underrun again and never click.
+TEST(monitor_wifi_burst_jitter_25ms_no_dropouts) {
+    for (int profile = 0; profile < 2; ++profile) {  // 0: Opus 256 kbps stereo, 1: Lossless PCM24
+        lv::MasterClock clk;
+        lv::AudioSyncMatrix mat{48000};
+        std::multimap<uint64_t, std::vector<uint8_t>> q;
+        std::mt19937 rng(77 + profile);
+        uint64_t now = 1'000'000;
+        lv::AudioTxEngine tx(48000, lv::kDefaultMtu, [&](const uint8_t* d, size_t n) {
+            uint64_t arrive = now + 1000 + rng() % 1000;  // 1..2 ms air time
+            const uint64_t phase = now % 300'000;           // 25 ms stall every 300 ms
+            // Held frames are released in order (the AP queue is FIFO), 20 us apart.
+            if (phase < 25'000) arrive = now - phase + 25'000 + 1000 + phase / 125;
+            q.insert({arrive, std::vector<uint8_t>(d, d + n)});
+            return true;
+        });
+        lv::AudioRxEngine rx(mat, clk, [](const uint8_t*, size_t) { return true; });
+        rx.set_latency_ms(20);
+        rx.set_adaptive_jitter_enabled(false);
+        rx.set_one_way_clock_sync(true);
+        mat.set_underrun_prefill(true, 75);
+        mat.set_max_resample_ppm(2000.0);
+        tx.set_latency_ms(20);
+        tx.set_codec_profile(profile == 0 ? lv::audio_codec_profile_from_bitrate(128) : lv::AudioCodecProfile::kPcm24);
+
+        constexpr uint32_t kStep = 120, kPop = 240;  // server pacer step / iOS 5 ms IO buffer
+        uint64_t next_send = now, next_pop = now + 30'000, media = 0;
+        std::vector<float> blk(kStep), out(kPop * 2);
+        const uint64_t warm = now + 3'000'000, end = now + 33'000'000;
+        double lat_min = 1e9, lat_max = 0.0;
+        float prev = 0.0f, max_step = 0.0f;
+        uint64_t zero_run = 0, max_zero_run = 0, und0 = 0, pref0 = 0;
+        bool measuring = false;
+        while (now < end) {
+            now = std::min(next_send, next_pop);
+            if (now >= next_send) {
+                for (uint32_t i = 0; i < kStep; ++i)
+                    blk[i] = 0.5f * float(std::sin(2.0 * 3.14159265358979 * 440.0 * double(media + i) / 48000.0));
+                tx.push_channel(0, blk.data(), kStep, lv::AudioFormat2::kFloat32, media, uint32_t(now));
+                tx.push_channel(1, blk.data(), kStep, lv::AudioFormat2::kFloat32, media, uint32_t(now));
+                media += kStep;
+                next_send += 2500;
+            }
+            while (!q.empty() && q.begin()->first <= now) {
+                auto dg = std::move(q.begin()->second);
+                q.erase(q.begin());
+                lv::PacketHeader h;
+                const uint8_t* pl = nullptr;
+                if (lv::parse_packet(dg.data(), dg.size(), h, &pl) == lv::PacketParseStatus::kOk &&
+                    h.type == lv::PacketType::kAudio2)
+                    rx.on_packet(h, pl, h.payload_size, now);
+            }
+            rx.service(now);
+            if (now >= next_pop) {
+                mat.pop_interleaved(clk, now, out.data(), 2, kPop);
+                next_pop += 5000;
+                if (!measuring && now >= warm) {
+                    measuring = true;
+                    und0 = mat.total_underruns();
+                    pref0 = mat.prefill_events();
+                }
+                if (measuring) {
+                    for (uint32_t i = 0; i < kPop; ++i) {
+                        const float v = out[2 * i];
+                        max_step = std::max(max_step, std::fabs(v - prev));
+                        zero_run = (v == 0.0f) ? zero_run + 1 : 0;
+                        max_zero_run = std::max(max_zero_run, zero_run);
+                        prev = v;
+                    }
+                    const double lat = mat.current_effective_latency_ms();
+                    lat_min = std::min(lat_min, lat);
+                    lat_max = std::max(lat_max, lat);
+                } else {
+                    prev = out[2 * (kPop - 1)];
+                }
+            }
+        }
+        const uint64_t und = mat.total_underruns() - und0;
+        std::printf("    [monitor wifi bursts 25 ms / %s] buffer=%.1f..%.1f ms cushion=%.1f ms underruns=%llu "
+                    "prefills=%llu (warm-up %llu) max_step=%.3f zero_run=%llu\n",
+                    profile == 0 ? "Opus 256" : "Lossless", lat_min, lat_max, mat.fixed_cushion_ms(),
+                    (unsigned long long)und, (unsigned long long)(mat.prefill_events() - pref0),
+                    (unsigned long long)pref0, max_step, (unsigned long long)max_zero_run);
+        CHECK(lat_min >= 15.0);   // never drains towards 0 ms / "Waiting for audio"
+        CHECK(lat_max <= 50.0);   // bounded cushion
+        CHECK(und == 0);          // no dropouts once the cushion is learned
+        CHECK(max_step < 0.1f);   // 440 Hz @ 0.5 FS moves <= 0.03 per sample: no clicks
+        CHECK(max_zero_run < 8);
+    }
+}
+
+// Server pacing: a mixer running 1024-frame blocks (21.3 ms) must still put packets on the wire evenly
+// (dedicated real-time send thread, 2.5 ms steps -> one packet per channel every 5 ms), not in clumps.
+TEST(monitor_server_paces_large_mixer_blocks) {
+    lv::PersonalMonitorServer srv(48000);
+    REQUIRE(srv.start(0, "127.0.0.1", 0));
+    lv::PersonalMonitorClient cli(48000);
+    REQUIRE(cli.connect("127.0.0.1", srv.bound_port(), "Pacing", 256, 20));
+    std::atomic<bool> stop{false};
+    std::thread mixer([&] {
+        constexpr uint32_t kBlk = 1024;
+        std::vector<float> ch(kBlk, 0.1f);
+        const float* planes[2] = {ch.data(), ch.data()};
+        uint64_t next = lv::now_us();
+        while (!stop.load()) {
+            srv.process_and_send(planes, 2, kBlk);
+            next += kBlk * 1'000'000ull / 48000;
+            lv::sleep_until_us(next, [] {});
+        }
+    });
+    // Measure arrival spacing of audio packets at the phone.
+    std::vector<uint64_t> arrivals;
+    uint64_t last_pkts = 0;
+    const uint64_t t_end = lv::now_us() + 1'500'000;
+    while (lv::now_us() < t_end) {
+        cli.poll();
+        const uint64_t n = cli.audio_packets_rx();
+        if (n != last_pkts) {
+            if (lv::now_us() > t_end - 1'000'000) arrivals.push_back(lv::now_us());
+            last_pkts = n;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    stop.store(true);
+    mixer.join();
+    std::vector<double> gaps;
+    for (size_t i = 1; i < arrivals.size(); ++i) gaps.push_back(double(arrivals[i] - arrivals[i - 1]) / 1000.0);
+    std::sort(gaps.begin(), gaps.end());
+    const double p50 = gaps.empty() ? 0 : gaps[gaps.size() / 2];
+    const double p95 = gaps.empty() ? 0 : gaps[gaps.size() * 95 / 100];
+    std::printf("    [monitor pacing] 1024-frame mixer blocks: %zu arrival events/s, gap p50=%.2f p95=%.2f max=%.2f ms, "
+                "paced steps=%llu, pings=%llu\n",
+                arrivals.size(), p50, p95, gaps.empty() ? 0 : gaps.back(),
+                (unsigned long long)srv.paced_chunks(), (unsigned long long)cli.wake_pings_sent());
+    CHECK(arrivals.size() >= 120);  // ~200 packet events/s; a 21 ms burst pattern would give ~47
+    CHECK(p95 < 15.0);              // evenly spaced (bursty mixer would show ~21 ms gaps)
+    CHECK(cli.wake_pings_sent() >= 50);
+    cli.disconnect();
+    srv.stop();
 }

@@ -212,6 +212,13 @@ public:
     // Direct access to a client's DSP bus (for inspection/tests).
     PersonalMonitorBus* bus(int slot);
 
+    // Pacer (dedicated real-time send thread) statistics, for tests / diagnostics.
+    uint64_t paced_chunks() const { return paced_chunks_.load(std::memory_order_relaxed); }
+    uint64_t ring_overflows() const { return ring_overflows_.load(std::memory_order_relaxed); }
+    static constexpr uint32_t kPaceTickUs = 2500;   // pacer period
+    static constexpr uint32_t kPaceChunk = 120;     // frames per pacer step (2.5 ms @ 48 kHz)
+    static constexpr uint32_t kPaceRingFrames = 16384;
+
 private:
     struct ClientSlot {
         bool active = false;
@@ -228,7 +235,16 @@ private:
         std::unique_ptr<AudioTxEngine> tx;
         uint64_t media_sample = 0;
         int8_t mix_peak_dbfs = -120;  // peak of the stereo mix last sent to this phone
+        // Paced send ring: the mixer writes processed stereo blocks (any size, e.g. 1024 frames), the
+        // pacer thread drains them in 2.5 ms pieces on a steady clock -> one packet every 5 ms, no bursts.
+        std::vector<float> ring_l, ring_r;
+        uint64_t ring_wr = 0;  // frames written (== media timestamp of the next written frame)
+        uint64_t ring_rd = 0;  // frames handed to the AudioTxEngine
+        double credit = 0.0;   // frames the pacer may send now
+        bool primed = false;   // one mixer block queued before the first send
     };
+    void pacer_loop();
+    void pace_tick_locked(double dt_us);
     void apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps);
 
     int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep);
@@ -252,6 +268,13 @@ private:
     uint8_t active_in_channels_ = 0;
     std::vector<float> tmp_l_;
     std::vector<float> tmp_r_;
+    std::vector<float> pace_l_ = std::vector<float>(kPaceChunk);
+    std::vector<float> pace_r_ = std::vector<float>(kPaceChunk);
+    uint32_t in_block_max_ = 0;  // largest mixer block seen recently (slow decay)
+    std::thread pacer_;
+    std::atomic<bool> pacer_stop_{false};
+    std::atomic<uint64_t> paced_chunks_{0};
+    std::atomic<uint64_t> ring_overflows_{0};
 };
 
 // Smartphone-side C++ client (exposed via C ABI lv_monitor_client_* for Android/iOS/tests).
@@ -283,10 +306,20 @@ public:
     MonitorBusTelemetry last_bus_telemetry() const;
     uint64_t audio_packets_rx() const { return audio_rx_pkts_.load(std::memory_order_relaxed); }
     uint64_t meta_packets_rx() const { return meta_rx_pkts_.load(std::memory_order_relaxed); }
+    // Real playout delay of the jitter buffer (one-way-clock position minus playout cursor): steady at the
+    // chosen buffer (+ any learned cushion), not the burst-to-burst arrival difference.
     double buffer_ms() const { return matrix_.current_effective_latency_ms(); }
+    uint64_t underruns() const { return matrix_.total_underruns(); }
+    uint64_t prefill_events() const { return matrix_.prefill_events(); }
+    uint64_t wake_pings_sent() const { return pings_.load(std::memory_order_relaxed); }
+    // Interval of the tiny keep-awake datagram sent while connected (stops Wi-Fi power save from batching
+    // incoming audio for 20-100 ms). Default 15 ms; 0 disables.
+    static constexpr uint64_t kWakePingUs = 15'000;
 
 private:
     bool send_control(const MonitorControlPayload& mc);
+    std::atomic<uint64_t> last_tx_us_{0};
+    std::atomic<uint64_t> pings_{0};
 
     uint32_t sample_rate_ = 48000;
     uint32_t client_id_ = 0;

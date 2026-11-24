@@ -15,6 +15,7 @@
 // Exactly ONE consumer may render from a matrix: every pop advances the shared cursor, so two pullers
 // (e.g. a meter pump and a device mixer) would play it at double speed and fight the re-anchor.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -84,6 +85,21 @@ public:
     void set_atomic_frame_lock(bool enabled) { atomic_frame_lock_.store(enabled, std::memory_order_release); }
     bool atomic_frame_lock() const { return atomic_frame_lock_.load(std::memory_order_acquire); }
 
+    // Underrun hysteresis (personal monitoring): after an underrun (and at start) playout pauses with a
+    // 2 ms fade until at least `percent` % of the target buffer is queued again, instead of trickling out
+    // one packet at a time on the edge of empty. In Fixed mode the extra delay that recovery needed is then
+    // kept as a cushion (held 30 s after the last underrun, then glides back at 0.4 ms/s), max 40 ms.
+    void set_underrun_prefill(bool enabled, uint32_t percent = 75) {
+        prefill_pct_.store(std::clamp<uint32_t>(percent, 10, 100), std::memory_order_relaxed);
+        prefill_enabled_.store(enabled, std::memory_order_release);
+    }
+    // Drift-correction range of the micro-resampler (default 500 ppm; monitor phones use 2000 = +/-0.2 %).
+    void set_max_resample_ppm(double ppm) { ratio_limit_.store(std::clamp(ppm, 50.0, 5000.0) * 1e-6, std::memory_order_relaxed); }
+    uint64_t prefill_events() const { return prefill_events_.load(std::memory_order_relaxed); }
+    double fixed_cushion_ms() const { return cushion_pub_ms_.load(std::memory_order_relaxed); }
+    // Total underrun events (start of a gap) over all channels.
+    uint64_t total_underruns() const;
+
     // ---- Consumer (audio thread) ----
     // Planar render: out[c] receives `frames` samples for c < num_channels (null entries skipped).
     void pop_planar(const MasterClock& clk, uint64_t local_now_us, float* const* out,
@@ -143,6 +159,7 @@ private:
         double ratio = 1.0;
         bool seek = false;
         double old_cursor = 0.0;  // where the previous path would have continued
+        bool hold = false;        // prefill: render the gap fade, do not advance, do not count underruns
     };
 
     Plan plan(const MasterClock& clk, uint64_t local_now_us, uint32_t frames);
@@ -173,6 +190,16 @@ private:
 
     // consumer state
     bool started_ = false;
+    std::atomic<double> ratio_limit_{500e-6};
+    std::atomic<bool> prefill_enabled_{false};
+    std::atomic<uint32_t> prefill_pct_{75};
+    std::atomic<bool> underrun_flag_{false};
+    std::atomic<uint64_t> prefill_events_{0};
+    std::atomic<double> cushion_pub_ms_{0.0};
+    bool prefill_ = false;
+    bool realize_cushion_ = false;
+    double cushion_ms_ = 0.0;       // Fixed mode: learned extra delay after an underrun
+    double cushion_hold_s_ = 0.0;
     double cursor_ = 0.0;
     double err_filt_ = 0.0;
     double jitter_env_us_ = 0.0;     // consumer-side envelope

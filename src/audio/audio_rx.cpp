@@ -227,6 +227,8 @@ struct AudioRxEngine::Stream {
 };
 
 void AudioRxEngine::reset_transport() {
+    ow_have_ = false;
+    ow_win_n_ = 0;
     for (auto& sp : streams_)
         if (sp) sp->reset_transport();
 }
@@ -285,6 +287,35 @@ void AudioRxEngine::write_to_matrix(Stream& s, const AudioHeader2& ah, const uin
     matrix_.write(ah.channel_index, ah.media_timestamp_samples, scratch_.data(), ah.num_samples);
 }
 
+void AudioRxEngine::one_way_observe(double media_end_us, uint64_t now) {
+    constexpr uint64_t kWinUs = 500'000;  // 4 windows x 0.5 s
+    const double d = media_end_us - double(now);
+    // First packet, or the sender timeline restarted (new slot / reconnect): start over at once.
+    if (!ow_have_ || std::fabs(d - ow_applied_) > 500'000.0) {
+        ow_have_ = true;
+        ow_cur_ = d;
+        ow_win_n_ = 0;
+        ow_win_start_ = now;
+        ow_applied_ = d;
+        clock_.set_fixed_offset(int64_t(std::llround(d)));
+        return;
+    }
+    ow_cur_ = std::max(ow_cur_, d);
+    if (now - ow_win_start_ >= kWinUs) {
+        for (int i = 3; i > 0; --i) ow_win_[i] = ow_win_[i - 1];
+        ow_win_[0] = ow_cur_;
+        ow_win_n_ = std::min(ow_win_n_ + 1, 4);
+        ow_cur_ = d;
+        ow_win_start_ = now;
+    }
+    double est = ow_cur_;
+    for (int i = 0; i < ow_win_n_; ++i) est = std::max(est, ow_win_[i]);
+    if (std::fabs(est - ow_applied_) >= 20.0) {  // >= 1 sample: the resampler absorbs the small steps
+        ow_applied_ = est;
+        clock_.set_fixed_offset(int64_t(std::llround(est)));
+    }
+}
+
 bool AudioRxEngine::is_expired(const Stream& s, uint32_t seq, uint64_t now) const {
     if (s.chunk == 0) return false;
     const int64_t ts = int64_t(s.ref_ts) + int64_t(int32_t(seq - s.ref_seq)) * int64_t(s.chunk);
@@ -293,6 +324,13 @@ bool AudioRxEngine::is_expired(const Stream& s, uint32_t seq, uint64_t now) cons
     // buffer can still play are neither counted late nor given up on).
     const uint32_t lat_ms = std::max(latency_ms_.load(std::memory_order_relaxed), matrix_.effective_latency_ms());
     const int64_t lat = int64_t(lat_ms) * rate / 1000;
+    if (one_way_) {
+        // Monitor phones: a packet is only useless once the playout cursor is about to pass it. While the
+        // matrix holds (prefill after an underrun) nothing expires, so no PLC is written over audio that is
+        // merely late and will still be played.
+        const double cur = matrix_.playout_cursor();
+        if (cur > 0.0) return ts + int64_t(s.chunk) <= int64_t(cur) + int64_t(rate) * 5 / 1000;
+    }
     if (clock_.synced()) {
         const int64_t target = clock_.master_samples(now, rate) - lat;
         return ts + int64_t(s.chunk) <= target;
@@ -392,6 +430,7 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
         return true;
     }
     const bool was_hole = m.state != 0;
+    const bool concealed = m.state == 2;  // given up: Opus PLC already rendered this packet's samples
     bit_set(seq);
     m.state = 0;
 
@@ -400,9 +439,13 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
     s.ref_ts = ah.media_timestamp_samples;
     s.fmt = ah.sample_format;
 
-    if (is_expired(s, seq, now)) s.late.fetch_add(1, std::memory_order_relaxed);
+    const bool late = is_expired(s, seq, now);
+    if (late) s.late.fetch_add(1, std::memory_order_relaxed);
 
-    write_to_matrix(s, ah, samples, payload_bytes);
+    // Opus: decoding a packet after its PLC frame was already generated (and the decoder moved on) breaks
+    // the CELT overlap -> a click. Keep the concealment; the packet is still stored for FEC below.
+    if (!(concealed && late && ah.sample_format == AudioFormat2::kOpus))
+        write_to_matrix(s, ah, samples, payload_bytes);
     s.rx.fetch_add(1, std::memory_order_relaxed);
     if (via_fec) s.fec_rec.fetch_add(1, std::memory_order_relaxed);
     if (via_nack && was_hole) s.nack_rec.fetch_add(1, std::memory_order_relaxed);
@@ -427,6 +470,10 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
             matrix_.observe_network_jitter_us(j_us);
         }
         s.has_transit = true;
+        if (!via_nack && one_way_) {
+            one_way_observe(double(ah.media_timestamp_samples + ah.num_samples) * 1e6 /
+                                double(matrix_.sample_rate()), now);
+        }
         if (!via_nack && clock_.synced()) {
             // Arrival lag vs the MasterClock (what the playout delay must cover for this block).
             matrix_.observe_arrival_lag_samples(clock_.master_samples(now, matrix_.sample_rate()) -

@@ -8,7 +8,6 @@ namespace lv {
 
 namespace {
 constexpr uint32_t kCrossfadeSamples = 96;
-constexpr double kRatioLimit = 2000e-6;             // hard limit: ratio always within 0.998 .. 1.002 (+/-0.2 %)
 constexpr uint32_t kGapFadeSamples = 96;           // 2 ms fade-out / fade-in around a gap (no click)
 constexpr double kGrowJumpSec = 0.010;              // adaptive growth beyond 10 ms: one crossfaded re-anchor
 constexpr double kDeadbandSamples = 1.5;
@@ -133,7 +132,15 @@ void AudioSyncMatrix::update_effective_latency(uint32_t frames, bool adaptive) {
     lag_env_pub_ms_.store(lag_env_samples_ * 1000.0 / double(rate_), std::memory_order_relaxed);
 
     if (!adaptive) {
-        eff_ms_ = base;
+        if (!prefill_enabled_.load(std::memory_order_relaxed)) {
+            cushion_ms_ = 0.0;
+        } else if (cushion_hold_s_ > 0.0) {
+            cushion_hold_s_ = std::max(0.0, cushion_hold_s_ - dt);
+        } else {
+            cushion_ms_ = std::max(0.0, cushion_ms_ - kShrinkMsPerSec * dt);
+        }
+        cushion_pub_ms_.store(cushion_ms_, std::memory_order_relaxed);
+        eff_ms_ = base + cushion_ms_;
         hold_samples_ = 0;
     } else {
         const double lo = std::max(base, double(jitter_min_ms_.load(std::memory_order_relaxed)));
@@ -240,7 +247,8 @@ bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, float& v) const {
 int64_t AudioSyncMatrix::desired_cursor(const MasterClock& clk, uint64_t local_now_us) const {
     const double eff_ms = adaptive_jitter_.load(std::memory_order_acquire)
                               ? eff_ms_pub_.load(std::memory_order_acquire)
-                              : double(latency_ms_.load(std::memory_order_relaxed));
+                              : double(latency_ms_.load(std::memory_order_relaxed)) +
+                                    cushion_pub_ms_.load(std::memory_order_relaxed);
     const int64_t lat = int64_t(std::llround(eff_ms * double(rate_) / 1000.0));
     int64_t master;
     if (clk.synced()) {
@@ -290,14 +298,56 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         started_ = true;
         cursor_ = double(desired);
         err_filt_ = 0.0;
+        prefill_ = prefill_enabled_.load(std::memory_order_relaxed);
         p.cursor = cursor_;
         p.ratio = 1.0;
         publish_actual(p.cursor);
         return p;
     }
 
+    if (prefill_enabled_.load(std::memory_order_acquire)) {
+        const double base = double(latency_ms_.load(std::memory_order_relaxed));
+        if (underrun_flag_.exchange(false, std::memory_order_acq_rel)) {
+            if (!prefill_) prefill_events_.fetch_add(1, std::memory_order_relaxed);
+            prefill_ = true;
+            // Dry underrun (the cursor ran past the newest data, not just over a lost packet): the delay
+            // was too short for this network. Learn the missing amount + one render block + 2 ms guard as
+            // a cushion (Fixed mode) and realise it right now, inside the dropout, instead of trickling.
+            const double deficit = cursor_ - double(newest_media_ts());
+            if (deficit > 0.0 && !adaptive && clk.synced()) {
+                const double now_ms = (master_now - cursor_) * 1000.0 / double(rate_);
+                const double want = now_ms - base + (deficit + double(frames)) * 1000.0 / double(rate_) +
+                                    kJitterGuardMs;
+                cushion_ms_ = std::clamp(want, cushion_ms_, 40.0);
+                cushion_hold_s_ = 30.0;
+                cushion_pub_ms_.store(cushion_ms_, std::memory_order_relaxed);
+                eff_ms_ = base + cushion_ms_;
+                eff_ms_pub_.store(eff_ms_, std::memory_order_relaxed);
+                effective_latency_ms_.store(uint32_t(std::lround(eff_ms_)), std::memory_order_release);
+                realize_cushion_ = true;
+            }
+        }
+        if (prefill_) {
+            const double need = double(prefill_pct_.load(std::memory_order_relaxed)) / 100.0 * base *
+                                double(rate_) / 1000.0;
+            const double ahead = double(newest_media_ts()) - cursor_;
+            const double lat_now = (master_now - cursor_) * 1000.0 / double(rate_);
+            const bool short_of_cushion = realize_cushion_ && lat_now < eff_ms_ - 0.25;
+            if (ahead < need || short_of_cushion) {  // refill: hold the position (gap fade), nothing replayed
+                p.cursor = cursor_;
+                p.ratio = 0.0;
+                p.hold = true;
+                publish_actual(cursor_);
+                return p;
+            }
+            prefill_ = false;
+            if (realize_cushion_) err_filt_ = 0.0;
+            realize_cushion_ = false;
+        }
+    }
+
     const double err = double(desired) - cursor_;
-    // The micro-resampler only ever corrects up to +/-2000 ppm (0.998 .. 1.002): it can never lock into
+    // The micro-resampler only ever corrects up to +/-500 ppm by default (+/-0.2 % for monitor phones): it can never lock into
     // an audible slow-down. Anything it cannot absorb is re-anchored once with a 96-sample crossfade:
     //  * |error| > 40 ms in either mode (consumer stall, clock jump, latency change),
     //  * Adaptive growth > 10 ms (a Wi-Fi burst needs the deeper buffer now, not after a minute of stretch).
@@ -323,7 +373,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     // within +/-500 ppm; Adaptive reacts faster (1.5 s gain vs 4 s).
     double off = 0.0;
     if (std::fabs(err_filt_) > kDeadbandSamples) {
-        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -kRatioLimit, kRatioLimit);
+        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -ratio_limit_.load(std::memory_order_relaxed), ratio_limit_.load(std::memory_order_relaxed));
     }
     p.cursor = cursor_;
     p.ratio = 1.0 + off;
@@ -378,7 +428,7 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     bool gap_event = false;
     for (uint32_t i = 0; i < frames; ++i) {
         bool ok = false;
-        float v = read_at(p.cursor, p.ratio, i, ok);
+        float v = p.hold ? 0.0f : read_at(p.cursor, p.ratio, i, ok);
         if (p.seek && i < kCrossfadeSamples) {
             bool ok_old = false;
             const float vo = read_at(p.old_cursor, 1.0, i, ok_old);
@@ -389,7 +439,7 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
         if (!ok) {
             const int64_t pos = int64_t(std::floor(p.cursor + double(i) * p.ratio));
             // Not an underrun while the stream has not started yet at this position.
-            if (active && first_ts != UINT64_MAX && uint64_t(std::max<int64_t>(pos, 0)) >= first_ts) {
+            if (!p.hold && active && first_ts != UINT64_MAX && uint64_t(std::max<int64_t>(pos, 0)) >= first_ts) {
                 if (!c.in_gap) gap_event = true;
                 c.in_gap = true;
             }
@@ -410,13 +460,22 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
         dst[size_t(i) * stride] = v;
         peak = std::max(peak, std::fabs(v));
     }
-    if (gap_event) c.underruns.fetch_add(1, std::memory_order_relaxed);
+    if (gap_event) {
+        c.underruns.fetch_add(1, std::memory_order_relaxed);
+        underrun_flag_.store(true, std::memory_order_release);
+    }
     c.played.fetch_add(frames, std::memory_order_relaxed);
 
     const float db = peak > 1e-6f ? 20.0f * std::log10(peak) : -120.0f;
     const float release = 20.0f * float(frames) / (0.3f * float(rate_));
     const float prev = c.level_db.load(std::memory_order_relaxed);
     c.level_db.store(std::max(db, prev - release), std::memory_order_relaxed);
+}
+
+uint64_t AudioSyncMatrix::total_underruns() const {
+    uint64_t n = 0;
+    for (const auto& c : ch_) n += c.underruns.load(std::memory_order_relaxed);
+    return n;
 }
 
 void AudioSyncMatrix::pop_planar(const MasterClock& clk, uint64_t local_now_us, float* const* out,

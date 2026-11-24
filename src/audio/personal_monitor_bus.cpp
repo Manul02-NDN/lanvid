@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "common/clock.hpp"
+#include "common/rt_thread.hpp"
 
 namespace lv {
 namespace {
@@ -367,10 +368,74 @@ bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip
     total_control_rx_.store(0, std::memory_order_relaxed);
     discovery_replies_.store(0, std::memory_order_relaxed);
     running_.store(true, std::memory_order_release);
+    pacer_stop_.store(false, std::memory_order_release);
+    pacer_ = std::thread([this] { pacer_loop(); });
     return true;
 }
 
+// Dedicated send thread: the mixer may run 512..1024-frame blocks (10.7..21.3 ms) and would otherwise put
+// a whole block on the air at once. Here every client's stereo bus leaves in 2.5 ms steps on an absolute
+// steady-clock deadline (real-time / QoS USER_INTERACTIVE / MMCSS priority) -> one Opus/PCM packet per
+// 5 ms per channel, evenly spaced, which is what Wi-Fi (and the phone's jitter buffer) handles best.
+void PersonalMonitorServer::pacer_loop() {
+    RealtimeThreadScope rt(kPaceTickUs);
+    uint64_t next = now_us();
+    uint64_t last = next;
+    while (!pacer_stop_.load(std::memory_order_acquire)) {
+        next += kPaceTickUs;
+        sleep_until_us(next, [] {});
+        const uint64_t now = now_us();
+        if (now > next + 100000) next = now;  // > 100 ms stall (suspend): re-anchor, don't burst
+        const double dt = double(now - last);
+        last = now;
+        poll_control();
+        std::lock_guard<std::mutex> lk(mu_);
+        pace_tick_locked(dt);
+    }
+}
+
+void PersonalMonitorServer::pace_tick_locked(double dt_us) {
+    const double per_us = double(sample_rate_) / 1e6;
+    // Pre-roll one mixer block before the first send, so the ring never runs dry at a block boundary
+    // (1024 is not a multiple of 120); afterwards it drains at exactly the sample rate. More than two blocks
+    // queued (pacer was starved) is trimmed by one extra step per tick, so latency never creeps.
+    const uint64_t block = std::max<uint64_t>(in_block_max_, kPaceChunk);
+    const uint64_t high_water = 2 * block + kPaceChunk;
+    const uint32_t wc_us = now_us32();
+    for (auto& s : slots_) {
+        if (!s.active || !s.tx || s.ring_l.empty()) continue;
+        uint64_t fill = s.ring_wr - s.ring_rd;
+        if (!s.primed) {
+            if (fill < block) continue;
+            s.primed = true;
+            s.credit = 0.0;
+        }
+        s.credit = std::min(s.credit + dt_us * per_us, double(4 * kPaceChunk));
+        uint32_t steps = 0;
+        while (s.credit >= double(kPaceChunk) && fill >= kPaceChunk) {
+            s.credit -= double(kPaceChunk);
+            fill -= kPaceChunk;
+            ++steps;
+        }
+        if (fill > high_water) ++steps, fill -= kPaceChunk;
+        for (uint32_t k = 0; k < steps; ++k) {
+            const uint64_t ts = s.ring_rd;
+            for (uint32_t i = 0; i < kPaceChunk; ++i) {
+                const size_t idx = size_t((ts + i) % kPaceRingFrames);
+                pace_l_[i] = s.ring_l[idx];
+                pace_r_[i] = s.ring_r[idx];
+            }
+            s.tx->push_channel(0, pace_l_.data(), kPaceChunk, AudioFormat2::kFloat32, ts, wc_us);
+            s.tx->push_channel(1, pace_r_.data(), kPaceChunk, AudioFormat2::kFloat32, ts, wc_us);
+            s.ring_rd += kPaceChunk;
+            paced_chunks_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 void PersonalMonitorServer::stop() {
+    pacer_stop_.store(true, std::memory_order_release);
+    if (pacer_.joinable()) pacer_.join();
     running_.store(false, std::memory_order_release);
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& s : slots_) {
@@ -466,6 +531,11 @@ int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const E
             s.packets_tx = 0;
             s.control_rx = 0;
             s.media_sample = 0;
+            s.ring_l.assign(kPaceRingFrames, 0.0f);
+            s.ring_r.assign(kPaceRingFrames, 0.0f);
+            s.ring_wr = s.ring_rd = 0;
+            s.credit = 0.0;
+            s.primed = false;
             s.bus = std::make_unique<PersonalMonitorBus>(sample_rate_);
             // Always read slots_[i].ep dynamically so phone reconnects on a new UDP port keep working!
             s.tx = std::make_unique<AudioTxEngine>(
@@ -706,10 +776,12 @@ void PersonalMonitorServer::process_and_send(const float* const* in_planes, int 
         tmp_r_.resize(frames, 0.0f);
     }
 
-    const uint32_t wc_us = now_us32();
+    // Slowly decaying maximum of the mixer block size (sets how much the pacer may keep queued).
+    in_block_max_ = std::max<uint32_t>(frames, in_block_max_ - (in_block_max_ >> 9));
+
     for (int i = 0; i < kMaxMonitorClients; ++i) {
         auto& s = slots_[i];
-        if (!s.active || !s.bus || !s.tx) continue;
+        if (!s.active || !s.bus || !s.tx || s.ring_l.empty()) continue;
         if (s.server_muted) {
             std::memset(tmp_l_.data(), 0, frames * sizeof(float));
             std::memset(tmp_r_.data(), 0, frames * sizeof(float));
@@ -719,9 +791,18 @@ void PersonalMonitorServer::process_and_send(const float* const* in_planes, int 
         float pk = 0.0f;
         for (uint32_t k = 0; k < frames; ++k) pk = std::max(pk, std::max(std::fabs(tmp_l_[k]), std::fabs(tmp_r_[k])));
         s.mix_peak_dbfs = lin_to_dbfs_i8(pk);
-        s.tx->push_channel(0, tmp_l_.data(), frames, AudioFormat2::kFloat32, s.media_sample, wc_us);
-        s.tx->push_channel(1, tmp_r_.data(), frames, AudioFormat2::kFloat32, s.media_sample, wc_us);
-        s.media_sample += frames;
+        // Queue for the pacer thread (timestamps stay contiguous: ring_wr is the media position).
+        for (uint32_t k = 0; k < frames; ++k) {
+            const size_t idx = size_t((s.ring_wr + k) % kPaceRingFrames);
+            s.ring_l[idx] = tmp_l_[k];
+            s.ring_r[idx] = tmp_r_[k];
+        }
+        s.ring_wr += frames;
+        if (s.ring_wr - s.ring_rd > kPaceRingFrames) {  // pacer starved of CPU for > 340 ms: drop oldest
+            s.ring_rd = s.ring_wr - kPaceRingFrames / 2;
+            ring_overflows_.fetch_add(1, std::memory_order_relaxed);
+        }
+        s.media_sample = s.ring_wr;
     }
 }
 
@@ -758,6 +839,9 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
     // In-ear monitoring: the buffer the musician picks (5 / 10 / 15 / 20 ms) is the buffer they get.
     // Adaptive growth (up to 200 ms on Wi-Fi bursts) would put a slap-back echo on their own instrument.
     arx_.set_adaptive_jitter_enabled(false);
+    arx_.set_one_way_clock_sync(true);          // steady playout position from the packet timestamps
+    matrix_.set_underrun_prefill(true, 75);     // refill to 75 % of the buffer after an underrun
+    matrix_.set_max_resample_ppm(2000.0);       // follow phone / PC crystal drift within +/-0.2 %
     name_ = client_name.empty() ? "Smartphone" : client_name;
     bitrate_kbps_.store(bitrate_kbps, std::memory_order_relaxed);
     latency_ms_.store(latency_ms, std::memory_order_relaxed);
@@ -802,6 +886,7 @@ bool PersonalMonitorClient::send_control(const MonitorControlPayload& mc) {
     ph.timestamp_us = now_us32();
     uint8_t dgram[kPacketHeaderSize + kMonitorControlSize];
     const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
+    last_tx_us_.store(now_us(), std::memory_order_relaxed);
     return dlen > 0 && sock_.send_to(dgram, dlen, server_ep_) == int(dlen);
 }
 
@@ -851,6 +936,15 @@ void PersonalMonitorClient::poll() {
     uint8_t buf[2048];
     Endpoint src{};
     const uint64_t now = now_us();
+    // Keep-awake: a 4-byte datagram every 15 ms keeps the phone's Wi-Fi radio out of power-save, which
+    // would otherwise hold incoming packets at the access point and deliver them in 20-100 ms clumps.
+    // Not an LVSP packet: the server's parser drops it without any work.
+    if (now - last_tx_us_.load(std::memory_order_relaxed) >= kWakePingUs) {
+        static const uint8_t kPing[4] = {'L', 'V', 'K', 'A'};
+        sock_.send_to(kPing, sizeof(kPing), server_ep_);
+        last_tx_us_.store(now, std::memory_order_relaxed);
+        pings_.fetch_add(1, std::memory_order_relaxed);
+    }
     for (int i = 0; i < 64; ++i) {
         const int n = sock_.recv_from(buf, sizeof(buf), src);
         if (n <= 0) break;
