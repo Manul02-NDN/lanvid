@@ -579,3 +579,94 @@ TEST(monitor_server_paces_large_mixer_blocks) {
     cli.disconnect();
     srv.stop();
 }
+
+// Regression for real-world iOS Wi-Fi stuttering (VID_20261124):
+// Isolated mid-stream packet loss must NOT trigger prefill playback halt, and a 75 ms Wi-Fi burst
+// must NOT blow up the buffer to 200-300 ms; NACK + Opus PLC recover seamlessly.
+TEST(monitor_wifi_loss_and_burst_no_prefill_freeze_and_nack_plc) {
+    constexpr uint32_t kRate = 48000;
+    constexpr uint32_t kChunk = 240;  // 5 ms
+    lv::AudioSyncMatrix mat(kRate);
+    lv::MasterClock clk;
+    std::vector<std::vector<uint8_t>> nack_q;
+    lv::AudioRxEngine arx(mat, clk, [&](const uint8_t* d, size_t n) {
+        nack_q.emplace_back(d, d + n);
+        return true;
+    });
+    arx.set_latency_ms(20);
+    arx.set_adaptive_jitter_enabled(false);
+    arx.set_one_way_clock_sync(true);
+    mat.set_underrun_prefill(true, 75);
+    mat.set_max_resample_ppm(2000.0);
+
+    struct NetPkt { uint64_t deliver_us; std::vector<uint8_t> bytes; };
+    std::vector<NetPkt> wire;
+    uint64_t sim_now = 1'000'000;
+    uint32_t pkt_idx = 0;
+    lv::AudioTxEngine atx(kRate, lv::kDefaultMtu, [&](const uint8_t* d, size_t n) {
+        ++pkt_idx;
+        // Drop 4% of packets (every 25th packet) to verify mid-stream loss never freezes prefill!
+        if (pkt_idx > 20 && (pkt_idx % 25 == 0)) return true;
+        // Inject a 75 ms Wi-Fi burst stall around packet 140..155
+        const uint64_t burst = (pkt_idx >= 140 && pkt_idx <= 155) ? 75'000ull : 2'000ull;
+        wire.push_back({sim_now + burst, std::vector<uint8_t>(d, d + n)});
+        return true;
+    });
+    atx.set_latency_ms(20);
+    atx.set_codec_profile(lv::audio_codec_profile_from_bitrate(128));  // 256 kbps stereo Opus
+
+    std::vector<float> ch0(kChunk), ch1(kChunk);
+    std::vector<float> out(kChunk * 2);
+    uint64_t media_ts = 0;
+    double max_lat_ms = 0.0;
+    uint64_t prefills_during_loss = 0;
+
+    for (int step = 0; step < 300; ++step) {
+        for (uint32_t i = 0; i < kChunk; ++i) {
+            const double ph = 2.0 * 3.141592653589793 * 440.0 * double(media_ts + i) / double(kRate);
+            ch0[i] = ch1[i] = float(0.4 * std::sin(ph));
+        }
+        atx.push_channel(0, ch0.data(), kChunk, lv::AudioFormat2::kFloat32, media_ts, uint32_t(sim_now));
+        atx.push_channel(1, ch1.data(), kChunk, lv::AudioFormat2::kFloat32, media_ts, uint32_t(sim_now));
+        media_ts += kChunk;
+
+        // Deliver any wire packets due by sim_now
+        auto it = wire.begin();
+        while (it != wire.end()) {
+            if (it->deliver_us <= sim_now) {
+                lv::PacketHeader h{};
+                const uint8_t* p = nullptr;
+                if (lv::parse_packet(it->bytes.data(), it->bytes.size(), h, &p) == lv::PacketParseStatus::kOk &&
+                    h.type == lv::PacketType::kAudio2) {
+                    arx.on_packet(h, p, h.payload_size, sim_now);
+                }
+                it = wire.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        arx.service(sim_now);
+        // Feed NACKs back to sender
+        for (const auto& nk : nack_q) {
+            lv::PacketHeader h{};
+            const uint8_t* p = nullptr;
+            if (lv::parse_packet(nk.data(), nk.size(), h, &p) == lv::PacketParseStatus::kOk &&
+                h.type == lv::PacketType::kAudioNack) {
+                atx.on_nack(p, h.payload_size);
+            }
+        }
+        nack_q.clear();
+
+        mat.pop_interleaved(clk, sim_now, out.data(), 2, kChunk);
+        const double lat = mat.current_effective_latency_ms();
+        if (step > 20) max_lat_ms = std::max(max_lat_ms, lat);
+        if (step == 135) prefills_during_loss = mat.prefill_events();
+        sim_now += 5000;
+    }
+
+    std::printf("    [monitor loss+75ms burst] max_buffer=%.1f ms | prefills_before_burst=%llu | total_prefills=%llu\n",
+                max_lat_ms, static_cast<unsigned long long>(prefills_during_loss),
+                static_cast<unsigned long long>(mat.prefill_events()));
+    CHECK(max_lat_ms < 120.0);         // NEVER blows up to 294.8 ms!
+    CHECK(prefills_during_loss <= 1);  // Mid-stream 4% loss does NOT trigger false prefill halts!
+}

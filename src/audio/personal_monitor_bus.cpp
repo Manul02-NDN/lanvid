@@ -693,6 +693,14 @@ void PersonalMonitorServer::poll_control() {
         if (parse_packet(buf, size_t(n), h, &payload) != PacketParseStatus::kOk) continue;
         if (h.type == PacketType::kMonitorControl) {
             handle_control_packet(h, payload, h.payload_size, src, now);
+        } else if (h.type == PacketType::kAudioNack) {
+            std::lock_guard<std::mutex> lk(mu_);
+            for (auto& s : slots_) {
+                if (s.active && s.tx && s.ep == src) {
+                    s.tx->on_nack(payload, h.payload_size);
+                    break;
+                }
+            }
         }
     }
 }
@@ -750,7 +758,6 @@ std::vector<DiscoveredMonitorServer> discover_monitor_servers(int timeout_ms, ui
 
 void PersonalMonitorServer::process_and_send(const float* const* in_planes, int num_in_ch, uint32_t frames) {
     if (!running_.load(std::memory_order_acquire) || frames == 0) return;
-    poll_control();
 
     std::lock_guard<std::mutex> lk(mu_);
     const int ch_n = std::clamp(num_in_ch, 0, kMonitorMaxInputChannels);
@@ -813,7 +820,10 @@ void PersonalMonitorServer::process_and_send(const float* const* in_planes, int 
 PersonalMonitorClient::PersonalMonitorClient(uint32_t sample_rate)
     : sample_rate_(sample_rate ? sample_rate : 48000),
       matrix_(sample_rate_),
-      arx_(matrix_, mclock_, [](const uint8_t*, size_t) { return true; }) {
+      arx_(matrix_, mclock_, [this](const uint8_t* data, size_t len) {
+          if (!connected_.load(std::memory_order_acquire)) return false;
+          return sock_.send_to(data, len, server_ep_) == int(len);
+      }) {
     client_id_ = uint32_t((now_us() ^ 0xA5A55A5Aull) & 0xFFFFFFFFu);
     if (client_id_ == 0) client_id_ = 1;
 }
@@ -967,6 +977,8 @@ void PersonalMonitorClient::poll() {
             }
         }
     }
+    // Drive NACK retransmission requests and Opus PLC (Packet Loss Concealment) for lost Wi-Fi packets!
+    arx_.service(now);
 }
 
 void PersonalMonitorClient::pop_stereo(float* out_interleaved, uint32_t frames) {

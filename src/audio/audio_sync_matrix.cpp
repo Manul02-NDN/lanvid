@@ -318,7 +318,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
                 const double now_ms = (master_now - cursor_) * 1000.0 / double(rate_);
                 const double want = now_ms - base + (deficit + double(frames)) * 1000.0 / double(rate_) +
                                     kJitterGuardMs;
-                cushion_ms_ = std::clamp(want, cushion_ms_, 40.0);
+                cushion_ms_ = std::clamp(want, cushion_ms_, 80.0);
                 cushion_hold_s_ = 30.0;
                 cushion_pub_ms_.store(cushion_ms_, std::memory_order_relaxed);
                 eff_ms_ = base + cushion_ms_;
@@ -333,6 +333,21 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
             const double ahead = double(newest_media_ts()) - cursor_;
             const double lat_now = (master_now - cursor_) * 1000.0 / double(rate_);
             const bool short_of_cushion = realize_cushion_ && lat_now < eff_ms_ - 0.25;
+            // Never let prefill hold freeze cursor_ into a 200-300 ms latency blowup: if packets
+            // arrived and cursor_ fell > 30 ms behind eff_ms_, re-anchor cleanly to desired now.
+            if (lat_now > eff_ms_ + 30.0 && ahead >= need) {
+                prefill_ = false;
+                realize_cushion_ = false;
+                p.seek = true;
+                p.old_cursor = cursor_;
+                cursor_ = double(desired);
+                err_filt_ = 0.0;
+                p.cursor = cursor_;
+                p.ratio = 1.0;
+                resyncs_.fetch_add(1, std::memory_order_relaxed);
+                publish_actual(p.cursor);
+                return p;
+            }
             if (ahead < need || short_of_cushion) {  // refill: hold the position (gap fade), nothing replayed
                 p.cursor = cursor_;
                 p.ratio = 0.0;
@@ -462,7 +477,13 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     }
     if (gap_event) {
         c.underruns.fetch_add(1, std::memory_order_relaxed);
-        underrun_flag_.store(true, std::memory_order_release);
+        // Only trigger a prefill halt when the buffer genuinely ran dry (cursor reached/passed
+        // newest_media_ts). An isolated lost packet inside a populated buffer is smoothly
+        // concealed by Opus PLC / gap-fade without halting playback!
+        const double block_end = p.cursor + double(frames) * p.ratio;
+        if (block_end >= double(newest_media_ts())) {
+            underrun_flag_.store(true, std::memory_order_release);
+        }
     }
     c.played.fetch_add(frames, std::memory_order_relaxed);
 
