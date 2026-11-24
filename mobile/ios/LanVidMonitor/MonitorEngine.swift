@@ -301,6 +301,11 @@ final class MonitorEngine: ObservableObject {
         }
         if next != channels { channels = next }
         if !next.isEmpty || t.audioPackets > 0 {
+            if !handshakeConfirmed, !isDemo, let s = connected {
+                // The studio really answered: remember it. The LAN scan probes this address first next launch.
+                UserDefaults.standard.set(s.host, forKey: "lastHost")
+                UserDefaults.standard.set(Int(s.port), forKey: "lastPort")
+            }
             handshakeConfirmed = true
             if lastError != nil { lastError = nil }
         } else if !handshakeConfirmed && Date().timeIntervalSince(connectStartedAt) > 3.5, let s = connected {
