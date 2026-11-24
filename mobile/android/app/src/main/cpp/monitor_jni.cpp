@@ -69,8 +69,10 @@ AAudioStream* open_stream(MonitorCtx* c, aaudio_sharing_mode_t sharing) {
     AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_FLOAT);
     AAudioStreamBuilder_setChannelCount(b, 2);
     AAudioStreamBuilder_setSampleRate(b, kRate);
+#if __ANDROID_API__ >= 28
     AAudioStreamBuilder_setUsage(b, AAUDIO_USAGE_MEDIA);
     AAudioStreamBuilder_setContentType(b, AAUDIO_CONTENT_TYPE_MUSIC);
+#endif
     AAudioStreamBuilder_setDataCallback(b, &on_audio, c);
     AAudioStreamBuilder_setErrorCallback(b, &on_audio_error, c);
     AAudioStream* s = nullptr;
