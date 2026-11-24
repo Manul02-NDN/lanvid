@@ -35,20 +35,53 @@ xcrun simctl install "$UDID" "$APP"
 # The Local Network prompt would cover the UI: demo / screenshot runs never browse (see StudioBrowser).
 
 rm -rf "$RAW"
+
+# True when the capture shows the app (not the black launch screen): the body of the screen is not black.
+has_content() {
+  python3 - "$1" <<'PY'
+import sys
+from PIL import Image, ImageStat
+im = Image.open(sys.argv[1]).convert("RGB")
+body = im.crop((0, int(im.height * 0.12), im.width, int(im.height * 0.9)))
+mean = sum(ImageStat.Stat(body).mean) / 3
+sys.exit(0 if mean > 8 else 1)
+PY
+}
+
+# Launches the app and takes the screenshot once it has really drawn (slow CI simulators need > 4 s).
+capture() {  # lang tab mode out
+  local lang="$1" tab="$2" mode="$3" out="$4" attempt shot
+  for attempt in 1 2 3; do
+    xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    xcrun simctl launch "$UDID" "$BUNDLE" -LVLang "$lang" $mode -LVTab "$tab" >/dev/null
+    for shot in $(seq 1 20); do
+      sleep 2
+      xcrun simctl io "$UDID" screenshot "$out" >/dev/null 2>&1 || continue
+      if has_content "$out"; then
+        sleep 2  # let the level meters / first animation frame settle
+        xcrun simctl io "$UDID" screenshot "$out" >/dev/null
+        echo "captured $lang tab $tab (attempt $attempt, ${shot}x2s)"
+        return 0
+      fi
+    done
+    echo "tab $tab ($lang): screen still black, relaunching" >&2
+  done
+  echo "FAILED: the app never drew tab $tab ($lang)" >&2
+  xcrun simctl spawn "$UDID" log show --last 2m --style compact --predicate 'process == "LanVid Monitor"' 2>/dev/null | tail -40 >&2 || true
+  return 1
+}
+
 for lang in en uk; do
   mkdir -p "$RAW/$lang"
   # tab order of the 4 screenshots: Connect, Mixer, Monitor FX, Settings
   for i in 0 1 2 3; do
-    xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true
     if [ "$i" = 0 ]; then
       MODE="-LVFakeStudios"           # Connect screen: discovered studios list
     else
       MODE="-LVDemo -LVMarketing"     # Mixer / Monitor FX / Settings: Demo Studio with the marketing preset
     fi
-    # shellcheck disable=SC2086
-    xcrun simctl launch "$UDID" "$BUNDLE" -LVLang "$lang" $MODE -LVTab "$i" >/dev/null
-    sleep 4
-    xcrun simctl io "$UDID" screenshot "$RAW/$lang/$((i + 1)).png" >/dev/null
+    capture "$lang" "$i" "$MODE" "$RAW/$lang/$((i + 1)).png"
   done
 done
 xcrun simctl terminate "$UDID" "$BUNDLE" 2>/dev/null || true

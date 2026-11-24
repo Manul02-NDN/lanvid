@@ -7,7 +7,7 @@ app screen below it. Output sizes: 1320x2868 (6.9") and 1290x2796 (6.7").
 import os
 import sys
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 CAPTIONS = {
     "en-US": ["Find your studio in one tap", "Your own 64-channel mix", "Studio-grade processing", "Low-latency Wi-Fi monitor"],
@@ -83,6 +83,9 @@ def main():
         os.makedirs(os.path.join(out_root, loc), exist_ok=True)
         for i, name in enumerate(NAMES):
             raw = Image.open(os.path.join(raw_dir, lang, f"{i + 1}.png")).convert("RGB")
+            body = raw.crop((0, int(raw.height * 0.12), raw.width, int(raw.height * 0.9)))
+            if sum(ImageStat.Stat(body).mean) / 3 <= 8:  # black launch screen, not the app
+                sys.exit(f"{lang}/{i + 1}.png is black - the app did not draw; refusing to build screenshots")
             for tag, size in SIZES.items():
                 out = compose(raw, caps[i], size)
                 path = os.path.join(out_root, loc, f"{tag}_{name}.png")
