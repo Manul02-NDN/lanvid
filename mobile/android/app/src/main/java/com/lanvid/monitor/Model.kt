@@ -56,6 +56,24 @@ data class Studio(val name: String, val host: String, val port: Int) {
     val id get() = "$host:$port"
 }
 
+/** Active local network interface on the smartphone (Wi-Fi / USB-C Ethernet). */
+data class NetInterfaceOption(
+    val id: String,
+    val systemName: String,
+    val friendlyName: String,
+    val typeTag: String,
+    val ipv4: String,
+    val speedMbps: Int,
+    val isUp: Boolean,
+) {
+    val displayLabel: String
+        get() {
+            val name = friendlyName.ifBlank { systemName }
+            val speed = if (speedMbps > 0) " · $speedMbps Мбіт/с" else ""
+            return "[$typeTag] $name — $ipv4$speed"
+        }
+}
+
 /** One channel strip; Compose observes each field. */
 class ChannelState(val index: Int, name: String) {
     var name by mutableStateOf(name)

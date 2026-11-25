@@ -231,6 +231,12 @@ void DiscoveryResponder::set_aoip_provider(std::function<AoipAnnounce()> provide
     aoip_provider_ = std::move(provider);
 }
 
+void DiscoveryResponder::set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip) {
+    std::lock_guard<std::mutex> lk(aoip_mu_);
+    primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
+    secondary_nic_ip_ = (secondary_ip == "auto" || secondary_ip == "0.0.0.0") ? std::string() : secondary_ip;
+}
+
 bool DiscoveryResponder::start(uint16_t stream_port, const std::string& custom_name,
                                uint16_t discovery_port) {
     stop();
@@ -249,6 +255,16 @@ bool DiscoveryResponder::start(uint16_t stream_port, const std::string& custom_n
     sockaddr_in sa{};
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = INADDR_ANY;
+    {
+        std::lock_guard<std::mutex> lk(aoip_mu_);
+        if (!primary_nic_ip_.empty() && secondary_nic_ip_.empty()) {
+            in_addr mif{};
+            if (inet_pton(AF_INET, primary_nic_ip_.c_str(), &mif) == 1) {
+                (void)setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF,
+                                 reinterpret_cast<const char*>(&mif), sizeof(mif));
+            }
+        }
+    }
     sa.sin_port = htons(discovery_port);
     if (::bind(s, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) != 0) {
         close_raw_sock(s);
@@ -303,7 +319,9 @@ void DiscoveryResponder::stop() {
     running_.store(false, std::memory_order_release);
 }
 
-std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discovery_port) {
+std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discovery_port,
+                                               const std::string& primary_ip,
+                                               const std::string& secondary_ip) {
     ensure_wsa();
     std::vector<DiscoveredReceiver> out;
     if (timeout_ms < 50) timeout_ms = 50;
@@ -318,10 +336,23 @@ std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discover
     sockaddr_in bind_sa{};
     bind_sa.sin_family = AF_INET;
     bind_sa.sin_addr.s_addr = INADDR_ANY;
+    const bool bind_specific = !primary_ip.empty() && primary_ip != "0.0.0.0" && primary_ip != "auto" &&
+                               (secondary_ip.empty() || secondary_ip == "0.0.0.0" || secondary_ip == "auto");
+    if (bind_specific) {
+        in_addr addr{};
+        if (inet_pton(AF_INET, primary_ip.c_str(), &addr) == 1) {
+            bind_sa.sin_addr = addr;
+            (void)setsockopt(s, IPPROTO_IP, IP_MULTICAST_IF,
+                             reinterpret_cast<const char*>(&addr), sizeof(addr));
+        }
+    }
     bind_sa.sin_port = 0;
     if (::bind(s, reinterpret_cast<const sockaddr*>(&bind_sa), sizeof(bind_sa)) != 0) {
-        close_raw_sock(s);
-        return out;
+        bind_sa.sin_addr.s_addr = INADDR_ANY;
+        if (::bind(s, reinterpret_cast<const sockaddr*>(&bind_sa), sizeof(bind_sa)) != 0) {
+            close_raw_sock(s);
+            return out;
+        }
     }
 
     // Collect broadcast targets: 255.255.255.255, every active subnet broadcast, and 127.0.0.1.

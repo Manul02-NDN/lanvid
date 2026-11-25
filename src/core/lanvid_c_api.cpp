@@ -26,6 +26,7 @@
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/discovery.hpp"
+#include "net/network_interfaces.hpp"
 #include "audio/channel_patchbay.hpp"
 #include "audio/intercom_engine.hpp"
 #include "audio/personal_monitor_bus.hpp"
@@ -134,6 +135,8 @@ struct LvSenderHandle {
     std::atomic<uint32_t> ext_frame_id{0};
     std::atomic<uint32_t> ext_audio_seq{0};
     LV_AudioBusConfig bus_cfg{48000, 20, 64, 240};
+    std::string primary_nic_ip;
+    std::string secondary_nic_ip;
 
     std::mutex push_mu;
     lv::Image ext_img;
@@ -257,6 +260,8 @@ struct LvReceiverHandle {
 
     // 64-channel bus
     LV_AudioBusConfig bus_cfg{48000, 20, 64, 240};
+    std::string primary_nic_ip;
+    std::string secondary_nic_ip;
     LV_MultichannelAudioCallback mc_cb = nullptr;
     void* mc_ud = nullptr;
     std::thread mc_thread;
@@ -732,6 +737,8 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
     lv::SenderConfig scfg;
     scfg.dest_ip = cfg->dest_ip[0] ? cfg->dest_ip : "127.0.0.1";
     scfg.dest_port = cfg->dest_port ? cfg->dest_port : 5000;
+    scfg.bind_ip = handle->primary_nic_ip;
+    scfg.secondary_bind_ip = handle->secondary_nic_ip;
     scfg.mtu = cfg->mtu >= 256 ? size_t(cfg->mtu) : lv::kDefaultMtu;
     scfg.enable_crc = cfg->enable_crc != 0;
     scfg.fec_group_size = uint16_t(std::max(0, cfg->fec_group_size));
@@ -1066,6 +1073,37 @@ int lv_sender_set_wifi_redundancy(LvSenderHandle* handle, int enabled, uint32_t 
     if (handle->sender) {
         handle->sender->set_wifi_redundancy(enabled != 0, stagger_us == 0 ? 1500u : stagger_us);
     }
+    return LV_OK;
+}
+
+int lv_sender_set_network_interfaces(LvSenderHandle* handle, const char* primary_ip,
+                                     const char* secondary_ip) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    const std::string pri = primary_ip ? primary_ip : "";
+    const std::string sec = secondary_ip ? secondary_ip : "";
+    {
+        std::lock_guard<std::mutex> lk(handle->api_mu);
+        handle->primary_nic_ip = pri;
+        handle->secondary_nic_ip = sec;
+    }
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        handle->sender->set_network_interfaces(pri, sec);
+    }
+    return LV_OK;
+}
+
+int lv_sender_get_failover_stats(LvSenderHandle* handle, uint64_t* out_failover_packets,
+                                 uint64_t* out_secondary_bytes) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    uint64_t fp = 0, sb = 0;
+    if (handle->sender) {
+        fp = handle->sender->failover_packets();
+        sb = handle->sender->secondary_bytes_sent();
+    }
+    if (out_failover_packets) *out_failover_packets = fp;
+    if (out_secondary_bytes) *out_secondary_bytes = sb;
     return LV_OK;
 }
 
@@ -1907,6 +1945,42 @@ int lv_monitor_server_set_multichannel_flow(LvMonitorServerHandle* srv, int enab
     return LV_OK;
 }
 
+int lv_monitor_client_set_network_interfaces(LvMonitorClientHandle* cli, const char* primary_ip,
+                                             const char* secondary_ip) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    const std::string pri = primary_ip ? primary_ip : "";
+    const std::string sec = secondary_ip ? secondary_ip : "";
+    return cli->cli->set_network_interfaces(pri, sec) ? LV_OK : LV_ERR_SOCKET;
+}
+
+int lv_net_list_interfaces_ex(LvNetInterfaceInfo* out_list, int max_count,
+                              int include_disconnected, int show_all) {
+    const auto list = lv::enumerate_network_interfaces(include_disconnected != 0, show_all != 0);
+    if (out_list && max_count > 0) {
+        const int n = std::min<int>(int(list.size()), max_count);
+        for (int i = 0; i < n; ++i) {
+            const auto& src = list[size_t(i)];
+            auto& dst = out_list[i];
+            std::memset(&dst, 0, sizeof(dst));
+            std::snprintf(dst.id, sizeof(dst.id), "%s", src.id.c_str());
+            std::snprintf(dst.system_name, sizeof(dst.system_name), "%s", src.system_name.c_str());
+            std::snprintf(dst.friendly_name, sizeof(dst.friendly_name), "%s", src.friendly_name.c_str());
+            dst.type = uint8_t(src.type);
+            dst.is_up = src.is_up ? 1 : 0;
+            std::snprintf(dst.ipv4_address, sizeof(dst.ipv4_address), "%s", src.ipv4_address.c_str());
+            std::snprintf(dst.subnet_mask, sizeof(dst.subnet_mask), "%s", src.subnet_mask.c_str());
+            std::snprintf(dst.mac_address, sizeof(dst.mac_address), "%s", src.mac_address.c_str());
+            dst.link_speed_mbps = src.link_speed_mbps;
+            dst.if_index = src.if_index;
+        }
+    }
+    return int(list.size());
+}
+
+int lv_net_list_interfaces(LvNetInterfaceInfo* out_list, int max_count) {
+    return lv_net_list_interfaces_ex(out_list, max_count, 0, 0);
+}
+
 void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames) {
     if (cli && cli->cli) cli->cli->pop_stereo(out_interleaved, frames);
 }
@@ -2165,6 +2239,14 @@ int lv_duplex_set_wifi_redundancy(LvDuplexHandle* h, int enabled, uint32_t stagg
     if (!h) return LV_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lk(h->api_mu);
     if (h->tx) lv_sender_set_wifi_redundancy(h->tx, enabled, stagger_us);
+    return LV_OK;
+}
+
+int lv_duplex_set_network_interfaces(LvDuplexHandle* h, const char* primary_ip,
+                                     const char* secondary_ip) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    if (h->tx) lv_sender_set_network_interfaces(h->tx, primary_ip, secondary_ip);
     return LV_OK;
 }
 

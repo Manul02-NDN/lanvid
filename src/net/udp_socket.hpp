@@ -57,6 +57,11 @@ public:
     bool is_open() const;
 
     bool bind(const std::string& ip, uint16_t port);
+    // Binds to a specific local NIC IPv4 address (empty / "0.0.0.0" = OS default route) and sets
+    // IP_MULTICAST_IF / IP_UNICAST_IF (Windows) / IP_BOUND_IF (Apple) / SO_BINDTODEVICE (Linux/Android)
+    // so traffic strictly exits the selected physical Ethernet / Wi-Fi interface.
+    bool bind_to_interface(const std::string& local_ip, uint16_t port = 0,
+                           uint32_t if_index = 0, const std::string& if_name = "");
     uint16_t local_port() const;
 
     void set_buffer_sizes(int send_bytes, int recv_bytes);

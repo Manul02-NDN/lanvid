@@ -41,6 +41,9 @@ final class MonitorEngine: ObservableObject {
     }
     @Published var dsp = DspSettings() { didSet { if dsp != oldValue { pushDsp(); save() } } }
     @Published var clientName: String = UIDeviceName.current { didSet { save() } }
+    @Published private(set) var networkInterfaces: [NetInterfaceOption] = []
+    @Published var primaryNicIp: String = "" { didSet { if primaryNicIp != oldValue { pushNetworkInterfaces(); save() } } }
+    @Published var secondaryNicIp: String = "" { didSet { if secondaryNicIp != oldValue { pushNetworkInterfaces(); save() } } }
 
     private var wifiRedundancyUserSet = false
 
@@ -59,6 +62,7 @@ final class MonitorEngine: ObservableObject {
         scratch = .allocate(capacity: 8192 * 2)
         scratch.initialize(repeating: 0, count: 8192 * 2)
         load()
+        refreshNetworkInterfaces()
         observers.append(NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
                 Task { @MainActor in self?.handleInterruption(n) }
@@ -83,6 +87,7 @@ final class MonitorEngine: ObservableObject {
             return
         }
         lv_monitor_client_set_wifi_redundancy(h, wifiRedundancy ? 1 : 0)
+        lv_monitor_client_set_network_interfaces(h, primaryNicIp, secondaryNicIp)
         let rc = lv_monitor_client_connect(h, studio.host, studio.port, String(clientName.prefix(15)),
                                            quality.wireKbps, UInt16(buffer.rawValue))
         guard rc == 0 else {
@@ -257,6 +262,37 @@ final class MonitorEngine: ObservableObject {
     private func pushWifiRedundancy() {
         guard let h = cli else { return }
         lv_monitor_client_set_wifi_redundancy(h, wifiRedundancy ? 1 : 0)
+    }
+
+    private func pushNetworkInterfaces() {
+        guard let h = cli else { return }
+        lv_monitor_client_set_network_interfaces(h, primaryNicIp, secondaryNicIp)
+    }
+
+    func refreshNetworkInterfaces() {
+        var raw = [LvNetInterfaceInfo](repeating: LvNetInterfaceInfo(), count: 16)
+        let n = Int(lv_net_list_interfaces(&raw, 16))
+        let count = min(max(n, 0), 16)
+        func cstr<T>(_ tuple: T) -> String {
+            withUnsafeBytes(of: tuple) { ptr in
+                let bytes = ptr.prefix { $0 != 0 }
+                return String(decoding: bytes, as: UTF8.self)
+            }
+        }
+        let tags = ["Other", "Ethernet", "Wi-Fi", "USB-LAN", "Virtual"]
+        networkInterfaces = (0..<count).map { i in
+            let item = raw[i]
+            let tag = Int(item.type) < tags.count ? tags[Int(item.type)] : "Other"
+            return NetInterfaceOption(
+                id: cstr(item.id),
+                systemName: cstr(item.system_name),
+                friendlyName: cstr(item.friendly_name),
+                typeTag: tag,
+                ipv4: cstr(item.ipv4_address),
+                speedMbps: item.link_speed_mbps,
+                isUp: item.is_up != 0
+            )
+        }
     }
 
     private func pushMix(_ s: ChannelStrip) {
@@ -457,6 +493,8 @@ final class MonitorEngine: ObservableObject {
         d.set(buffer.rawValue, forKey: "buffer")
         d.set(wifiRedundancy, forKey: "wifiRedundancy")
         d.set(wifiRedundancyUserSet, forKey: "wifiRedundancyUserSet")
+        d.set(primaryNicIp, forKey: "primaryNicIp")
+        d.set(secondaryNicIp, forKey: "secondaryNicIp")
         d.set(clientName, forKey: "clientName")
         if let data = try? JSONEncoder().encode(dsp) { d.set(data, forKey: "dsp") }
     }
@@ -471,6 +509,8 @@ final class MonitorEngine: ObservableObject {
         } else {
             wifiRedundancy = (quality == .k192 || quality == .k256)
         }
+        if let p = d.string(forKey: "primaryNicIp") { primaryNicIp = p }
+        if let s = d.string(forKey: "secondaryNicIp") { secondaryNicIp = s }
         if let n = d.string(forKey: "clientName"), !n.isEmpty { clientName = n }
         if let data = d.data(forKey: "dsp"), let v = try? JSONDecoder().decode(DspSettings.self, from: data) { dsp = v }
     }

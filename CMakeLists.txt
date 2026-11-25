@@ -112,6 +112,7 @@ set(LV_CORE_SOURCES
   src/net/sender.cpp
   src/net/receiver.cpp
   src/net/discovery.cpp
+  src/net/network_interfaces.cpp
   src/core/lanvid_c_api.cpp
   src/audio/channel_patchbay.cpp
   src/audio/multi_device_matrix.cpp
@@ -234,9 +235,9 @@ else()
       "-framework CoreMIDI"
     )
     set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation")
-    if(NOT IOS)  # CoreAudio HAL: System Audio slots of the Multi-Device Audio Matrix
-      list(APPEND LV_PLATFORM_LIBS "-framework CoreAudio")
-      string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -framework CoreAudio")
+    if(NOT IOS)  # CoreAudio HAL + SystemConfiguration (Ethernet vs Wi-Fi NIC enumeration on macOS)
+      list(APPEND LV_PLATFORM_LIBS "-framework CoreAudio" "-framework SystemConfiguration")
+      string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -framework CoreAudio -framework SystemConfiguration")
     endif()
   elseif(ANDROID)
     list(APPEND LV_CORE_SOURCES
@@ -479,6 +480,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_monitor_mobile.cpp
     tests/test_lanvid_grid_l2.cpp
     tests/test_installer_packaging.cpp
+    tests/test_network_interfaces.cpp
     src/gui/app_config.cpp
   )
   target_compile_definitions(lanvid_tests PRIVATE LV_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")

@@ -40,6 +40,11 @@ object MonitorEngine {
         private set
     var clientName by mutableStateOf(Build.MODEL ?: "Android")
         private set
+    val networkInterfaces = mutableStateListOf<NetInterfaceOption>()
+    var primaryNicIp by mutableStateOf("")
+        private set
+    var secondaryNicIp by mutableStateOf("")
+        private set
 
     private var wifiRedundancyUserSet = false
     private val names = ByteArray(64 * 16)
@@ -64,6 +69,10 @@ object MonitorEngine {
             quality == StreamQuality.K192 || quality == StreamQuality.K256
         }
         MonitorNative.setWifiRedundancy(handle, wifiRedundancy)
+        primaryNicIp = prefs.getString("primaryNicIp", "") ?: ""
+        secondaryNicIp = prefs.getString("secondaryNicIp", "") ?: ""
+        refreshNetworkInterfaces()
+        MonitorNative.setNetworkInterfaces(handle, primaryNicIp, secondaryNicIp)
         prefs.getString("clientName", null)?.takeIf { it.isNotBlank() }?.let { clientName = it }
         dsp = loadDsp()
     }
@@ -76,6 +85,7 @@ object MonitorEngine {
     fun connect(studio: Studio) {
         disconnect()
         MonitorNative.setWifiRedundancy(handle, wifiRedundancy)
+        MonitorNative.setNetworkInterfaces(handle, primaryNicIp, secondaryNicIp)
         val rc = MonitorNative.nativeConnect(handle, studio.host, studio.port, clientName.take(15), quality.wireKbps, buffer.ms)
         if (rc != 0 && rc != -2) {
             lastError = "Немає з'єднання з ${studio.host}:${studio.port} (код $rc)"
@@ -153,6 +163,40 @@ object MonitorEngine {
     fun changeClientName(n: String) {
         clientName = n.take(15)
         prefs.edit().putString("clientName", clientName).apply()
+    }
+
+    fun refreshNetworkInterfaces() {
+        val raw = runCatching { MonitorNative.listInterfaces() }.getOrDefault(emptyArray())
+        val parsed = raw.mapNotNull { row ->
+            val p = row.split('|')
+            if (p.size < 7) return@mapNotNull null
+            NetInterfaceOption(
+                id = p[0],
+                systemName = p[1],
+                friendlyName = p[2],
+                typeTag = p[3],
+                ipv4 = p[4],
+                speedMbps = p[5].toIntOrNull() ?: 0,
+                isUp = p[6] == "1",
+            )
+        }
+        networkInterfaces.clear()
+        networkInterfaces.addAll(parsed)
+    }
+
+    fun changePrimaryNic(ip: String) {
+        primaryNicIp = ip
+        if (secondaryNicIp.isNotEmpty() && secondaryNicIp == primaryNicIp) {
+            secondaryNicIp = ""
+        }
+        prefs.edit().putString("primaryNicIp", primaryNicIp).putString("secondaryNicIp", secondaryNicIp).apply()
+        if (handle != 0L) MonitorNative.setNetworkInterfaces(handle, primaryNicIp, secondaryNicIp)
+    }
+
+    fun changeSecondaryNic(ip: String) {
+        secondaryNicIp = if (ip.isNotEmpty() && ip == primaryNicIp) "" else ip
+        prefs.edit().putString("secondaryNicIp", secondaryNicIp).apply()
+        if (handle != 0L) MonitorNative.setNetworkInterfaces(handle, primaryNicIp, secondaryNicIp)
     }
 
     fun updateDsp(d: DspSettings) {

@@ -24,6 +24,8 @@ namespace lv {
 struct SenderConfig {
     std::string dest_ip = "127.0.0.1";
     uint16_t dest_port = 5000;
+    std::string bind_ip;             // Empty / "0.0.0.0" = OS default route; else Primary NIC IPv4
+    std::string secondary_bind_ip;   // Optional Secondary / Redundant NIC IPv4 for Dual-NIC 1+1 failover
     uint16_t bind_port = 0;
     size_t mtu = kDefaultMtu;
     bool enable_crc = true;
@@ -113,6 +115,21 @@ public:
         if (atx_) atx_->set_wifi_redundancy(enabled, stagger_us);
     }
     bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
+
+    // Physical NIC selection & Dual-NIC 1+1 failover:
+    // Binds primary traffic to `primary_ip` (empty = Auto) and opens `secondary_ip` for simultaneous
+    // 1+1 redundant copies + 0 ms failover if the primary Ethernet/Wi-Fi link drops.
+    bool set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
+    bool dual_nic_active() const { return dual_nic_active_.load(std::memory_order_acquire); }
+    uint64_t failover_packets() const {
+        return failover_pkts_.load(std::memory_order_relaxed) +
+               (atx_ ? atx_->stats().failover_packets : 0ull);
+    }
+    uint64_t secondary_packets_sent() const { return sec_pkts_sent_.load(std::memory_order_relaxed); }
+    uint64_t secondary_bytes_sent() const { return sec_bytes_sent_.load(std::memory_order_relaxed); }
+    // Deterministic cable-pull / link-down fault injection for Dual-NIC failover tests.
+    void set_primary_link_down(bool down) { primary_link_down_.store(down, std::memory_order_release); }
+    bool primary_link_down() const { return primary_link_down_.load(std::memory_order_acquire); }
     void set_audio_codec_profile(AudioCodecProfile p) {
         audio_codec_ = p;
         if (atx_) atx_->set_codec_profile(p);
@@ -208,6 +225,15 @@ private:
     uint64_t resolve_auto_ts(uint64_t next, uint32_t num_samples) const;
     Endpoint dst_{};
     UdpSocket sock_;
+    UdpSocket sock_secondary_;
+    mutable std::mutex nic_mu_;
+    std::string primary_nic_ip_;
+    std::string secondary_nic_ip_;
+    std::atomic<bool> dual_nic_active_{false};
+    std::atomic<bool> primary_link_down_{false};
+    std::atomic<uint64_t> sec_pkts_sent_{0};
+    std::atomic<uint64_t> sec_bytes_sent_{0};
+    std::atomic<uint64_t> failover_pkts_{0};
     ThreadPool pool_;
     FrameCodec codec_;
     std::unique_ptr<IVideoEncoder> video_enc_;
@@ -245,5 +271,7 @@ private:
     std::atomic<bool> midi_only_{false};
     std::atomic<bool> wifi_redundancy_{false};
 };
+
+using VideoTxEngine = UdpSender;
 
 }  // namespace lv

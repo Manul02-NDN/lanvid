@@ -28,9 +28,16 @@ object MonitorNative {
      *                   effectivePlayoutMs, wifiRedundancyEnabled, flowPacketsRx, nacksSent }. */
     @JvmStatic external fun nativeGetDanteTelemetry(handle: Long, out: DoubleArray): Int
 
+    /** Lists active network interfaces as "id|system_name|friendly_name|type|ipv4|speed_mbps|is_up". */
+    @JvmStatic external fun nativeListInterfaces(): Array<String>
+    @JvmStatic external fun nativeSetNetworkInterfaces(handle: Long, primaryIp: String, secondaryIp: String): Int
+
     fun setWifiRedundancy(handle: Long, enabled: Boolean): Int = nativeSetWifiRedundancy(handle, enabled)
     fun setSubscribedMask(handle: Long, channelMask: Long): Int = nativeSetSubscribedMask(handle, channelMask)
     fun getDanteTelemetry(handle: Long, out: DoubleArray): Int = nativeGetDanteTelemetry(handle, out)
+    fun listInterfaces(): Array<String> = nativeListInterfaces()
+    fun setNetworkInterfaces(handle: Long, primaryIp: String, secondaryIp: String): Int =
+        nativeSetNetworkInterfaces(handle, primaryIp, secondaryIp)
 
     const val BITRATE_LOSSLESS = 0xFFFF
 }

@@ -601,6 +601,7 @@ void LanVidStudioApp::init() {
     }
 
     refresh_devices();
+    refresh_network_interfaces();
     init_audio_matrix();
     if (monitors_.empty() && cfg_.source_type == LV_SOURCE_SCREEN) {
         cfg_.source_type = LV_SOURCE_PATTERN;
@@ -611,6 +612,9 @@ void LanVidStudioApp::init() {
     const std::string studio_label = "LanVid Studio (" + local_host_name() + ")";
     monitor_server_.set_studio_name(studio_label);
     monitor_server_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+    monitor_server_.set_network_interfaces(
+        cfg_.primary_nic_ip,
+        cfg_.dual_nic_redundancy_enabled ? cfg_.secondary_nic_ip : std::string());
     tally_intercom_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
     bool mon_ok = monitor_server_.start(kDefaultMonitorPort, "0.0.0.0", kDefaultMonitorDiscoveryPort);
     if (!mon_ok) {
@@ -919,6 +923,9 @@ void LanVidStudioApp::start_sender() {
     bus.num_channels = std::clamp(cfg_.aoip_channels, 1, 64);
     lv_sender_configure_audio_bus(sender_, &bus);
 
+    lv_sender_set_network_interfaces(
+        sender_, cfg_.primary_nic_ip.c_str(),
+        cfg_.dual_nic_redundancy_enabled ? cfg_.secondary_nic_ip.c_str() : "");
     last_tx_preview_fid_ = 0;
     if (lv_sender_start(sender_, &sc)) {
         sender_running_ = true;
@@ -1118,6 +1125,9 @@ void LanVidStudioApp::start_duplex() {
     if (duplex_running_) {
         if (cfg_.audio_bitrate_kbps > 0) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
         lv_duplex_set_wifi_redundancy(duplex_, cfg_.wifi_redundancy ? 1 : 0, 1500);
+        lv_duplex_set_network_interfaces(
+            duplex_, cfg_.primary_nic_ip.c_str(),
+            cfg_.dual_nic_redundancy_enabled ? cfg_.secondary_nic_ip.c_str() : "");
         lv_audio_set_tx_routing(duplex_, route_[0]);
         lv_audio_set_rx_routing(duplex_, route_[1]);
         broadcast_control_sync();  // Automatic handshake on start
@@ -3916,12 +3926,59 @@ void LanVidStudioApp::draw_connect_tab() {
         std::snprintf(main_cable_lbl, sizeof(main_cable_lbl), "4K Video + %dch AoIP", cfg_.aoip_channels);
     }
 
-    // Cable 1: Local Host <-> Remote Studio
+    // Helper: animated dashed cubic Bezier cable for Secondary / Redundant Failover NIC
+    auto draw_dashed_bezier_cable = [](ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col,
+                                       const char* badge, bool active, float speed, bool reverse_dot) {
+        const float dx = std::max(55.0f, std::fabs(p1.x - p0.x) * 0.45f);
+        const ImVec2 cp0(p0.x + dx, p0.y);
+        const ImVec2 cp1(p1.x - dx, p1.y);
+        auto eval = [&](float t) -> ImVec2 {
+            const float u = 1.0f - t;
+            return ImVec2(
+                u * u * u * p0.x + 3.0f * u * u * t * cp0.x + 3.0f * u * t * t * cp1.x + t * t * t * p1.x,
+                u * u * u * p0.y + 3.0f * u * u * t * cp0.y + 3.0f * u * t * t * cp1.y + t * t * t * p1.y);
+        };
+        constexpr int kSegs = 28;
+        const ImU32 line_col = active ? col : ((col & 0x00FFFFFFu) | 0x77000000u);
+        for (int i = 0; i < kSegs; i += 2) {
+            const ImVec2 a = eval(float(i) / float(kSegs));
+            const ImVec2 b = eval(float(std::min(kSegs, i + 1)) / float(kSegs));
+            dl->AddLine(a, b, (col & 0x00FFFFFFu) | 0x30000000u, active ? 5.0f : 3.2f);
+            dl->AddLine(a, b, line_col, active ? 2.1f : 1.5f);
+        }
+        if (active) {
+            const float raw_t = std::fmod(float(ImGui::GetTime()) * speed + 0.35f, 1.0f);
+            const float t = reverse_dot ? (1.0f - raw_t) : raw_t;
+            const ImVec2 dot = eval(t);
+            dl->AddCircleFilled(dot, 5.5f, (col & 0x00FFFFFFu) | 0x55000000u);
+            dl->AddCircleFilled(dot, 3.0f, IM_COL32(255, 255, 255, 240));
+        }
+        if (badge && badge[0]) {
+            const ImVec2 mid = eval(0.5f);
+            const ImVec2 tsz = ImGui::CalcTextSize(badge);
+            const ImVec2 b0(mid.x - tsz.x * 0.5f - 7.0f, mid.y - tsz.y * 0.5f - 2.5f);
+            const ImVec2 b1(mid.x + tsz.x * 0.5f + 7.0f, mid.y + tsz.y * 0.5f + 2.5f);
+            dl->AddRectFilled(b0, b1, g_dark_theme ? IM_COL32(14, 28, 34, 235) : IM_COL32(240, 253, 250, 242), 9.0f);
+            dl->AddRect(b0, b1, col, 9.0f, 0, 1.0f);
+            dl->AddText(ImVec2(b0.x + 7.0f, b0.y + 2.5f), col, badge);
+        }
+    };
+
+    // Cable 1: Local Host <-> Remote Studio (Primary + optional dashed turquoise Secondary 1+1 Failover cable!)
+    const bool dual_nic_on = cfg_.dual_nic_redundancy_enabled && !cfg_.secondary_nic_ip.empty();
     draw_animated_bezier_cable(
         dl,
-        ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.42f),
-        ImVec2(remote_pos.x, remote_pos.y + node_h * 0.42f),
+        ImVec2(local_pos.x + node_w, local_pos.y + node_h * (dual_nic_on ? 0.28f : 0.42f)),
+        ImVec2(remote_pos.x, remote_pos.y + node_h * (dual_nic_on ? 0.28f : 0.42f)),
         col_violet, main_cable_lbl, role_running, 0.45f, cfg_.connect_role == 1);
+    if (dual_nic_on) {
+        draw_dashed_bezier_cable(
+            dl,
+            ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.52f),
+            ImVec2(remote_pos.x, remote_pos.y + node_h * 0.52f),
+            col_teal, "1+1 Backup · Secondary NIC", role_running || monitor_server_.is_running(),
+            0.42f, cfg_.connect_role == 1);
+    }
 
     // Cable 2: Local Host <-> Mobile Camera / Personal Monitor (Tally + Intercom + IFB)
     const bool mobile_active = !studio_cams.empty() || !mon_phones.empty() || monitor_server_.is_running();
@@ -3932,6 +3989,13 @@ void LanVidStudioApp::draw_connect_tab() {
         ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.68f),
         ImVec2(mobile_pos.x, mobile_pos.y + node_h * 0.50f),
         col_teal, mob_lbl, mobile_active, 0.38f, false);
+    if (dual_nic_on) {
+        draw_dashed_bezier_cable(
+            dl,
+            ImVec2(local_pos.x + node_w, local_pos.y + node_h * 0.84f),
+            ImVec2(mobile_pos.x, mobile_pos.y + node_h * 0.72f),
+            col_teal, nullptr, mobile_active, 0.35f, false);
+    }
 
     // Cable 3: Audio Interface <-> Local Host (64ch Virtual Bus)
     draw_animated_bezier_cable(
@@ -4082,6 +4146,10 @@ void LanVidStudioApp::draw_connect_tab() {
                        role_running ? "● Synced" : "○ Standby");
     ImGui::Text("%s (%s)", remote_name.c_str(), remote_ip.empty() ? "LAN" : remote_ip.c_str());
     draw_audio_bitrate_pills("ConnectBitrate");
+    ImGui::Separator();
+
+    // 1b. NETWORK ADAPTERS & DUAL-NIC FAILOVER (Primary + Secondary)
+    draw_network_adapters_section("ConnectNic", true);
     ImGui::Separator();
 
     // 2. STUDIO CAMERAS · TALLY & INTERCOM Block
@@ -4576,6 +4644,11 @@ void LanVidStudioApp::draw_settings_tab() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
+    draw_network_adapters_section("SettingsNic", false);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
     draw_grid_engine_section();
 
     ImGui::Spacing();
@@ -4659,6 +4732,206 @@ bool LanVidStudioApp::start_grid_node() {
 
 void LanVidStudioApp::stop_grid_node() {
     grid_node_.reset();
+}
+
+void LanVidStudioApp::refresh_network_interfaces() {
+    net_ifaces_ = enumerate_network_interfaces(/*include_disconnected=*/false, /*show_all=*/false);
+    // Reconcile saved adapter IDs to their latest IPv4 addresses
+    if (!cfg_.primary_nic_id.empty()) {
+        bool found = false;
+        for (const auto& nic : net_ifaces_) {
+            if (nic.id == cfg_.primary_nic_id || nic.ipv4_address == cfg_.primary_nic_ip) {
+                cfg_.primary_nic_id = nic.id;
+                cfg_.primary_nic_ip = nic.ipv4_address;
+                local_lan_ip_ = nic.ipv4_address;
+                found = true;
+                break;
+            }
+        }
+        if (!found) cfg_.primary_nic_ip.clear();
+    } else if (!net_ifaces_.empty()) {
+        local_lan_ip_ = net_ifaces_[0].ipv4_address;
+    }
+    if (!cfg_.secondary_nic_id.empty()) {
+        bool found = false;
+        for (const auto& nic : net_ifaces_) {
+            if (nic.id == cfg_.secondary_nic_id || nic.ipv4_address == cfg_.secondary_nic_ip) {
+                cfg_.secondary_nic_id = nic.id;
+                cfg_.secondary_nic_ip = nic.ipv4_address;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            cfg_.secondary_nic_ip.clear();
+            cfg_.dual_nic_redundancy_enabled = false;
+        }
+    }
+}
+
+void LanVidStudioApp::apply_network_interfaces() {
+    const std::string pri_ip = cfg_.primary_nic_ip;
+    const std::string sec_ip = cfg_.dual_nic_redundancy_enabled ? cfg_.secondary_nic_ip : std::string();
+    if (!pri_ip.empty()) local_lan_ip_ = pri_ip;
+    else if (!net_ifaces_.empty()) local_lan_ip_ = net_ifaces_[0].ipv4_address;
+
+    monitor_server_.set_network_interfaces(pri_ip, sec_ip);
+    if (sender_) lv_sender_set_network_interfaces(sender_, pri_ip.c_str(), sec_ip.c_str());
+    if (duplex_) lv_duplex_set_network_interfaces(duplex_, pri_ip.c_str(), sec_ip.c_str());
+    config_dirty_ = true;
+}
+
+void LanVidStudioApp::draw_network_adapters_section(const char* id_prefix, bool compact) {
+    ImGui::PushID(id_prefix);
+
+    // Update per-NIC live TX Mbps & failover packet counters (~2 Hz)
+    const uint64_t now = now_us();
+    if (now - nic_rate_us_ >= 500'000ull) {
+        uint64_t sender_fp = 0, sender_sec_b = 0;
+        if (sender_) lv_sender_get_failover_stats(sender_, &sender_fp, &sender_sec_b);
+        const uint64_t pri_b = monitor_server_.primary_tx_bytes();
+        const uint64_t sec_b = monitor_server_.secondary_tx_bytes() + sender_sec_b;
+        const double dt_s = (nic_rate_us_ > 0) ? double(now - nic_rate_us_) / 1e6 : 0.5;
+        if (nic_rate_us_ > 0 && dt_s > 0.05) {
+            const uint64_t d_pri = (pri_b >= nic_prev_pri_bytes_) ? (pri_b - nic_prev_pri_bytes_) : 0;
+            const uint64_t d_sec = (sec_b >= nic_prev_sec_bytes_) ? (sec_b - nic_prev_sec_bytes_) : 0;
+            nic_pri_tx_mbps_ = double(d_pri) * 8.0 / (dt_s * 1e6) + tx_stats_.tx_mbps + dpx_tx_mbps_;
+            nic_sec_tx_mbps_ = double(d_sec) * 8.0 / (dt_s * 1e6);
+        }
+        nic_prev_pri_bytes_ = pri_b;
+        nic_prev_sec_bytes_ = sec_b;
+        nic_failover_pkts_ = monitor_server_.failover_packets() + sender_fp;
+        nic_rate_us_ = now;
+    }
+
+    auto format_nic_label = [](const NetworkInterfaceInfo& nic) -> std::string {
+        char buf[256];
+        if (nic.link_speed_mbps > 0) {
+            std::snprintf(buf, sizeof(buf), "[%s] %s — %s (%u Mbps) • %s",
+                          network_interface_type_tag(nic.type), nic.friendly_name.c_str(),
+                          nic.ipv4_address.c_str(), unsigned(nic.link_speed_mbps),
+                          nic.is_up ? "Active" : "Down");
+        } else {
+            std::snprintf(buf, sizeof(buf), "[%s] %s — %s • %s",
+                          network_interface_type_tag(nic.type), nic.friendly_name.c_str(),
+                          nic.ipv4_address.c_str(), nic.is_up ? "Active" : "Down");
+        }
+        return buf;
+    };
+
+    ImGui::TextColored(kColAccentPurp, compact ? "МЕРЕЖЕВІ АДАПТЕРИ (PRIMARY / 1+1)"
+                                               : "Мережеві адаптери та Резервування (Ethernet / Wi-Fi)");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Оновити NICs")) {
+        refresh_network_interfaces();
+        toast_msg_ = "Знайдено активних адаптерів: " + std::to_string(net_ifaces_.size());
+        toast_until_us_ = now_us() + 2200000ull;
+    }
+
+    // 1. Primary Stream NIC dropdown
+    std::string pri_preview = "Автоматично (Системний маршрут за замовчуванням)";
+    bool pri_is_up = true;
+    for (const auto& nic : net_ifaces_) {
+        if (!cfg_.primary_nic_id.empty() && nic.id == cfg_.primary_nic_id) {
+            pri_preview = format_nic_label(nic);
+            pri_is_up = nic.is_up;
+            break;
+        }
+    }
+    if (!compact) ImGui::TextDisabled("Основна мережева карта (Primary Stream NIC):");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##PrimaryNicCombo", pri_preview.c_str())) {
+        const bool auto_sel = cfg_.primary_nic_id.empty();
+        if (ImGui::Selectable("Автоматично (Системний маршрут за замовчуванням)", auto_sel)) {
+            cfg_.primary_nic_id.clear();
+            cfg_.primary_nic_ip.clear();
+            apply_network_interfaces();
+        }
+        for (const auto& nic : net_ifaces_) {
+            const bool sel = (!cfg_.primary_nic_id.empty() && nic.id == cfg_.primary_nic_id);
+            const std::string lbl = format_nic_label(nic);
+            if (ImGui::Selectable(lbl.c_str(), sel)) {
+                cfg_.primary_nic_id = nic.id;
+                cfg_.primary_nic_ip = nic.ipv4_address;
+                if (cfg_.secondary_nic_id == nic.id) {
+                    cfg_.secondary_nic_id.clear();
+                    cfg_.secondary_nic_ip.clear();
+                    cfg_.dual_nic_redundancy_enabled = false;
+                }
+                apply_network_interfaces();
+                toast_msg_ = "Основний адаптер: " + nic.friendly_name + " (" + nic.ipv4_address + ")";
+                toast_until_us_ = now_us() + 2600000ull;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // 2. Secondary / Redundant Failover NIC dropdown
+    std::string sec_preview = cfg_.wifi_redundancy
+                                  ? "1+1 у тій самій мережі (+1.5 мс)"
+                                  : "Вимкнено (Тільки основний канал)";
+    bool sec_is_up = false;
+    for (const auto& nic : net_ifaces_) {
+        if (cfg_.dual_nic_redundancy_enabled && !cfg_.secondary_nic_id.empty() && nic.id == cfg_.secondary_nic_id) {
+            sec_preview = format_nic_label(nic);
+            sec_is_up = nic.is_up;
+            break;
+        }
+    }
+    if (!compact) ImGui::TextDisabled("Резервна мережева карта (Redundant / Failover NIC):");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##SecondaryNicCombo", sec_preview.c_str())) {
+        const bool off_sel = !cfg_.dual_nic_redundancy_enabled || cfg_.secondary_nic_id.empty();
+        if (ImGui::Selectable("Вимкнено (Тільки основний канал)", off_sel && !cfg_.wifi_redundancy)) {
+            cfg_.secondary_nic_id.clear();
+            cfg_.secondary_nic_ip.clear();
+            cfg_.dual_nic_redundancy_enabled = false;
+            apply_network_interfaces();
+        }
+        if (ImGui::Selectable("1+1 у тій самій мережі (Wi-Fi Duplicate +1.5 мс)", off_sel && cfg_.wifi_redundancy)) {
+            cfg_.secondary_nic_id.clear();
+            cfg_.secondary_nic_ip.clear();
+            cfg_.dual_nic_redundancy_enabled = false;
+            cfg_.wifi_redundancy = true;
+            monitor_server_.set_wifi_redundancy(true, 1500);
+            tally_intercom_.set_wifi_redundancy(true, 1500);
+            if (sender_) lv_sender_set_wifi_redundancy(sender_, 1, 1500);
+            if (duplex_running_) lv_duplex_set_wifi_redundancy(duplex_, 1, 1500);
+            apply_network_interfaces();
+        }
+        for (const auto& nic : net_ifaces_) {
+            if (!cfg_.primary_nic_id.empty() && nic.id == cfg_.primary_nic_id) continue;
+            const bool sel = cfg_.dual_nic_redundancy_enabled && (nic.id == cfg_.secondary_nic_id);
+            const std::string lbl = format_nic_label(nic);
+            if (ImGui::Selectable(lbl.c_str(), sel)) {
+                cfg_.secondary_nic_id = nic.id;
+                cfg_.secondary_nic_ip = nic.ipv4_address;
+                cfg_.dual_nic_redundancy_enabled = true;
+                apply_network_interfaces();
+                toast_msg_ = "Dual-NIC 1+1 Failover увімкнено: резерв " + nic.friendly_name;
+                toast_until_us_ = now_us() + 2800000ull;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // 3. Live link status indicators (UP/DOWN, TX Mbps, Failover Packets)
+    ImGui::TextColored(pri_is_up ? kColGreen : kColRed, "● Primary %s", pri_is_up ? "UP" : "DOWN");
+    ImGui::SameLine();
+    ImGui::TextDisabled("%.2f Mbps", nic_pri_tx_mbps_);
+    if (cfg_.dual_nic_redundancy_enabled && !cfg_.secondary_nic_ip.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(sec_is_up ? kColAccentBlue : kColRed, "  ● Backup %s", sec_is_up ? "UP" : "DOWN");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.2f Mbps · Failover: %llu", nic_sec_tx_mbps_,
+                            static_cast<unsigned long long>(nic_failover_pkts_));
+    } else if (!compact) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("  |  Адаптерів: %zu  |  Failover: %llu", net_ifaces_.size(),
+                            static_cast<unsigned long long>(nic_failover_pkts_));
+    }
+
+    ImGui::PopID();
 }
 
 void LanVidStudioApp::draw_grid_engine_section() {

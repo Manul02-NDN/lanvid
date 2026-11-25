@@ -13,6 +13,7 @@
 
 #include "common/clock.hpp"
 #include "common/rt_thread.hpp"
+#include "net/network_interfaces.hpp"
 
 namespace lv {
 namespace {
@@ -349,13 +350,44 @@ PersonalMonitorServer::~PersonalMonitorServer() { stop(); }
 bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip, uint16_t discovery_port) {
     stop();
     if (!sock_.open()) return false;
-    if (!sock_.bind(bind_ip, bind_port)) {
+    const std::string eff_ip =
+        ((bind_ip.empty() || bind_ip == "0.0.0.0") && !primary_nic_ip_.empty()) ? primary_nic_ip_ : bind_ip;
+    bool bound = false;
+    if (!eff_ip.empty() && eff_ip != "0.0.0.0") {
+        NetworkInterfaceInfo info{};
+        const bool found = find_interface_by_ip(eff_ip, info);
+        bound = sock_.bind_to_interface(eff_ip, bind_port, found ? info.if_index : 0u,
+                                        found ? info.system_name : "");
+        if (!bound && (bind_ip.empty() || bind_ip == "0.0.0.0")) {
+            bound = sock_.bind("0.0.0.0", bind_port);
+        }
+    } else {
+        bound = sock_.bind("0.0.0.0", bind_port);
+    }
+    if (!bound) {
         sock_.close();
         return false;
     }
     sock_.set_low_latency_qos();
     sock_.set_nonblocking(true);  // non-blocking poll (SO_RCVTIMEO=0 blocks forever on Winsock!)
     bound_port_ = sock_.local_port();
+
+    // Optional Secondary NIC socket for physical Dual-NIC 1+1 failover
+    if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
+        if (sec_sock_.open()) {
+            NetworkInterfaceInfo sinfo{};
+            const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
+            if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
+                                            sf ? sinfo.system_name : "")) {
+                sec_sock_.set_low_latency_qos();
+                sec_sock_.set_nonblocking(true);
+                sec_sock_active_.store(true, std::memory_order_release);
+            } else {
+                sec_sock_.close();
+                sec_sock_active_.store(false, std::memory_order_release);
+            }
+        }
+    }
 
     // Optional LAN UDP Broadcast Discovery responder (guarantees discovery even when mDNS is blocked)
     disc_port_ = 0;
@@ -375,6 +407,54 @@ bool PersonalMonitorServer::start(uint16_t bind_port, const std::string& bind_ip
     pacer_stop_.store(false, std::memory_order_release);
     pacer_ = std::thread([this] { pacer_loop(); });
     return true;
+}
+
+bool PersonalMonitorServer::set_network_interfaces(const std::string& primary_ip,
+                                                   const std::string& secondary_ip) {
+    std::lock_guard<std::mutex> lk(mu_);
+    primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
+    secondary_nic_ip_ = (secondary_ip == "auto" || secondary_ip == "0.0.0.0") ? std::string() : secondary_ip;
+
+    sec_sock_.close();
+    sec_sock_active_.store(false, std::memory_order_release);
+    bool sec_ok = true;
+    if (!secondary_nic_ip_.empty()) {
+        sec_ok = false;
+        if (sec_sock_.open()) {
+            NetworkInterfaceInfo sinfo{};
+            const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
+            if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
+                                            sf ? sinfo.system_name : "")) {
+                sec_sock_.set_low_latency_qos();
+                sec_sock_.set_nonblocking(true);
+                sec_sock_active_.store(true, std::memory_order_release);
+                sec_ok = true;
+            } else {
+                sec_sock_.close();
+            }
+        }
+    }
+
+    for (int i = 0; i < kMaxMonitorClients; ++i) {
+        auto& s = slots_[i];
+        if (!s.active || !s.tx) continue;
+        s.tx->set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
+        if (sec_sock_active_.load(std::memory_order_acquire)) {
+            s.tx->set_secondary_send([this, i](const uint8_t* d, size_t n) {
+                const Endpoint dst = slots_[i].ep;
+                const bool ok = sec_sock_.is_open() &&
+                                sec_sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
+                if (ok) {
+                    sec_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
+                    ++slots_[i].packets_tx;
+                }
+                return ok;
+            });
+        } else {
+            s.tx->set_secondary_send(nullptr);
+        }
+    }
+    return sec_ok;
 }
 
 // Dedicated send thread: the mixer may run 512..1024-frame blocks (10.7..21.3 ms) and would otherwise put
@@ -599,31 +679,50 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
     const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, blen);
     if (dlen == 0) return;
 
-    if (sock_.send_to_qos(dgram, dlen, s.ep, QosTrafficClass::kAudio) == int(dlen)) {
+    bool pri_ok = false;
+    if (!primary_link_down_.load(std::memory_order_acquire) &&
+        sock_.send_to_qos(dgram, dlen, s.ep, QosTrafficClass::kAudio) == int(dlen)) {
+        pri_ok = true;
         ++s.packets_tx;
         flow_tx_pkts_.fetch_add(1, std::memory_order_relaxed);
+        pri_tx_bytes_.fetch_add(dlen, std::memory_order_relaxed);
     }
 
-    // Glitch-Free Wi-Fi Redundancy (1+1 Duplicate): schedule identical backup packet +1.5 ms later
-    if (wifi_redundancy_.load(std::memory_order_acquire) || s.client_wants_redundancy) {
+    // Physical Dual-NIC 1+1 Failover OR single-NIC Wi-Fi 1+1 Redundancy (+1.5 ms):
+    const bool dual_nic = sec_sock_active_.load(std::memory_order_acquire) && sec_sock_.is_open();
+    if (dual_nic || wifi_redundancy_.load(std::memory_order_acquire) || s.client_wants_redundancy) {
         body[21] |= kFlagRedundantCopy;
         uint8_t dup_dg[kPacketHeaderSize + sizeof(body)];
         const size_t dup_len = write_packet(dup_dg, sizeof(dup_dg), ph, body, blen);
         if (dup_len > 0) {
-            const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
-            if (stag == 0) {
-                if (sock_.send_to_qos(dup_dg, dup_len, s.ep, QosTrafficClass::kAudio) == int(dup_len)) {
+            if (dual_nic) {
+                // Physical Secondary NIC transmits backup copy immediately -> 0 ms failover if Primary NIC drops!
+                if (sec_sock_.send_to_qos(dup_dg, dup_len, s.ep, QosTrafficClass::kAudio) == int(dup_len)) {
                     ++s.packets_tx;
                     dup_tx_pkts_.fetch_add(1, std::memory_order_relaxed);
+                    sec_tx_bytes_.fetch_add(dup_len, std::memory_order_relaxed);
+                    if (!pri_ok) {
+                        flow_tx_pkts_.fetch_add(1, std::memory_order_relaxed);
+                        failover_pkts_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             } else {
-                if (flow_dups_.size() >= 1024) flow_dups_.pop_front();
-                PendingFlowDup pd;
-                pd.due_us = now + uint64_t(stag);
-                pd.slot_idx = slot_idx;
-                pd.dst = s.ep;
-                pd.dgram.assign(dup_dg, dup_dg + dup_len);
-                flow_dups_.push_back(std::move(pd));
+                const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
+                if (stag == 0) {
+                    if (sock_.send_to_qos(dup_dg, dup_len, s.ep, QosTrafficClass::kAudio) == int(dup_len)) {
+                        ++s.packets_tx;
+                        dup_tx_pkts_.fetch_add(1, std::memory_order_relaxed);
+                        pri_tx_bytes_.fetch_add(dup_len, std::memory_order_relaxed);
+                    }
+                } else {
+                    if (flow_dups_.size() >= 1024) flow_dups_.pop_front();
+                    PendingFlowDup pd;
+                    pd.due_us = now + uint64_t(stag);
+                    pd.slot_idx = slot_idx;
+                    pd.dst = s.ep;
+                    pd.dgram.assign(dup_dg, dup_dg + dup_len);
+                    flow_dups_.push_back(std::move(pd));
+                }
             }
         }
     }
@@ -707,6 +806,8 @@ void PersonalMonitorServer::stop() {
     }
     flow_dups_.clear();
     disc_sock_.close();
+    sec_sock_.close();
+    sec_sock_active_.store(false, std::memory_order_release);
     sock_.close();
     bound_port_ = 0;
     disc_port_ = 0;
@@ -813,15 +914,32 @@ int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const E
             s.tx = std::make_unique<AudioTxEngine>(
                 sample_rate_, kDefaultMtu,
                 [this, i](const uint8_t* d, size_t n) {
+                    if (primary_link_down_.load(std::memory_order_acquire)) return false;
                     const Endpoint dst = slots_[i].ep;
                     const bool ok = sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
-                    if (ok) ++slots_[i].packets_tx;
+                    if (ok) {
+                        ++slots_[i].packets_tx;
+                        pri_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
+                    }
                     return ok;
                 });
             s.tx->set_latency_ms(20);
             s.tx->set_codec_profile(audio_codec_profile_from_bitrate(128));  // 128 kbps/ch = 256 kbps stereo
             s.tx->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire),
                                       dup_stagger_us_.load(std::memory_order_relaxed));
+            s.tx->set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
+            if (sec_sock_active_.load(std::memory_order_acquire)) {
+                s.tx->set_secondary_send([this, i](const uint8_t* d, size_t n) {
+                    const Endpoint dst = slots_[i].ep;
+                    const bool ok = sec_sock_.is_open() &&
+                                    sec_sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
+                    if (ok) {
+                        sec_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
+                        ++slots_[i].packets_tx;
+                    }
+                    return ok;
+                });
+            }
             return i;
         }
     }
@@ -1181,12 +1299,34 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
     flow_dups_recovered_.store(0, std::memory_order_relaxed);
     last_rx_flow_mask_.store(0, std::memory_order_relaxed);
     if (!sock_.open()) return false;
-    if (!sock_.bind("0.0.0.0", 0)) {
+    bool bound = false;
+    if (!primary_nic_ip_.empty() && primary_nic_ip_ != "0.0.0.0") {
+        NetworkInterfaceInfo info{};
+        const bool found = find_interface_by_ip(primary_nic_ip_, info);
+        bound = sock_.bind_to_interface(primary_nic_ip_, 0, found ? info.if_index : 0u,
+                                        found ? info.system_name : "");
+    }
+    if (!bound && !sock_.bind("0.0.0.0", 0)) {
         sock_.close();
         return false;
     }
     sock_.set_low_latency_qos();
     sock_.set_nonblocking(true);
+    if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
+        if (sec_sock_.open()) {
+            NetworkInterfaceInfo sinfo{};
+            const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
+            if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
+                                            sf ? sinfo.system_name : "")) {
+                sec_sock_.set_low_latency_qos();
+                sec_sock_.set_nonblocking(true);
+                sec_sock_active_.store(true, std::memory_order_release);
+            } else {
+                sec_sock_.close();
+                sec_sock_active_.store(false, std::memory_order_release);
+            }
+        }
+    }
     if (!Endpoint::parse(server_ip, server_port, server_ep_)) {
         sock_.close();
         return false;
@@ -1251,6 +1391,33 @@ void PersonalMonitorClient::set_wifi_redundancy(bool enabled) {
     }
 }
 
+bool PersonalMonitorClient::set_network_interfaces(const std::string& primary_ip,
+                                                   const std::string& secondary_ip) {
+    primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
+    secondary_nic_ip_ = (secondary_ip == "auto" || secondary_ip == "0.0.0.0") ? std::string() : secondary_ip;
+    if (!connected_.load(std::memory_order_acquire)) return true;
+
+    sec_sock_.close();
+    sec_sock_active_.store(false, std::memory_order_release);
+    if (!secondary_nic_ip_.empty()) {
+        if (sec_sock_.open()) {
+            NetworkInterfaceInfo sinfo{};
+            const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
+            if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
+                                            sf ? sinfo.system_name : "")) {
+                sec_sock_.set_low_latency_qos();
+                sec_sock_.set_nonblocking(true);
+                sec_sock_active_.store(true, std::memory_order_release);
+                return true;
+            }
+            sec_sock_.close();
+            return false;
+        }
+        return false;
+    }
+    return true;
+}
+
 MonitorDanteTelemetry PersonalMonitorClient::dante_telemetry() const {
     MonitorDanteTelemetry t{};
     t.clock_locked = clock_locked_.load(std::memory_order_relaxed);
@@ -1286,6 +1453,8 @@ void PersonalMonitorClient::disconnect() {
         const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
         if (dlen > 0) sock_.send_to_qos(dgram, dlen, server_ep_, QosTrafficClass::kSyncControl);
     }
+    sec_sock_.close();
+    sec_sock_active_.store(false, std::memory_order_release);
     sock_.close();
 }
 
@@ -1653,30 +1822,35 @@ void PersonalMonitorClient::poll() {
     if (now - last_tx_us_.load(std::memory_order_relaxed) >= kWakePingUs) {
         send_keepalive_ping(now);
     }
-    for (int i = 0; i < 128; ++i) {
-        const int n = sock_.recv_from(buf, sizeof(buf), src);
-        if (n <= 0) break;
-        PacketHeader h{};
-        const uint8_t* payload = nullptr;
-        if (parse_packet(buf, size_t(n), h, &payload) != PacketParseStatus::kOk) continue;
-        if (h.type == PacketType::kMonitorAudioFlow) {
-            handle_flow_packet(h, payload, h.payload_size, now);
-        } else if (h.type == PacketType::kAudio2) {
-            audio_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
-            arx_.on_packet(h, payload, h.payload_size, now);
-        } else if (h.type == PacketType::kMonitorControl) {
-            uint32_t cid = 0;
-            uint8_t nch = 0;
-            MonitorMetaChannel tmp[kMonitorMaxInputChannels]{};
-            MonitorBusTelemetry tel{};
-            if (parse_monitor_meta(payload, h.payload_size, cid, nch, tmp, kMonitorMaxInputChannels, &tel)) {
-                std::lock_guard<std::mutex> lk(meta_mu_);
-                meta_.assign(tmp, tmp + nch);
-                bus_tel_ = tel;
-                meta_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
+    auto drain_socket = [&](const UdpSocket& s) {
+        if (!s.is_open()) return;
+        for (int i = 0; i < 128; ++i) {
+            const int n = s.recv_from(buf, sizeof(buf), src);
+            if (n <= 0) break;
+            PacketHeader h{};
+            const uint8_t* payload = nullptr;
+            if (parse_packet(buf, size_t(n), h, &payload) != PacketParseStatus::kOk) continue;
+            if (h.type == PacketType::kMonitorAudioFlow) {
+                handle_flow_packet(h, payload, h.payload_size, now);
+            } else if (h.type == PacketType::kAudio2) {
+                audio_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
+                arx_.on_packet(h, payload, h.payload_size, now);
+            } else if (h.type == PacketType::kMonitorControl) {
+                uint32_t cid = 0;
+                uint8_t nch = 0;
+                MonitorMetaChannel tmp[kMonitorMaxInputChannels]{};
+                MonitorBusTelemetry tel{};
+                if (parse_monitor_meta(payload, h.payload_size, cid, nch, tmp, kMonitorMaxInputChannels, &tel)) {
+                    std::lock_guard<std::mutex> lk(meta_mu_);
+                    meta_.assign(tmp, tmp + nch);
+                    bus_tel_ = tel;
+                    meta_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
-    }
+    };
+    drain_socket(sock_);
+    if (sec_sock_active_.load(std::memory_order_acquire)) drain_socket(sec_sock_);
     // Drive flow reorder timeout PLC and legacy AUDIO2 NACK/PLC!
     service_flow_reorder(now);
     arx_.service(now);

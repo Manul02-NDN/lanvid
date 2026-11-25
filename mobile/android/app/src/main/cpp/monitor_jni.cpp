@@ -43,6 +43,10 @@ struct MonitorCtx {
     LV_MonitorDanteTelemetry dante_tel{};
     std::atomic<bool> pending_wifi_redundancy{true};
 
+    std::mutex nic_mu;
+    std::string primary_nic_ip;
+    std::string secondary_nic_ip;
+
     std::atomic<int32_t> burst{0}, buffer_frames{0}, device_rate{0}, exclusive{0};
     std::atomic<int32_t> xruns{0};
 };
@@ -211,6 +215,15 @@ JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeConnect(JNIEn
     c->cli = lv_monitor_client_create(kRate);
     if (!c->cli) return -1;
     lv_monitor_client_set_wifi_redundancy(c->cli, c->pending_wifi_redundancy.load(std::memory_order_acquire) ? 1 : 0);
+    {
+        std::lock_guard<std::mutex> lk(c->nic_mu);
+        if (!c->primary_nic_ip.empty() || !c->secondary_nic_ip.empty()) {
+            lv_monitor_client_set_network_interfaces(
+                c->cli,
+                c->primary_nic_ip.empty() ? nullptr : c->primary_nic_ip.c_str(),
+                c->secondary_nic_ip.empty() ? nullptr : c->secondary_nic_ip.c_str());
+        }
+    }
     const int rc = lv_monitor_client_connect(c->cli, str(env, host).c_str(), uint16_t(port), str(env, name).c_str(),
                                              uint16_t(bitrate), uint16_t(latency));
     if (rc != LV_OK) {
@@ -280,6 +293,58 @@ JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeSetSubscribed
                                                                                      jlong channel_mask) {
     if (!h || !ctx(h)->cli) return -1;
     return lv_monitor_client_set_subscribed_mask(ctx(h)->cli, static_cast<uint64_t>(channel_mask));
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeSetNetworkInterfaces(JNIEnv* env, jclass, jlong h,
+                                                                                        jstring primary_ip,
+                                                                                        jstring secondary_ip) {
+    if (!h) return -1;
+    MonitorCtx* c = ctx(h);
+    const std::string p = str(env, primary_ip);
+    const std::string s = str(env, secondary_ip);
+    {
+        std::lock_guard<std::mutex> lk(c->nic_mu);
+        c->primary_nic_ip = p;
+        c->secondary_nic_ip = s;
+    }
+    if (!c->cli) return 0;
+    return lv_monitor_client_set_network_interfaces(c->cli, p.empty() ? nullptr : p.c_str(),
+                                                    s.empty() ? nullptr : s.c_str());
+}
+
+// Returns an array of "id|system_name|friendly_name|type|ipv4|speed_mbps|is_up" strings for active NICs.
+JNIEXPORT jobjectArray JNICALL Java_com_lanvid_monitor_MonitorNative_nativeListInterfaces(JNIEnv* env, jclass) {
+    LvNetInterfaceInfo list[32];
+    const int count = lv_net_list_interfaces(list, 32);
+    jclass str_cls = env->FindClass("java/lang/String");
+    if (!str_cls) return nullptr;
+    const int n = (count > 0) ? count : 0;
+    jobjectArray arr = env->NewObjectArray(n, str_cls, nullptr);
+    if (!arr) return nullptr;
+    auto type_tag = [](uint8_t t) -> const char* {
+        switch (t) {
+            case LV_NET_IFACE_ETHERNET:     return "Ethernet";
+            case LV_NET_IFACE_WIFI:         return "Wi-Fi";
+            case LV_NET_IFACE_USB_ETHERNET: return "USB-LAN";
+            case LV_NET_IFACE_VIRTUAL:      return "Virtual";
+            default:                        return "Other";
+        }
+    };
+    auto sanitize = [](const char* s) -> std::string {
+        std::string out = s ? s : "";
+        std::replace(out.begin(), out.end(), '|', '/');
+        return out;
+    };
+    for (int i = 0; i < n; ++i) {
+        const auto& it = list[i];
+        const std::string row = sanitize(it.id) + "|" + sanitize(it.system_name) + "|" + sanitize(it.friendly_name) +
+                                "|" + type_tag(it.type) + "|" + sanitize(it.ipv4_address) + "|" +
+                                std::to_string(it.link_speed_mbps) + "|" + (it.is_up ? "1" : "0");
+        jstring js = env->NewStringUTF(row.c_str());
+        env->SetObjectArrayElement(arr, i, js);
+        env->DeleteLocalRef(js);
+    }
+    return arr;
 }
 
 // Fills out[8] = { clock_locked, clock_offset_jitter_us, duplicates_recovered, active_flow_channels,

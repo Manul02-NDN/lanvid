@@ -85,18 +85,27 @@ public:
 
     // Optional live AoIP announcement (call before or after start; thread-safe).
     void set_aoip_provider(std::function<AoipAnnounce()> provider);
+    // Optional Primary / Secondary NIC IPv4 binding for discovery replies (empty = all interfaces).
+    void set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip = "");
 
 private:
     std::mutex aoip_mu_;
     std::function<AoipAnnounce()> aoip_provider_;
+    std::string primary_nic_ip_;
+    std::string secondary_nic_ip_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> running_{false};
 };
 
+using NetworkDiscovery = DiscoveryResponder;
+
 // Scans the local network (global broadcast + per-interface subnet broadcast + loopback)
 // for active LanVid receivers and returns unique responders collected within `timeout_ms`.
+// When `primary_ip` (and optional `secondary_ip`) are set, binds outgoing probes to those NICs.
 std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms = 350,
-                                               uint16_t discovery_port = kDiscoveryPort);
+                                               uint16_t discovery_port = kDiscoveryPort,
+                                               const std::string& primary_ip = "",
+                                               const std::string& secondary_ip = "");
 
 }  // namespace lv

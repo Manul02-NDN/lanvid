@@ -67,6 +67,13 @@ struct AppConfig {
     bool sync_matrix_routing = false; // also sync matrix routing presets across peers
     bool wifi_redundancy = false;     // Glitch-Free Wi-Fi Redundancy (1+1 Duplicate +1.5 ms stagger)
 
+    // Physical NIC selection & Dual-NIC 1+1 Failover (Ethernet + Wi-Fi)
+    std::string primary_nic_id;       // Empty = Auto (OS default route)
+    std::string primary_nic_ip;
+    std::string secondary_nic_id;     // Empty = Disabled / same-NIC Wi-Fi 1+1
+    std::string secondary_nic_ip;
+    bool dual_nic_redundancy_enabled = false;
+
     // Dual-Engine Architecture: 0 = Classic (UDP/IP Layer 3, default), 1 = Grid (Layer 2 Ethernet 256ch),
     // 2 = Hybrid (Grid L2 studio backbone + Classic L3 Wi-Fi/Mobile bridge)
     int network_engine_mode = 0;

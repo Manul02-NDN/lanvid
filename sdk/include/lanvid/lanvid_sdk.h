@@ -114,6 +114,11 @@ LV_API int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec);
 LV_API int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch);
 /* Glitch-Free Wi-Fi Redundancy (1+1 Duplicate): sends backup UDP audio packets staggered by stagger_us (default 1500 us). */
 LV_API int lv_sender_set_wifi_redundancy(LvSenderHandle* handle, int enabled, uint32_t stagger_us);
+/* Physical NIC selection & Dual-NIC 1+1 failover (empty/NULL/"auto" = OS default route). */
+LV_API int lv_sender_set_network_interfaces(LvSenderHandle* handle, const char* primary_ip,
+                                            const char* secondary_ip);
+LV_API int lv_sender_get_failover_stats(LvSenderHandle* handle, uint64_t* out_failover_packets,
+                                        uint64_t* out_secondary_bytes);
 /* Current master-clock position in samples (use to timestamp pushes from a DAW callback). */
 LV_API uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle);
 
@@ -190,6 +195,9 @@ LV_API int lv_duplex_set_audio_codec(LvDuplexHandle* handle, int codec);
 LV_API int lv_duplex_set_audio_bitrate(LvDuplexHandle* handle, int kbps_per_ch);
 /* Glitch-Free Wi-Fi Redundancy (1+1 Duplicate) for Duplex TX audio stream. */
 LV_API int lv_duplex_set_wifi_redundancy(LvDuplexHandle* handle, int enabled, uint32_t stagger_us);
+/* Physical NIC selection & Dual-NIC 1+1 failover for Duplex TX. */
+LV_API int lv_duplex_set_network_interfaces(LvDuplexHandle* handle, const char* primary_ip,
+                                            const char* secondary_ip);
 
 /* 64x64 patchbay of the duplex bridge, live (5 ms crossfade). dst_of_src[s] = destination channel
  * (0..63) of source channel s, or -1 for unrouted; NULL resets to 1:1. */
@@ -389,6 +397,37 @@ LV_API int lv_monitor_client_get_dante_telemetry(LvMonitorClientHandle* cli, LV_
 /* Server-side controls for Dante multi-channel flows and global 1+1 Wi-Fi redundancy. */
 LV_API int lv_monitor_server_set_wifi_redundancy(LvMonitorServerHandle* srv, int enabled, uint32_t stagger_us);
 LV_API int lv_monitor_server_set_multichannel_flow(LvMonitorServerHandle* srv, int enabled, uint8_t flow_channels);
+/* Physical NIC selection on mobile/desktop monitor client (e.g. Wi-Fi + USB-C Ethernet 1+1). */
+LV_API int lv_monitor_client_set_network_interfaces(LvMonitorClientHandle* cli, const char* primary_ip,
+                                                    const char* secondary_ip);
+
+/* ---- Cross-Platform Network Interface Enumeration (Ethernet + Wi-Fi + USB-LAN) ---- */
+typedef enum LV_NetInterfaceType {
+    LV_NET_IFACE_OTHER        = 0,
+    LV_NET_IFACE_ETHERNET     = 1,
+    LV_NET_IFACE_WIFI         = 2,
+    LV_NET_IFACE_USB_ETHERNET = 3,
+    LV_NET_IFACE_VIRTUAL      = 4
+} LV_NetInterfaceType;
+
+typedef struct LvNetInterfaceInfo {
+    char     id[128];
+    char     system_name[64];
+    char     friendly_name[128];
+    uint8_t  type;               /* LV_NetInterfaceType */
+    uint8_t  is_up;              /* 1 = active connected link with valid IPv4 */
+    uint16_t reserved;
+    char     ipv4_address[32];
+    char     subnet_mask[32];
+    char     mac_address[24];
+    uint32_t link_speed_mbps;
+    uint32_t if_index;
+} LvNetInterfaceInfo;
+
+/* Populates up to `max_count` connected Ethernet / Wi-Fi / USB-LAN interfaces. Returns total count found. */
+LV_API int lv_net_list_interfaces(LvNetInterfaceInfo* out_list, int max_count);
+LV_API int lv_net_list_interfaces_ex(LvNetInterfaceInfo* out_list, int max_count,
+                                     int include_disconnected, int show_all);
 
 /* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
 typedef struct LV_ControlSyncState {

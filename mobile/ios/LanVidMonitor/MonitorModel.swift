@@ -95,3 +95,19 @@ struct MonitorTelemetry: Equatable {
     var effectivePlayoutMs: Double = 0
     var wifiRedundancyEnabled = false
 }
+
+/// Active physical network adapter on iPhone/iPad (Wi-Fi en0, USB-C Ethernet en2, ...).
+struct NetInterfaceOption: Identifiable, Hashable {
+    var id: String
+    var systemName: String
+    var friendlyName: String
+    var typeTag: String
+    var ipv4: String
+    var speedMbps: UInt32
+    var isUp: Bool
+
+    var displayLabel: String {
+        let spd = speedMbps > 0 ? " (\(speedMbps) Mbps)" : ""
+        return "[\(typeTag)] \(friendlyName) — \(ipv4)\(spd)"
+    }
+}

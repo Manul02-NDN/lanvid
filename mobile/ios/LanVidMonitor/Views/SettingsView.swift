@@ -42,6 +42,36 @@ struct SettingsView: View {
                         .font(.caption2).foregroundStyle(Theme.muted)
                 }
 
+                Card(title: tr("Мережеві інтерфейси (Wi-Fi / Ethernet)", "Network Interfaces (Wi-Fi / Ethernet)"),
+                     trailing: AnyView(Button { engine.refreshNetworkInterfaces() } label: {
+                         Image(systemName: "arrow.clockwise")
+                     }.tint(Theme.accent2))) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(tr("Основний інтерфейс (Primary)", "Primary Interface")).font(.caption).foregroundStyle(Theme.muted)
+                        Picker(tr("Основний", "Primary"), selection: $engine.primaryNicIp) {
+                            Text(tr("Автоматично (Auto)", "Automatic (Auto)")).tag("")
+                            ForEach(engine.networkInterfaces) { nic in
+                                Text(nic.displayLabel).tag(nic.ipv4)
+                            }
+                        }
+                        .pickerStyle(.menu).tint(Theme.accent2)
+
+                        Text(tr("Резервний канал (Wi-Fi + Ethernet 1+1)", "Redundant Channel (Wi-Fi + Ethernet 1+1)"))
+                            .font(.caption).foregroundStyle(Theme.muted)
+                        Picker(tr("Резервний", "Redundant"), selection: $engine.secondaryNicIp) {
+                            Text(tr("Вимкнено (1+1 у тій самій мережі)", "Off (same-network 1+1)")).tag("")
+                            ForEach(engine.networkInterfaces.filter { $0.ipv4 != engine.primaryNicIp }) { nic in
+                                Text(nic.displayLabel).tag(nic.ipv4)
+                            }
+                        }
+                        .pickerStyle(.menu).tint(Theme.accent2)
+
+                        Text(tr("Підключіть USB-C Ethernet адаптер, щоб об'єднати Wi-Fi + Ethernet у 1+1 резервуванні.",
+                                "Plug in a USB-C Ethernet hub to bond Wi-Fi + Ethernet for 1+1 failover."))
+                            .font(.caption2).foregroundStyle(Theme.muted)
+                    }
+                }
+
                 Card(title: tr("Демо-режим", "Demo Studio Preview")) {
                     Button {
                         if engine.isDemo { engine.disconnect() } else { engine.startDemo() }

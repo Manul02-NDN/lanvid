@@ -94,6 +94,38 @@ bool UdpSocket::bind(const std::string& ip, uint16_t port) {
     return ::bind(fd_, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) == 0;
 }
 
+bool UdpSocket::bind_to_interface(const std::string& local_ip, uint16_t port,
+                                  uint32_t if_index, const std::string& if_name) {
+    if (!is_open()) return false;
+    const std::string ip = (local_ip.empty() || local_ip == "auto") ? "0.0.0.0" : local_ip;
+    if (!bind(ip, port)) return false;
+    if (ip != "0.0.0.0") {
+        Endpoint ep{};
+        if (Endpoint::parse(ip, 0, ep)) {
+            in_addr addr{};
+            addr.s_addr = ep.ipv4_be;
+            (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &addr, sizeof(addr));
+        }
+#if defined(__APPLE__) && defined(IP_BOUND_IF)
+        if (if_index != 0) {
+            unsigned int idx = if_index;
+            (void)::setsockopt(fd_, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx));
+        }
+#elif defined(__linux__) && defined(SO_BINDTODEVICE)
+        (void)if_index;
+        if (!if_name.empty() && if_name.size() < 16) {
+            // Best-effort: succeeds with CAP_NET_RAW/root; non-privileged sockets still use bound source IP.
+            (void)::setsockopt(fd_, SOL_SOCKET, SO_BINDTODEVICE, if_name.c_str(),
+                               socklen_t(if_name.size() + 1));
+        }
+#else
+        (void)if_index;
+        (void)if_name;
+#endif
+    }
+    return true;
+}
+
 uint16_t UdpSocket::local_port() const {
     if (!is_open()) return 0;
     sockaddr_in sa{};

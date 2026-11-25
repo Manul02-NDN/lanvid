@@ -299,6 +299,11 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "sync_settings", cfg.sync_settings);
     read_bool(j, "sync_matrix_routing", cfg.sync_matrix_routing);
     read_bool(j, "wifi_redundancy", cfg.wifi_redundancy);
+    read_str(j, "primary_nic_id", cfg.primary_nic_id);
+    read_str(j, "primary_nic_ip", cfg.primary_nic_ip);
+    read_str(j, "secondary_nic_id", cfg.secondary_nic_id);
+    read_str(j, "secondary_nic_ip", cfg.secondary_nic_ip);
+    read_bool(j, "dual_nic_redundancy_enabled", cfg.dual_nic_redundancy_enabled);
     read_int(j, "network_engine_mode", cfg.network_engine_mode);
     cfg.network_engine_mode = std::clamp(cfg.network_engine_mode, 0, 2);
     read_str(j, "grid_nic_name", cfg.grid_nic_name);
@@ -404,6 +409,11 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"sync_settings\": " << (cfg.sync_settings ? "true" : "false") << ",\n"
         << "  \"sync_matrix_routing\": " << (cfg.sync_matrix_routing ? "true" : "false") << ",\n"
         << "  \"wifi_redundancy\": " << (cfg.wifi_redundancy ? "true" : "false") << ",\n"
+        << "  \"primary_nic_id\": \"" << json_esc(cfg.primary_nic_id) << "\",\n"
+        << "  \"primary_nic_ip\": \"" << json_esc(cfg.primary_nic_ip) << "\",\n"
+        << "  \"secondary_nic_id\": \"" << json_esc(cfg.secondary_nic_id) << "\",\n"
+        << "  \"secondary_nic_ip\": \"" << json_esc(cfg.secondary_nic_ip) << "\",\n"
+        << "  \"dual_nic_redundancy_enabled\": " << (cfg.dual_nic_redundancy_enabled ? "true" : "false") << ",\n"
         << "  \"network_engine_mode\": " << cfg.network_engine_mode << ",\n"
         << "  \"grid_nic_name\": \"" << json_esc(cfg.grid_nic_name) << "\",\n"
         << "  \"grid_vlan_enabled\": " << (cfg.grid_vlan_enabled ? "true" : "false") << ",\n"

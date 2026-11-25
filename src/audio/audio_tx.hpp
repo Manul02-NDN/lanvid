@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "audio/audio_reliability.hpp"
@@ -43,6 +44,8 @@ struct AudioTxStats {
     uint64_t parity_sent = 0;
     uint64_t retransmits = 0;
     uint64_t duplicates = 0;
+    uint64_t secondary_packets = 0;
+    uint64_t failover_packets = 0;
     uint64_t nacks_received = 0;
     uint64_t nack_misses = 0;  // requested packet already left the history
     uint32_t active_streams = 0;
@@ -81,6 +84,10 @@ public:
     bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
     uint32_t wifi_redundancy_stagger_us() const { return dup_stagger_us_.load(std::memory_order_relaxed); }
     void set_secondary_send(SendFn secondary_send);
+    bool has_secondary_send() const { return has_secondary_send_.load(std::memory_order_acquire); }
+    void set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
+    std::string primary_nic_ip() const;
+    std::string secondary_nic_ip() const;
     // Flushes any queued 1+1 staggered duplicates whose due timestamp <= `now_wallclock_us`.
     void service_redundancy(uint32_t now_wallclock_us);
 
@@ -107,10 +114,11 @@ private:
                    uint64_t ts, uint32_t wallclock_us, const AudioReliabilityProfile& prof);
     void emit_parity(Stream& s, uint16_t ch, uint32_t col, AudioFormat2 fmt, uint32_t n,
                      uint32_t wallclock_us);
-    void send_payload(uint32_t seq, uint16_t stream, uint32_t wallclock_us, const uint8_t* payload,
+    bool send_payload(uint32_t seq, uint16_t stream, uint32_t wallclock_us, const uint8_t* payload,
                       size_t len);
     void queue_staggered_duplicate(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
-                                   const uint8_t* payload, size_t len);
+                                   const uint8_t* payload, size_t len, bool force_immediate = false,
+                                   bool is_failover = false);
     void flush_stream(Stream& s, uint16_t ch, uint32_t wallclock_us);
     void reconfigure(Stream& s, const AudioReliabilityProfile& prof);
     void update_loss_estimate();
@@ -120,6 +128,9 @@ private:
     SendFn send_;
     mutable std::mutex dup_mu_;
     SendFn secondary_send_;
+    std::atomic<bool> has_secondary_send_{false};
+    std::string primary_nic_ip_;
+    std::string secondary_nic_ip_;
     std::deque<PendingDup> pending_dups_;
     std::atomic<bool> wifi_redundancy_{false};
     std::atomic<uint32_t> dup_stagger_us_{1500};  // 1.5 ms default time diversity
@@ -130,7 +141,7 @@ private:
     std::mutex create_mu_;
 
     std::atomic<uint64_t> packets_sent_{0}, bytes_sent_{0}, parity_sent_{0}, retransmits_{0},
-        duplicates_{0}, nacks_rx_{0}, nack_miss_{0};
+        duplicates_{0}, secondary_pkts_{0}, failover_pkts_{0}, nacks_rx_{0}, nack_miss_{0};
     std::atomic<bool> dup_active_{false};
     std::atomic<uint64_t> win_sent_{0}, win_nacked_{0};
     std::atomic<uint64_t> win_start_us_{0};

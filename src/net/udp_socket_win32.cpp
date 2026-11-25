@@ -92,6 +92,30 @@ bool UdpSocket::bind(const std::string& ip, uint16_t port) {
     return ::bind(SOCKET(fd_), reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) == 0;
 }
 
+bool UdpSocket::bind_to_interface(const std::string& local_ip, uint16_t port,
+                                  uint32_t if_index, const std::string& /*if_name*/) {
+    if (!is_open()) return false;
+    const std::string ip = (local_ip.empty() || local_ip == "auto") ? "0.0.0.0" : local_ip;
+    if (!bind(ip, port)) return false;
+    if (ip != "0.0.0.0") {
+        Endpoint ep{};
+        if (Endpoint::parse(ip, 0, ep)) {
+            in_addr addr{};
+            addr.s_addr = ep.ipv4_be;
+            (void)::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_MULTICAST_IF,
+                               reinterpret_cast<const char*>(&addr), sizeof(addr));
+        }
+#if defined(IP_UNICAST_IF)
+        if (if_index != 0) {
+            DWORD idx_be = htonl(if_index);
+            (void)::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_UNICAST_IF,
+                               reinterpret_cast<const char*>(&idx_be), sizeof(idx_be));
+        }
+#endif
+    }
+    return true;
+}
+
 uint16_t UdpSocket::local_port() const {
     if (!is_open()) return 0;
     sockaddr_in sa{};

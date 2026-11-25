@@ -21,6 +21,7 @@
 #include "lanvid_c_api.h"
 #include "lanvid/lanvid_sdk.h"
 #include "net/discovery.hpp"
+#include "net/network_interfaces.hpp"
 #include "platform/audio_capture.hpp"
 #include "platform/camera_capture.hpp"
 #include "platform/screen_capture.hpp"
@@ -120,6 +121,9 @@ private:
     void apply_stream_mode();
     void draw_mobile_monitor_section();
     void draw_cameras_tally_intercom_section();
+    void draw_network_adapters_section(const char* id_prefix, bool compact);
+    void refresh_network_interfaces();
+    void apply_network_interfaces();
     void draw_grid_engine_section();
     void apply_engine_mode(int mode);
     bool start_grid_node();
@@ -150,7 +154,14 @@ private:
     std::vector<MidiDeviceInfo> midi_in_devs_;
     std::vector<MidiDeviceInfo> midi_out_devs_;
     std::vector<NetInterfaceInfo> ifaces_;
+    std::vector<NetworkInterfaceInfo> net_ifaces_;
     std::string local_lan_ip_ = "127.0.0.1";
+    double nic_pri_tx_mbps_ = 0.0;
+    double nic_sec_tx_mbps_ = 0.0;
+    uint64_t nic_prev_pri_bytes_ = 0;
+    uint64_t nic_prev_sec_bytes_ = 0;
+    uint64_t nic_rate_us_ = 0;
+    uint64_t nic_failover_pkts_ = 0;
 
     // Async LAN discovery state
     std::mutex disc_mu_;

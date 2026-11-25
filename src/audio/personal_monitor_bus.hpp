@@ -233,6 +233,15 @@ public:
     uint64_t dup_packets_tx() const { return dup_tx_pkts_.load(std::memory_order_relaxed); }
     uint64_t muted_packets_suppressed() const { return muted_suppressed_.load(std::memory_order_relaxed); }
 
+    // Physical NIC selection & Dual-NIC 1+1 Failover (Primary Ethernet + Secondary Wi-Fi/Ethernet)
+    bool set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
+    bool dual_nic_active() const { return sec_sock_active_.load(std::memory_order_acquire); }
+    uint64_t primary_tx_bytes() const { return pri_tx_bytes_.load(std::memory_order_relaxed); }
+    uint64_t secondary_tx_bytes() const { return sec_tx_bytes_.load(std::memory_order_relaxed); }
+    uint64_t failover_packets() const { return failover_pkts_.load(std::memory_order_relaxed); }
+    void set_primary_link_down(bool down) { primary_link_down_.store(down, std::memory_order_release); }
+    bool primary_link_down() const { return primary_link_down_.load(std::memory_order_acquire); }
+
     static constexpr uint32_t kPaceTickUs = 2500;   // pacer period (drops to 1000 us when 1+1 redundancy active)
     static constexpr uint32_t kPaceChunk = 120;     // frames per pacer step (2.5 ms @ 48 kHz)
     static constexpr uint32_t kPaceRingFrames = 16384;
@@ -308,7 +317,15 @@ private:
     std::atomic<uint64_t> flow_tx_pkts_{0};
     std::atomic<uint64_t> dup_tx_pkts_{0};
     std::atomic<uint64_t> muted_suppressed_{0};
+    std::atomic<uint64_t> pri_tx_bytes_{0};
+    std::atomic<uint64_t> sec_tx_bytes_{0};
+    std::atomic<uint64_t> failover_pkts_{0};
+    std::atomic<bool> sec_sock_active_{false};
+    std::atomic<bool> primary_link_down_{false};
+    std::string primary_nic_ip_;
+    std::string secondary_nic_ip_;
     UdpSocket sock_;
+    UdpSocket sec_sock_;
     UdpSocket disc_sock_;
     mutable std::mutex mu_;
     std::array<ClientSlot, kMaxMonitorClients> slots_{};
@@ -373,6 +390,11 @@ public:
     // Per-client Dante 1+1 Wi-Fi Redundancy (+1.5 ms backup copy negotiated in kHello + deterministic playout)
     void set_wifi_redundancy(bool enabled);
     bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
+
+    // Physical NIC selection (e.g. Wi-Fi en0/wlan0 + USB-C Ethernet en2/eth0 1+1)
+    bool set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
+    std::string primary_nic_ip() const { return primary_nic_ip_; }
+    std::string secondary_nic_ip() const { return secondary_nic_ip_; }
 
     MonitorDanteTelemetry dante_telemetry() const;
     uint64_t duplicates_recovered() const {
@@ -454,7 +476,11 @@ private:
     uint32_t sample_rate_ = 48000;
     uint32_t client_id_ = 0;
     std::atomic<bool> connected_{false};
+    std::string primary_nic_ip_;
+    std::string secondary_nic_ip_;
     UdpSocket sock_;
+    UdpSocket sec_sock_;
+    std::atomic<bool> sec_sock_active_{false};
     Endpoint server_ep_{};
     MasterClock mclock_;
     AudioSyncMatrix matrix_;

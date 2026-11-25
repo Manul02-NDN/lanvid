@@ -7,6 +7,7 @@
 
 #include "codec/dct.hpp"
 #include "common/clock.hpp"
+#include "net/network_interfaces.hpp"
 #include "net/packet.hpp"
 
 namespace lv {
@@ -37,7 +38,32 @@ UdpSender::UdpSender(const SenderConfig& cfg)
 bool UdpSender::init() {
     if (!Endpoint::parse(cfg_.dest_ip, cfg_.dest_port, dst_)) return false;
     if (!sock_.open()) return false;
+    primary_nic_ip_ = cfg_.bind_ip;
+    secondary_nic_ip_ = cfg_.secondary_bind_ip;
+
+    auto bind_sock_for_ip = [](UdpSocket& s, const std::string& ip, uint16_t port) -> bool {
+        if (ip.empty() || ip == "0.0.0.0" || ip == "auto") {
+            return s.bind("0.0.0.0", port);
+        }
+        NetworkInterfaceInfo info{};
+        const bool found = find_interface_by_ip(ip, info);
+        return s.bind_to_interface(ip, port, found ? info.if_index : 0u, found ? info.system_name : "");
+    };
+
+    if (!bind_sock_for_ip(sock_, primary_nic_ip_, cfg_.bind_port)) {
+        // Fallback to OS default route if configured NIC IP disappeared
+        if (!primary_nic_ip_.empty() && primary_nic_ip_ != "0.0.0.0") {
+            if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
+        } else {
+            return false;
+        }
+    }
+    sock_.set_buffer_sizes(std::max(cfg_.socket_buf_bytes, UdpSocket::kMinSocketBuffer), UdpSocket::kMinSocketBuffer);
+    sock_.set_low_latency_qos();  // DSCP EF (Wi-Fi WMM AC_VO) for audio / MIDI / clock sync
+    sock_.set_nonblocking(true);
+
     atx_ = std::make_unique<AudioTxEngine>(cfg_.audio_sample_rate, cfg_.mtu, [this](const uint8_t* d, size_t n) {
+        if (primary_link_down_.load(std::memory_order_acquire)) return false;
         return sock_.send_to_qos(d, n, dst_, QosTrafficClass::kAudio) == int(n);
     });
     atx_->set_latency_ms(cfg_.audio_latency_ms);
@@ -45,14 +71,78 @@ bool UdpSender::init() {
     atx_->set_epoch(stream_epoch_);
     atx_->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire));
     midi_tx_ = std::make_unique<MidiTxEngine>(
-        [this](const uint8_t* d, size_t n) { return sock_.send_to_qos(d, n, dst_, QosTrafficClass::kSyncControl) == int(n); },
+        [this](const uint8_t* d, size_t n) {
+            const bool pri_ok = !primary_link_down_.load(std::memory_order_acquire) &&
+                                sock_.send_to_qos(d, n, dst_, QosTrafficClass::kSyncControl) == int(n);
+            if (dual_nic_active_.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lk(nic_mu_);
+                if (sock_secondary_.is_open() &&
+                    sock_secondary_.send_to_qos(d, n, dst_, QosTrafficClass::kSyncControl) == int(n)) {
+                    sec_pkts_sent_.fetch_add(1, std::memory_order_relaxed);
+                    sec_bytes_sent_.fetch_add(n, std::memory_order_relaxed);
+                    if (!pri_ok) {
+                        failover_pkts_.fetch_add(1, std::memory_order_relaxed);
+                        return true;
+                    }
+                }
+            }
+            return pri_ok;
+        },
         stream_epoch_);
-    if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
-    sock_.set_buffer_sizes(std::max(cfg_.socket_buf_bytes, UdpSocket::kMinSocketBuffer), UdpSocket::kMinSocketBuffer);
-    sock_.set_low_latency_qos();  // DSCP EF (Wi-Fi WMM AC_VO) for audio / MIDI / clock sync
-    sock_.set_nonblocking(true);
+
+    if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
+        set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
+    }
+
     last_pace_us_ = now_us();
     tokens_bytes_ = 64.0 * 1024.0;
+    return true;
+}
+
+bool UdpSender::set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip) {
+    std::lock_guard<std::mutex> lk(nic_mu_);
+    primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
+    secondary_nic_ip_ = (secondary_ip == "auto" || secondary_ip == "0.0.0.0") ? std::string() : secondary_ip;
+    cfg_.bind_ip = primary_nic_ip_;
+    cfg_.secondary_bind_ip = secondary_nic_ip_;
+
+    sock_secondary_.close();
+    dual_nic_active_.store(false, std::memory_order_release);
+
+    if (atx_) {
+        atx_->set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
+        atx_->set_secondary_send(nullptr);
+    }
+
+    if (!secondary_nic_ip_.empty()) {
+        if (sock_secondary_.open()) {
+            NetworkInterfaceInfo info{};
+            const bool found = find_interface_by_ip(secondary_nic_ip_, info);
+            if (sock_secondary_.bind_to_interface(secondary_nic_ip_, 0, found ? info.if_index : 0u,
+                                                  found ? info.system_name : "")) {
+                sock_secondary_.set_buffer_sizes(std::max(cfg_.socket_buf_bytes / 2, UdpSocket::kMinSocketBuffer),
+                                                 UdpSocket::kMinSocketBuffer);
+                sock_secondary_.set_low_latency_qos();
+                sock_secondary_.set_nonblocking(true);
+                dual_nic_active_.store(true, std::memory_order_release);
+                if (atx_) {
+                    atx_->set_secondary_send([this](const uint8_t* d, size_t n) {
+                        std::lock_guard<std::mutex> slk(nic_mu_);
+                        if (!sock_secondary_.is_open()) return false;
+                        const bool ok = sock_secondary_.send_to_qos(d, n, dst_, QosTrafficClass::kAudio) == int(n);
+                        if (ok) {
+                            sec_pkts_sent_.fetch_add(1, std::memory_order_relaxed);
+                            sec_bytes_sent_.fetch_add(n, std::memory_order_relaxed);
+                        }
+                        return ok;
+                    });
+                }
+                return true;
+            }
+            sock_secondary_.close();
+        }
+        return false;
+    }
     return true;
 }
 
@@ -112,7 +202,23 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
         auto flush_batch = [&]() {
             if (count == 0) return;
             // Video traffic tagged DSCP AF41 (WMM AC_VI) so camera/screen bursts never delay EF/CS7 audio & sync!
-            const int sent = sock_.send_batch_qos(views, count, dst_, QosTrafficClass::kVideo);
+            int sent = primary_link_down_.load(std::memory_order_acquire)
+                           ? 0
+                           : sock_.send_batch_qos(views, count, dst_, QosTrafficClass::kVideo);
+            if (sent < count && dual_nic_active_.load(std::memory_order_acquire)) {
+                std::lock_guard<std::mutex> lk(nic_mu_);
+                if (sock_secondary_.is_open()) {
+                    const int s2 = sock_secondary_.send_batch_qos(views, count, dst_, QosTrafficClass::kVideo);
+                    if (s2 > 0) {
+                        sec_pkts_sent_.fetch_add(uint64_t(s2), std::memory_order_relaxed);
+                        failover_pkts_.fetch_add(uint64_t(s2), std::memory_order_relaxed);
+                        size_t b2 = 0;
+                        for (int i = 0; i < s2; ++i) b2 += views[i].len;
+                        sec_bytes_sent_.fetch_add(b2, std::memory_order_relaxed);
+                        if (sent <= 0) sent = s2;
+                    }
+                }
+            }
             if (sent > 0) {
                 packets_sent_.fetch_add(uint64_t(sent), std::memory_order_relaxed);
                 size_t ok_bytes = 0;

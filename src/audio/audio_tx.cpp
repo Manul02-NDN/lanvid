@@ -290,10 +290,28 @@ void AudioTxEngine::set_wifi_redundancy(bool enabled, uint32_t stagger_us) {
 void AudioTxEngine::set_secondary_send(SendFn secondary_send) {
     std::lock_guard<std::mutex> lk(dup_mu_);
     secondary_send_ = std::move(secondary_send);
+    has_secondary_send_.store(static_cast<bool>(secondary_send_), std::memory_order_release);
+}
+
+void AudioTxEngine::set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip) {
+    std::lock_guard<std::mutex> lk(dup_mu_);
+    primary_nic_ip_ = primary_ip;
+    secondary_nic_ip_ = secondary_ip;
+}
+
+std::string AudioTxEngine::primary_nic_ip() const {
+    std::lock_guard<std::mutex> lk(dup_mu_);
+    return primary_nic_ip_;
+}
+
+std::string AudioTxEngine::secondary_nic_ip() const {
+    std::lock_guard<std::mutex> lk(dup_mu_);
+    return secondary_nic_ip_;
 }
 
 void AudioTxEngine::queue_staggered_duplicate(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
-                                              const uint8_t* payload, size_t len) {
+                                              const uint8_t* payload, size_t len, bool force_immediate,
+                                              bool is_failover) {
     uint8_t buf[kMaxDatagram > 4096 ? 4096 : kMaxDatagram];
     if (kPacketHeaderSize + len > sizeof(buf)) return;
     PacketHeader h;
@@ -307,17 +325,26 @@ void AudioTxEngine::queue_staggered_duplicate(uint32_t seq, uint16_t stream, uin
     const size_t n = write_packet(buf, sizeof(buf), h, payload, len);
     if (!n) return;
 
-    const uint32_t stagger = dup_stagger_us_.load(std::memory_order_relaxed);
+    const bool has_sec = has_secondary_send_.load(std::memory_order_acquire);
+    const uint32_t stagger = (force_immediate || has_sec) ? 0u : dup_stagger_us_.load(std::memory_order_relaxed);
     if (stagger == 0) {
         SendFn fn;
+        bool used_sec = false;
         {
             std::lock_guard<std::mutex> lk(dup_mu_);
-            fn = secondary_send_ ? secondary_send_ : send_;
+            if (secondary_send_) {
+                fn = secondary_send_;
+                used_sec = true;
+            } else {
+                fn = send_;
+            }
         }
         if (fn && fn(buf, n)) {
             packets_sent_.fetch_add(1, std::memory_order_relaxed);
             bytes_sent_.fetch_add(n, std::memory_order_relaxed);
             duplicates_.fetch_add(1, std::memory_order_relaxed);
+            if (used_sec) secondary_pkts_.fetch_add(1, std::memory_order_relaxed);
+            if (is_failover) failover_pkts_.fetch_add(1, std::memory_order_relaxed);
         }
         return;
     }
@@ -331,13 +358,20 @@ void AudioTxEngine::queue_staggered_duplicate(uint32_t seq, uint16_t stream, uin
 }
 
 void AudioTxEngine::service_redundancy(uint32_t now_wallclock_us) {
-    if (!wifi_redundancy_.load(std::memory_order_acquire)) return;
+    if (!wifi_redundancy_.load(std::memory_order_acquire) && !has_secondary_send_.load(std::memory_order_acquire))
+        return;
     std::vector<std::vector<uint8_t>> due;
     SendFn fn;
+    bool used_sec = false;
     {
         std::lock_guard<std::mutex> lk(dup_mu_);
         if (pending_dups_.empty()) return;
-        fn = secondary_send_ ? secondary_send_ : send_;
+        if (secondary_send_) {
+            fn = secondary_send_;
+            used_sec = true;
+        } else {
+            fn = send_;
+        }
         while (!pending_dups_.empty() &&
                int32_t(now_wallclock_us - pending_dups_.front().due_wc_us) >= 0) {
             due.push_back(std::move(pending_dups_.front().dgram));
@@ -350,6 +384,7 @@ void AudioTxEngine::service_redundancy(uint32_t now_wallclock_us) {
             packets_sent_.fetch_add(1, std::memory_order_relaxed);
             bytes_sent_.fetch_add(dg.size(), std::memory_order_relaxed);
             duplicates_.fetch_add(1, std::memory_order_relaxed);
+            if (used_sec) secondary_pkts_.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
@@ -380,10 +415,10 @@ void AudioTxEngine::reconfigure(Stream& s, const AudioReliabilityProfile& prof) 
     s.block_count = 0;
 }
 
-void AudioTxEngine::send_payload(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
+bool AudioTxEngine::send_payload(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
                                  const uint8_t* payload, size_t len) {
     uint8_t buf[kMaxDatagram > 4096 ? 4096 : kMaxDatagram];
-    if (kPacketHeaderSize + len > sizeof(buf)) return;
+    if (kPacketHeaderSize + len > sizeof(buf)) return false;
     PacketHeader h;
     h.type = PacketType::kAudio2;
     h.flags = kFlagHasCrc;
@@ -397,7 +432,9 @@ void AudioTxEngine::send_payload(uint32_t seq, uint16_t stream, uint32_t wallclo
         packets_sent_.fetch_add(1, std::memory_order_relaxed);
         bytes_sent_.fetch_add(n, std::memory_order_relaxed);
         win_sent_.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
+    return false;
 }
 
 void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, uint32_t n,
@@ -457,19 +494,22 @@ void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, ui
     s.hist_seq[slot] = seq;
     s.hist_valid[slot] = 1;
 
-    send_payload(seq, ch, wallclock_us, payload.data(), payload.size());
-    if (wifi_redundancy_.load(std::memory_order_acquire)) {
+    const bool pri_ok = send_payload(seq, ch, wallclock_us, payload.data(), payload.size());
+    const bool has_sec = has_secondary_send_.load(std::memory_order_acquire);
+    if (wifi_redundancy_.load(std::memory_order_acquire) || has_sec) {
         payload[11] |= kAudioFlagDuplicate;
-        queue_staggered_duplicate(seq, ch, wallclock_us, payload.data(), payload.size());
+        queue_staggered_duplicate(seq, ch, wallclock_us, payload.data(), payload.size(),
+                                  /*force_immediate=*/!pri_ok || has_sec,
+                                  /*is_failover=*/!pri_ok && has_sec);
     } else if (prof.allow_duplication && dup_active_.load(std::memory_order_relaxed)) {
         payload[11] |= kAudioFlagDuplicate;
         send_payload(seq, ch, wallclock_us, payload.data(), payload.size());
         duplicates_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // ---- interleaved XOR FEC (skipped when 1+1 Wi-Fi Redundancy already duplicates every packet) ----
+    // ---- interleaved XOR FEC (skipped when 1+1 Redundancy or Dual-NIC already duplicates every packet) ----
     const uint32_t k = prof.fec_k, d = prof.fec_interleave;
-    if (k == 0 || wifi_redundancy_.load(std::memory_order_relaxed)) return;
+    if (k == 0 || wifi_redundancy_.load(std::memory_order_relaxed) || has_sec) return;
     // Contiguity: members must be equal-sized (and same wire format), back to back in media time.
     if (s.block_count > 0 && (n != s.last_n || ts != s.last_ts + s.last_n ||
                               s.parity[0].size() != body)) {
@@ -656,6 +696,8 @@ AudioTxStats AudioTxEngine::stats() const {
     st.parity_sent = parity_sent_.load(std::memory_order_relaxed);
     st.retransmits = retransmits_.load(std::memory_order_relaxed);
     st.duplicates = duplicates_.load(std::memory_order_relaxed);
+    st.secondary_packets = secondary_pkts_.load(std::memory_order_relaxed);
+    st.failover_packets = failover_pkts_.load(std::memory_order_relaxed);
     st.nacks_received = nacks_rx_.load(std::memory_order_relaxed);
     st.nack_misses = nack_miss_.load(std::memory_order_relaxed);
     for (const auto& s : streams_) if (s) ++st.active_streams;
