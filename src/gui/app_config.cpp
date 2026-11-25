@@ -298,6 +298,14 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "matrix_stereo_pairs", cfg.matrix_stereo_pairs);
     read_bool(j, "sync_settings", cfg.sync_settings);
     read_bool(j, "sync_matrix_routing", cfg.sync_matrix_routing);
+    read_int(j, "network_engine_mode", cfg.network_engine_mode);
+    cfg.network_engine_mode = std::clamp(cfg.network_engine_mode, 0, 2);
+    read_str(j, "grid_nic_name", cfg.grid_nic_name);
+    read_bool(j, "grid_vlan_enabled", cfg.grid_vlan_enabled);
+    read_int(j, "grid_vlan_id", cfg.grid_vlan_id);
+    read_int(j, "grid_vlan_pcp", cfg.grid_vlan_pcp);
+    read_int(j, "grid_channels", cfg.grid_channels);
+    read_bool(j, "grid_clock_master", cfg.grid_clock_master);
     read_int(j, "matrix_buffer_size", cfg.matrix_buffer_size);
     read_bool(j, "matrix_feedback_guard", cfg.matrix_feedback_guard);
     {
@@ -394,6 +402,13 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"matrix_stereo_pairs\": " << (cfg.matrix_stereo_pairs ? "true" : "false") << ",\n"
         << "  \"sync_settings\": " << (cfg.sync_settings ? "true" : "false") << ",\n"
         << "  \"sync_matrix_routing\": " << (cfg.sync_matrix_routing ? "true" : "false") << ",\n"
+        << "  \"network_engine_mode\": " << cfg.network_engine_mode << ",\n"
+        << "  \"grid_nic_name\": \"" << json_esc(cfg.grid_nic_name) << "\",\n"
+        << "  \"grid_vlan_enabled\": " << (cfg.grid_vlan_enabled ? "true" : "false") << ",\n"
+        << "  \"grid_vlan_id\": " << cfg.grid_vlan_id << ",\n"
+        << "  \"grid_vlan_pcp\": " << cfg.grid_vlan_pcp << ",\n"
+        << "  \"grid_channels\": " << cfg.grid_channels << ",\n"
+        << "  \"grid_clock_master\": " << (cfg.grid_clock_master ? "true" : "false") << ",\n"
         << "  \"matrix_buffer_size\": " << cfg.matrix_buffer_size << ",\n"
         << "  \"matrix_feedback_guard\": " << (cfg.matrix_feedback_guard ? "true" : "false") << ",\n"
         << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"

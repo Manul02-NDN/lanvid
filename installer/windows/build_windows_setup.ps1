@@ -18,6 +18,7 @@ $files = @(
     (Join-Path $buildDir "lanvid_core.dll"),
     (Join-Path $buildDir "sender.exe"),
     (Join-Path $buildDir "receiver.exe"),
+    (Join-Path $buildDir "lanvid_dsp_server.exe"),
     (Join-Path $buildDir "LanVidASIO.dll"),
     (Join-Path $winDir "preflight.ps1")
 )

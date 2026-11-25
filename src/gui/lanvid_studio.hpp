@@ -11,6 +11,8 @@
 #include "audio/intercom_engine.hpp"
 #include "audio/multi_device_matrix.hpp"
 #include "audio/personal_monitor_bus.hpp"
+#include "grid/dsp_server.hpp"
+#include "grid/grid_node.hpp"
 #include "net/mdns_advertiser.hpp"
 #include "audio/shm_audio_host.hpp"
 #include "midi/midi_device_manager.hpp"
@@ -118,6 +120,10 @@ private:
     void apply_stream_mode();
     void draw_mobile_monitor_section();
     void draw_cameras_tally_intercom_section();
+    void draw_grid_engine_section();
+    void apply_engine_mode(int mode);
+    bool start_grid_node();
+    void stop_grid_node();
     void draw_actual_buffer_line();
     void apply_latency_mode();
     void poll_latency_telemetry(uint64_t now);
@@ -262,6 +268,14 @@ private:
 
     // Real-time bidirectional settings sync (anti-loop / echo guard)
     uint32_t sync_origin_id_ = 0;
+
+    // LanVid Grid Layer 2 Ethernet (256ch) engine state (coexists cleanly with Classic UDP/L3)
+    std::vector<lv::grid::L2AdapterInfo> grid_adapters_;
+    std::string grid_backend_status_;
+    std::string grid_last_err_;
+    std::unique_ptr<lv::grid::GridNode> grid_node_;
+    uint64_t grid_clock_sample_ = 0;
+    uint64_t grid_last_sync_us_ = 0;
     uint64_t local_sync_revision_ = 0;
     uint64_t last_applied_remote_revision_ = 0;
     bool applying_remote_sync_ = false;

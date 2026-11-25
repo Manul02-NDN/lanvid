@@ -66,6 +66,16 @@ struct AppConfig {
     bool sync_settings = true;        // real-time bidirectional settings sync across connected peers
     bool sync_matrix_routing = false; // also sync matrix routing presets across peers
 
+    // Dual-Engine Architecture: 0 = Classic (UDP/IP Layer 3, default), 1 = Grid (Layer 2 Ethernet 256ch),
+    // 2 = Hybrid (Grid L2 studio backbone + Classic L3 Wi-Fi/Mobile bridge)
+    int network_engine_mode = 0;
+    std::string grid_nic_name;        // Selected Ethernet adapter name for Layer 2
+    bool grid_vlan_enabled = false;   // IEEE 802.1Q / 802.1p QoS tagging
+    int grid_vlan_id = 0;             // 0..4094
+    int grid_vlan_pcp = 6;            // 0..7 (6 = Voice/Audio priority)
+    int grid_channels = 256;          // 64 / 128 / 256 channels in Grid L2 mode
+    bool grid_clock_master = true;    // Whether this node broadcasts L2 Clock Master sync pulses
+
     // Multi-Device Audio Matrix persistence
     int matrix_buffer_size = 256;
     bool matrix_feedback_guard = true;

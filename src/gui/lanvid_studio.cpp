@@ -623,10 +623,18 @@ void LanVidStudioApp::init() {
                              {"ch", std::to_string(cfg_.aoip_channels)}});
     }
 
+    // Enumerate Layer 2 Ethernet adapters for LanVid Grid (256ch) — never disturbs Classic UDP/L3!
+    grid_adapters_ = lv::grid::list_l2_adapters();
+    lv::grid::l2_native_backend_available(&grid_backend_status_);
+    if (cfg_.network_engine_mode != 0) {
+        start_grid_node();
+    }
+
     start_lan_scan();
 }
 
 void LanVidStudioApp::shutdown() {
+    stop_grid_node();
     monitor_mdns_.stop();
     monitor_server_.stop();
     tally_intercom_.stop();
@@ -3019,7 +3027,9 @@ void LanVidStudioApp::draw_top_bar() {
     ImGui::SameLine();
 
     // Human-friendly interactive live status banner
-    const bool any_live = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running();
+    const bool grid_active = (cfg_.network_engine_mode != 0) && grid_node_ && grid_node_->is_open();
+    const bool any_live = sender_running_ || receiver_running_ || duplex_running_ || audio_matrix_.is_running() ||
+                          grid_active;
     const bool has_routes = !audio_matrix_.crosspoints().empty() || !audio_matrix_.midi_crosspoints().empty();
     const char* target_ip = (cfg_.connect_role == 2) ? dpx_peer_buf_ : ip_buf_;
     const int lat_disp = actual_buf_valid_ ? int(std::round(actual_buf_ms_)) : cfg_.aoip_latency_ms;
@@ -3027,13 +3037,21 @@ void LanVidStudioApp::draw_top_bar() {
 
     char banner[256];
     ImVec4 banner_col = kColTextMain;
-    if (!has_routes) {
+    if (cfg_.network_engine_mode == 1) {
+        std::snprintf(banner, sizeof(banner),
+                      "LanVid Grid L2 (%dch Ethernet · 0x88B6)  ·  %s",
+                      cfg_.grid_channels,
+                      grid_active ? ("MAC " + grid_node_->mac().to_string()).c_str()
+                                  : grid_backend_status_.c_str());
+        banner_col = grid_active ? kColGreen : kColAmber;
+    } else if (!has_routes) {
         std::snprintf(banner, sizeof(banner),
                       "Підказка: оберіть навушники у «Пристрої» або увімкніть пресет маршрутизації у «Маршрути»");
         banner_col = kColAmber;
     } else if (any_live) {
         std::snprintf(banner, sizeof(banner),
-                      "Працює: %d каналів%s -> %s (Затримка %d мс · %s)",
+                      "%s: %d каналів%s -> %s (Затримка %d мс · %s)",
+                      cfg_.network_engine_mode == 2 ? "Hybrid L2+L3" : "Працює",
                       cfg_.aoip_channels, has_midi ? " + MIDI" : "", target_ip, lat_disp,
                       cfg_.adaptive_jitter ? "Авто Wi-Fi" : "Фіксована");
         banner_col = kColGreen;
@@ -3045,42 +3063,33 @@ void LanVidStudioApp::draw_top_bar() {
 
     ImGui::BeginGroup();
     ImGui::TextColored(banner_col, "%s", banner);
-    ImGui::TextDisabled("Ваш IP у локальній мережі: %s  ·  48 кГц  ·  %s",
-                        local_lan_ip_.c_str(), cfg_.audio_only ? "Лише звук" : "Звук + Відео");
+    ImGui::TextDisabled("IP: %s  ·  48 кГц  ·  Рушій: %s",
+                        local_lan_ip_.c_str(),
+                        cfg_.network_engine_mode == 0 ? "Classic (UDP/Wi-Fi)"
+                                                      : (cfg_.network_engine_mode == 1 ? "Grid (L2 256ch)" : "Hybrid (L2+L3)"));
     ImGui::EndGroup();
 
-    // Live status pill + real-time "Synced" badge on right side
+    // Quick 1-click Engine Switcher (Classic UDP <-> Grid L2 <-> Hybrid) in Top Bar
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 14.0f, ImGui::GetWindowWidth() - 420.0f));
+    if (status_pill_button("Classic UDP", cfg_.network_engine_mode == 0, ImVec2(92.0f, 28.0f))) {
+        apply_engine_mode(0);
+    }
+    ImGui::SameLine(0.0f, 4.0f);
+    if (status_pill_button("Grid L2", cfg_.network_engine_mode == 1, ImVec2(72.0f, 28.0f))) {
+        apply_engine_mode(1);
+    }
+    ImGui::SameLine(0.0f, 4.0f);
+    if (status_pill_button("Hybrid", cfg_.network_engine_mode == 2, ImVec2(66.0f, 28.0f))) {
+        apply_engine_mode(2);
+    }
+    ImGui::SameLine(0.0f, 10.0f);
+
+    // Live status pill on far right
     const char* badge = any_live ? "● Активно" : "● Готово";
     const ImVec2 tsz = ImGui::CalcTextSize(badge);
     const float pill_w = tsz.x + 24.0f;
     const float pill_h = 28.0f;
-
-    const bool show_synced = cfg_.sync_settings && any_live && last_synced_us_ > 0;
-    char sync_lbl[64] = {};
-    float sync_w = 0.0f;
-    if (show_synced) {
-        if (cfg_.audio_bitrate_kbps > 0) {
-            std::snprintf(sync_lbl, sizeof(sync_lbl), "Synced · %d kbps / %d ch", cfg_.audio_bitrate_kbps, cfg_.aoip_channels);
-        } else {
-            std::snprintf(sync_lbl, sizeof(sync_lbl), "Synced · Lossless / %d ch", cfg_.aoip_channels);
-        }
-        sync_w = ImGui::CalcTextSize(sync_lbl).x + 22.0f;
-    }
-
-    const float right_block_w = pill_w + (show_synced ? (sync_w + 8.0f) : 0.0f);
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f, ImGui::GetWindowWidth() - right_block_w - 16.0f));
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    if (show_synced) {
-        const ImVec2 sp0 = ImGui::GetCursorScreenPos();
-        const ImVec2 sp1(sp0.x + sync_w, sp0.y + pill_h);
-        dl->AddRectFilled(sp0, sp1, IM_COL32(16, 185, 129, 28), pill_h * 0.5f);
-        dl->AddRect(sp0, sp1, IM_COL32(16, 185, 129, 135), pill_h * 0.5f, 0, 1.0f);
-        const ImVec2 ssz = ImGui::CalcTextSize(sync_lbl);
-        dl->AddText(ImVec2(sp0.x + 11.0f, sp0.y + (pill_h - ssz.y) * 0.5f),
-                    ImGui::ColorConvertFloat4ToU32(kColGreen), sync_lbl);
-        ImGui::Dummy(ImVec2(sync_w, pill_h));
-        ImGui::SameLine(0.0f, 8.0f);
-    }
 
     const ImVec2 pp0 = ImGui::GetCursorScreenPos();
     const ImVec2 pp1(pp0.x + pill_w, pp0.y + pill_h);
@@ -4527,12 +4536,178 @@ void LanVidStudioApp::draw_settings_tab() {
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
+    draw_grid_engine_section();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
     ImGui::TextColored(kColAccentPurp, "Про програму");
     ImGui::TextColored(kColTextMain, "LanVid Studio v%s", LANVID_VERSION_STRING);
-    ImGui::TextDisabled("Opus CELT 48 kHz · MIDI2 Virtual DAW Port · Personal Monitor Bus · Soft Lavender UI");
+    ImGui::TextDisabled("Classic UDP/Opus + LanVid Grid L2 (256ch · 0x88B6 · DSP Server) · Soft Lavender UI");
     ImGui::EndGroup();
 
     end_glass_card();
+}
+
+void LanVidStudioApp::apply_engine_mode(int mode) {
+    mode = std::clamp(mode, 0, 2);
+    if (cfg_.network_engine_mode == mode) return;
+    cfg_.network_engine_mode = mode;
+    config_dirty_ = true;
+    if (mode == 0) {
+        stop_grid_node();
+        toast_msg_ = "Режим рушія: Classic (UDP / IP Layer 3 · Wi-Fi сумісний)";
+    } else {
+        const bool ok = start_grid_node();
+        toast_msg_ = (mode == 1 ? "Режим рушія: LanVid Grid (Layer 2 Ethernet · 256ch)"
+                                : "Режим рушія: Hybrid (Grid L2 Ethernet + Classic UDP Bridge)") +
+                     std::string(ok ? " — Активний" : (" — " + grid_last_err_));
+    }
+    toast_until_us_ = now_us() + 3000000ull;
+}
+
+bool LanVidStudioApp::start_grid_node() {
+    stop_grid_node();
+    grid_adapters_ = lv::grid::list_l2_adapters();
+    lv::grid::l2_native_backend_available(&grid_backend_status_);
+
+    lv::grid::L2AdapterInfo chosen{};
+    bool found = false;
+    for (const auto& a : grid_adapters_) {
+        if (!cfg_.grid_nic_name.empty() && a.device_name == cfg_.grid_nic_name) {
+            chosen = a;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        for (const auto& a : grid_adapters_) {
+            if (a.is_ethernet && a.link_up) { chosen = a; found = true; break; }
+        }
+    }
+    if (!found && !grid_adapters_.empty()) {
+        chosen = grid_adapters_.front();
+        found = true;
+    }
+    if (!found) {
+        grid_last_err_ = "Не знайдено Ethernet-адаптера";
+        return false;
+    }
+    cfg_.grid_nic_name = chosen.device_name;
+
+    std::string err;
+    auto transport = lv::grid::create_native_l2_transport(chosen, &err);
+    if (!transport) {
+        grid_last_err_ = err.empty() ? grid_backend_status_ : err;
+        return false;
+    }
+
+    lv::grid::GridNodeConfig gcfg{};
+    gcfg.node_name = "LanVid Studio (" + local_host_name() + ")";
+    gcfg.role = lv::grid::GridNodeRole::kStudioHost;
+    gcfg.max_channels = uint16_t(std::clamp(cfg_.grid_channels, 64, 256));
+    gcfg.sample_rate = 48000;
+    gcfg.vlan = {cfg_.grid_vlan_enabled, uint16_t(std::clamp(cfg_.grid_vlan_id, 0, 4094)),
+                 uint8_t(std::clamp(cfg_.grid_vlan_pcp, 0, 7))};
+    gcfg.clock_master = cfg_.grid_clock_master;
+
+    grid_node_ = std::make_unique<lv::grid::GridNode>(std::move(transport), gcfg);
+    grid_node_->broadcast_discovery_probe();
+    grid_last_err_.clear();
+    return true;
+}
+
+void LanVidStudioApp::stop_grid_node() {
+    grid_node_.reset();
+}
+
+void LanVidStudioApp::draw_grid_engine_section() {
+    ImGui::TextColored(kColAccentPurp, "5. Мережевий рушій: Classic (UDP) ↔ LanVid Grid (Layer 2 · 256ch)");
+    ImGui::TextDisabled("Повна сумісність: стара система (UDP/Wi-Fi) працює без змін, перемикання в 1 клік");
+    ImGui::Spacing();
+
+    if (status_pill_button("Classic (UDP/Wi-Fi)", cfg_.network_engine_mode == 0, ImVec2(0, 30))) apply_engine_mode(0);
+    ImGui::SameLine(0.0f, 6.0f);
+    if (status_pill_button("Grid (L2 Ethernet · 256ch)", cfg_.network_engine_mode == 1, ImVec2(0, 30))) apply_engine_mode(1);
+    ImGui::SameLine(0.0f, 6.0f);
+    if (status_pill_button("Hybrid (L2 + L3 Bridge)", cfg_.network_engine_mode == 2, ImVec2(0, 30))) apply_engine_mode(2);
+
+    if (cfg_.network_engine_mode != 0) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("L2 Backend: %s", grid_backend_status_.c_str());
+        if (!grid_last_err_.empty()) {
+            ImGui::TextColored(kColAmber, "Статус L2: %s", grid_last_err_.c_str());
+        }
+
+        // Adapter picker
+        std::string cur_nic = "Оберіть Ethernet-карту";
+        for (const auto& a : grid_adapters_) {
+            if (a.device_name == cfg_.grid_nic_name) {
+                cur_nic = a.friendly_name + " (" + a.mac.to_string() + ")";
+                break;
+            }
+        }
+        ImGui::SetNextItemWidth(300.0f);
+        if (ImGui::BeginCombo("NIC (Layer 2)", cur_nic.c_str())) {
+            for (const auto& a : grid_adapters_) {
+                const std::string lbl = a.friendly_name + " [" + a.mac.to_string() + "]";
+                if (ImGui::Selectable(lbl.c_str(), a.device_name == cfg_.grid_nic_name)) {
+                    cfg_.grid_nic_name = a.device_name;
+                    config_dirty_ = true;
+                    start_grid_node();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Сканувати L2")) {
+            if (!grid_node_) start_grid_node();
+            if (grid_node_) grid_node_->broadcast_discovery_probe();
+        }
+
+        // Channel count (64 / 128 / 256)
+        ImGui::TextDisabled("Канали Grid L2:");
+        for (int ch : {64, 128, 256}) {
+            ImGui::SameLine(0.0f, 6.0f);
+            char lb[24];
+            std::snprintf(lb, sizeof(lb), "%d ch", ch);
+            if (status_pill_button(lb, cfg_.grid_channels == ch, ImVec2(64, 24))) {
+                cfg_.grid_channels = ch;
+                config_dirty_ = true;
+            }
+        }
+
+        if (ImGui::Checkbox("L2 Clock Master (синхроімпульс 1 мс)", &cfg_.grid_clock_master)) {
+            config_dirty_ = true;
+            if (grid_node_) grid_node_->set_clock_master(cfg_.grid_clock_master);
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("802.1Q / 802.1p QoS (PCP=6)", &cfg_.grid_vlan_enabled)) {
+            config_dirty_ = true;
+            if (grid_node_) {
+                grid_node_->set_vlan_qos({cfg_.grid_vlan_enabled, uint16_t(cfg_.grid_vlan_id),
+                                          uint8_t(cfg_.grid_vlan_pcp)});
+            }
+        }
+
+        if (grid_node_ && grid_node_->is_open()) {
+            const auto peers = grid_node_->discovered_nodes();
+            const auto clk = grid_node_->clock_status();
+            ImGui::TextColored(kColGreen, "● Grid L2 Активний (MAC %s) · Clock: %s · Знайдено L2-вузлів: %zu",
+                               grid_node_->mac().to_string().c_str(),
+                               clk.is_master ? "MASTER" : (clk.locked ? "LOCKED" : "FREE"),
+                               peers.size());
+            for (const auto& p : peers) {
+                const char* r = (p.role == lv::grid::GridNodeRole::kDspServer) ? "DSP Server"
+                              : (p.role == lv::grid::GridNodeRole::kDawDriver) ? "DAW Driver"
+                              : (p.role == lv::grid::GridNodeRole::kStageboxIo) ? "Stagebox"
+                                                                                : "Studio Host";
+                ImGui::TextDisabled("  • %s [%s] · %s · %u ch · CPU %.1f%%",
+                                    p.name.c_str(), p.mac.to_string().c_str(), r,
+                                    unsigned(p.max_channels), p.cpu_load_pct);
+            }
+        }
+    }
 }
 
 void LanVidStudioApp::draw_patchbay_tab() {
@@ -5224,6 +5399,15 @@ void LanVidStudioApp::draw_patchbay_tab() {
 void LanVidStudioApp::render_frame() {
     if (monitor_server_.is_running()) monitor_server_.poll_control();
     if (tally_intercom_.is_running()) tally_intercom_.poll();
+    if (grid_node_ && grid_node_->is_open()) {
+        grid_node_->poll(128);
+        const uint64_t now = now_us();
+        if (cfg_.grid_clock_master && (now - grid_last_sync_us_) >= 10000ull) {
+            grid_clock_sample_ += 480;
+            grid_node_->emit_clock_sync(grid_clock_sample_);
+            grid_last_sync_us_ = now;
+        }
+    }
     poll_telemetry_and_frames();
 
     // Global hotkeys (F11 fullscreen toggle, ESC exit fullscreen)

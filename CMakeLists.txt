@@ -121,6 +121,10 @@ set(LV_CORE_SOURCES
   src/midi/midi_sync_engine.cpp
   src/midi/midi_dejitter_queue.cpp
   src/midi/midi_device_manager.cpp
+  src/grid/l2_protocol.cpp
+  src/grid/l2_transport.cpp
+  src/grid/grid_node.cpp
+  src/grid/dsp_server.cpp
 )
 
 # Desktop-only: LanVidAudioBus_v1 shared-memory bridge to the OS virtual audio devices
@@ -391,6 +395,10 @@ if(LANVID_BUILD_CLI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
   add_executable(receiver src/app/receiver_main.cpp)
   target_link_libraries(receiver PRIVATE lanvid_core)
   lanvid_set_flags(receiver)
+
+  add_executable(lanvid_dsp_server src/app/dsp_server_main.cpp)
+  target_link_libraries(lanvid_dsp_server PRIVATE lanvid_core)
+  lanvid_set_flags(lanvid_dsp_server)
 endif()
 
 # ---------------------------------------------------------------- tests & benchmark
@@ -469,6 +477,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_rate_integrity.cpp
     tests/test_audio_only_toggle.cpp
     tests/test_monitor_mobile.cpp
+    tests/test_lanvid_grid_l2.cpp
     src/gui/app_config.cpp
   )
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
