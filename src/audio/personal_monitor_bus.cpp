@@ -746,14 +746,17 @@ void PersonalMonitorServer::pace_tick_locked(double dt_us) {
             s.primed = true;
             s.credit = 0.0;
         }
-        s.credit = std::min(s.credit + dt_us * per_us, double(4 * kPaceChunk));
+        // Above the high-water mark (the pacer was starved) drain 2 % faster instead of firing an extra packet
+        // ahead of its slot: a packet that leaves early looks like a shorter network delay to the phone's
+        // minimum-delay clock filter and would pull its playout deadline towards the data edge.
+        const double speed = (fill > high_water) ? 1.02 : 1.0;
+        s.credit = std::min(s.credit + dt_us * per_us * speed, double(4 * kPaceChunk));
         uint32_t steps = 0;
         while (s.credit >= double(kPaceChunk) && fill >= kPaceChunk) {
             s.credit -= double(kPaceChunk);
             fill -= kPaceChunk;
             ++steps;
         }
-        if (fill > high_water) ++steps, fill -= kPaceChunk;
 
         const bool use_flow = use_flow_global && s.client_supports_flow;
         const uint8_t fch = (cfg_flow_ch > 2 && !s.flow_rings[0].empty()) ? cfg_flow_ch : uint8_t(2);
@@ -1565,6 +1568,8 @@ void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t n
         flow_ow_win_n_ = 0;
         flow_ow_win_start_ = now;
         flow_ow_applied_ = d;
+        flow_ow_slewed_ = d;
+        flow_ow_last_us_ = now;
         flow_ow_samples_ = 1;
         flow_ow_jitter_ema_ = 0.0;
         clock_locked_.store(false, std::memory_order_relaxed);
@@ -1589,9 +1594,15 @@ void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t n
     if (flow_ow_samples_ >= 8) {
         clock_locked_.store(true, std::memory_order_relaxed);
     }
-    if (std::fabs(est - flow_ow_applied_) >= 20.0) {
-        flow_ow_applied_ = est;
-        mclock_.set_fixed_offset(int64_t(std::llround(est)));
+    // Asymmetric: later arrivals move the clock back at once (no dropouts); a luckier (earlier) packet only
+    // advances it at <= 500 ppm, so one fast packet never jerks the playout deadline towards the data edge.
+    const double dt = double(now - flow_ow_last_us_);
+    flow_ow_last_us_ = now;
+    const double target = (est > flow_ow_slewed_) ? std::min(est, flow_ow_slewed_ + dt * 500e-6) : est;
+    flow_ow_slewed_ = target;
+    if (std::fabs(target - flow_ow_applied_) >= 20.0) {
+        flow_ow_applied_ = target;
+        mclock_.set_fixed_offset(int64_t(std::llround(target)));
     }
 }
 
@@ -1675,8 +1686,19 @@ void PersonalMonitorClient::service_flow_reorder(uint64_t now) {
         const uint32_t s = flow_opus_next_seq_ + off;
         const auto& po = flow_opus_pending_[s & (kFlowOpusReorderSlots - 1u)];
         if (!po.valid || po.seq != s) continue;
-        if (now - po.arrived_us < 4500ull) return;  // still waiting for +1.5 ms backup copy
         const uint32_t n_samp = po.hdr.num_samples ? po.hdr.num_samples : 240u;
+        // Wait for the missing frame (its +1.5 ms backup copy, or a late primary) until its samples are about to
+        // be played - not a fixed 4.5 ms: on a busy phone the copy can land a few ms later, and concealing it
+        // early throws the real audio away (several in a row fade to silence).
+        const double cursor = matrix_.playout_cursor();
+        const uint32_t dist = s - flow_opus_next_seq_;
+        const double miss_end = double(po.hdr.media_timestamp_samples) - double(dist - 1u) * double(n_samp);
+        const double guard = double(sample_rate_) * 0.005;  // conceal 5 ms before the cursor needs it
+        if (cursor > 0.0) {
+            if (miss_end > cursor + guard && now - po.arrived_us < 100'000ull) return;
+        } else if (now - po.arrived_us < 4500ull) {
+            return;  // playout not started yet: short fixed wait
+        }
         const uint16_t mask = po.hdr.channel_mask;
         if (flow_dec_scratch_.size() < n_samp) flow_dec_scratch_.resize(n_samp);
         // Conceal every missing frame before `s` (wrap-safe), then decode the buffered run in order.

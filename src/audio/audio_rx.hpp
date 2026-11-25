@@ -100,6 +100,8 @@ private:
     double ow_cur_ = -1e300;
     uint64_t ow_win_start_ = 0;
     int ow_win_n_ = 0;
+    double ow_slewed_ = 0.0;
+    uint64_t ow_last_us_ = 0;
 };
 
 }  // namespace lv

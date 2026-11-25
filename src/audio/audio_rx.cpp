@@ -313,6 +313,8 @@ void AudioRxEngine::one_way_observe(double media_end_us, uint64_t now) {
         ow_win_n_ = 0;
         ow_win_start_ = now;
         ow_applied_ = d;
+        ow_slewed_ = d;
+        ow_last_us_ = now;
         clock_.set_fixed_offset(int64_t(std::llround(d)));
         return;
     }
@@ -326,9 +328,15 @@ void AudioRxEngine::one_way_observe(double media_end_us, uint64_t now) {
     }
     double est = ow_cur_;
     for (int i = 0; i < ow_win_n_; ++i) est = std::max(est, ow_win_[i]);
-    if (std::fabs(est - ow_applied_) >= 20.0) {  // >= 1 sample: the resampler absorbs the small steps
-        ow_applied_ = est;
-        clock_.set_fixed_offset(int64_t(std::llround(est)));
+    // Asymmetric: later arrivals move the clock back at once (no dropouts); a luckier (earlier) packet only
+    // advances it at <= 500 ppm, so one fast packet never jerks the playout deadline towards the data edge.
+    const double dt = double(now - ow_last_us_);
+    ow_last_us_ = now;
+    const double target = (est > ow_slewed_) ? std::min(est, ow_slewed_ + dt * 500e-6) : est;
+    ow_slewed_ = target;
+    if (std::fabs(target - ow_applied_) >= 20.0) {  // >= 1 sample: the resampler absorbs the small steps
+        ow_applied_ = target;
+        clock_.set_fixed_offset(int64_t(std::llround(target)));
     }
 }
 

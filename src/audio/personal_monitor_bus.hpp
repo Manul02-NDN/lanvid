@@ -468,6 +468,8 @@ private:
     double flow_ow_cur_ = -1e300;
     uint64_t flow_ow_win_start_ = 0;
     int flow_ow_win_n_ = 0;
+    double flow_ow_slewed_ = 0.0;
+    uint64_t flow_ow_last_us_ = 0;
     uint32_t flow_ow_samples_ = 0;
     double flow_ow_jitter_ema_ = 0.0;
     std::array<void*, kMaxMonitorFlowChannels> flow_opus_dec_{};
