@@ -3,6 +3,9 @@ package com.lanvid.app.ui
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Matrix
+import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.media.projection.MediaProjectionManager
 import android.os.BatteryManager
 import android.os.Build
@@ -10,6 +13,8 @@ import android.util.DisplayMetrics
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.TextureView
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -29,8 +34,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -40,6 +47,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.max
+import kotlin.math.min
 
 private enum class TallyVisual(val badgeLabel: String) {
     OFF("STBY"),
@@ -71,6 +80,68 @@ private data class TrafficState(
         }
 }
 
+private fun getDisplayRotation(context: Context): Int {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        context.display?.rotation ?: Surface.ROTATION_0
+    } else {
+        @Suppress("DEPRECATION")
+        (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay?.rotation
+            ?: Surface.ROTATION_0
+    }
+}
+
+/**
+ * Applies a mathematically distortion-free aspect-ratio Matrix to TextureView (Crop or Fit),
+ * eliminating vertical/horizontal camera stretching on tall 20:9 / 19.5:9 screens.
+ */
+private fun configureCameraTextureTransform(
+    textureView: TextureView,
+    viewW: Int,
+    viewH: Int,
+    bufW: Int,
+    bufH: Int,
+    orientedW: Int,
+    orientedH: Int,
+    displayRotation: Int,
+    cropToFill: Boolean
+) {
+    if (viewW <= 0 || viewH <= 0 || bufW <= 0 || bufH <= 0 || orientedW <= 0 || orientedH <= 0) return
+    val vw = viewW.toFloat()
+    val vh = viewH.toFloat()
+    val cx = vw / 2f
+    val cy = vh / 2f
+    val matrix = Matrix()
+
+    if (displayRotation == Surface.ROTATION_90 || displayRotation == Surface.ROTATION_270) {
+        val viewRect = RectF(0f, 0f, vw, vh)
+        val bufferRect = RectF(0f, 0f, bufH.toFloat(), bufW.toFloat())
+        bufferRect.offset(cx - bufferRect.centerX(), cy - bufferRect.centerY())
+        matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+        val scale = if (cropToFill) {
+            max(vh / bufH.toFloat(), vw / bufW.toFloat())
+        } else {
+            min(vh / bufH.toFloat(), vw / bufW.toFloat())
+        }
+        matrix.postScale(scale, scale, cx, cy)
+        matrix.postRotate(90f * (displayRotation - 2), cx, cy)
+    } else {
+        val ow = orientedW.toFloat()
+        val oh = orientedH.toFloat()
+        val targetScale = if (cropToFill) {
+            max(vw / ow, vh / oh)
+        } else {
+            min(vw / ow, vh / oh)
+        }
+        val sx = (ow * targetScale) / vw
+        val sy = (oh * targetScale) / vh
+        matrix.setScale(sx, sy, cx, cy)
+        if (displayRotation == Surface.ROTATION_180) {
+            matrix.postRotate(180f, cx, cy)
+        }
+    }
+    textureView.setTransform(matrix)
+}
+
 @Composable
 fun BroadcastScreen(
     cameraStreamer: Camera2Streamer,
@@ -78,12 +149,15 @@ fun BroadcastScreen(
     hasCameraPermission: Boolean
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
     val scope = rememberCoroutineScope()
     val appVersion = remember { LanVidNative.nativeGetVersion() }
     val simdInfo = remember { LanVidNative.nativeGetSimdInfo() }
 
     var ui by remember { mutableStateOf(HudUiState()) }
     var selectedTool by remember { mutableStateOf<HudTool?>(null) }
+    var showManualDeck by remember { mutableStateOf(false) }
+    var showEncoderDrawer by remember { mutableStateOf(false) }
     var hudHidden by remember { mutableStateOf(false) }
 
     var lanPeers by remember { mutableStateOf<List<LanPeer>>(emptyList()) }
@@ -94,7 +168,47 @@ fun BroadcastScreen(
     var battery by remember { mutableIntStateOf(-1) }
     var proState by remember { mutableStateOf(ProCameraState()) }
 
+    var cameraTextureView by remember { mutableStateOf<TextureView?>(null) }
+    var cameraSurfaceTexture by remember { mutableStateOf<SurfaceTexture?>(null) }
     var cameraPreviewSurface by remember { mutableStateOf<Surface?>(null) }
+    var viewW by remember { mutableIntStateOf(0) }
+    var viewH by remember { mutableIntStateOf(0) }
+    var camBufW by remember { mutableIntStateOf(1280) }
+    var camBufH by remember { mutableIntStateOf(720) }
+    var camOrientedW by remember { mutableIntStateOf(720) }
+    var camOrientedH by remember { mutableIntStateOf(1280) }
+
+    val displayRotation = remember(configuration.orientation, viewW, viewH) {
+        getDisplayRotation(context)
+    }
+
+    // Re-apply aspect-preserving TextureView transform whenever geometry, crop mode, or rotation changes.
+    LaunchedEffect(
+        cameraTextureView,
+        cameraSurfaceTexture,
+        viewW,
+        viewH,
+        camBufW,
+        camBufH,
+        camOrientedW,
+        camOrientedH,
+        displayRotation,
+        ui.previewCropToFill
+    ) {
+        val tv = cameraTextureView ?: return@LaunchedEffect
+        cameraSurfaceTexture?.setDefaultBufferSize(camBufW, camBufH)
+        configureCameraTextureTransform(
+            textureView = tv,
+            viewW = viewW,
+            viewH = viewH,
+            bufW = camBufW,
+            bufH = camBufH,
+            orientedW = camOrientedW,
+            orientedH = camOrientedH,
+            displayRotation = displayRotation,
+            cropToFill = ui.previewCropToFill
+        )
+    }
 
     // Studio Tally & Duplex Intercom connection + 10 Hz status poll
     LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
@@ -129,26 +243,50 @@ fun BroadcastScreen(
         }
     }
 
-    // Restart live Camera2 viewfinder whenever lens, resolution, surface, or mode changes
+    // Restart live Camera2 viewfinder whenever lens, resolution, surface, orientation, or mode changes
     LaunchedEffect(
         hasCameraPermission,
         ui.mode,
         ui.source,
         ui.resolution,
+        displayRotation,
         cameraPreviewSurface
     ) {
+        val surface = cameraPreviewSurface
         if (ui.mode == BroadcastMode.SENDER &&
             ui.source != CaptureSource.SCREEN &&
             hasCameraPermission &&
-            cameraPreviewSurface != null &&
-            cameraPreviewSurface?.isValid == true
+            surface != null &&
+            surface.isValid
         ) {
             cameraStreamer.start(
                 width = ui.resolution.width,
                 height = ui.resolution.height,
                 frontFacing = ui.source == CaptureSource.FRONT_CAM,
-                previewSurface = cameraPreviewSurface,
-                streamEnabled = ui.senderActive
+                displayRotation = displayRotation,
+                previewSurface = surface,
+                streamEnabled = ui.senderActive,
+                onPreviewConfigured = { bW, bH, oW, oH, _ ->
+                    camBufW = bW
+                    camBufH = bH
+                    camOrientedW = oW
+                    camOrientedH = oH
+                    cameraSurfaceTexture?.setDefaultBufferSize(bW, bH)
+                    cameraTextureView?.post {
+                        val tv = cameraTextureView ?: return@post
+                        configureCameraTextureTransform(
+                            textureView = tv,
+                            viewW = tv.width,
+                            viewH = tv.height,
+                            bufW = bW,
+                            bufH = bH,
+                            orientedW = oW,
+                            orientedH = oH,
+                            displayRotation = displayRotation,
+                            cropToFill = ui.previewCropToFill
+                        )
+                    }
+                }
             ) { err ->
                 ui = ui.copy(statusMessage = err)
             }
@@ -264,11 +402,14 @@ fun BroadcastScreen(
                     val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projectionLauncher.launch(mpm.createScreenCaptureIntent())
                 } else {
+                    // Pass true display-oriented rotated dimensions (e.g. 720x1280 in portrait, 1280x720 in landscape)
+                    val encW = cameraStreamer.outputWidth.takeIf { it > 0 } ?: ui.resolution.width
+                    val encH = cameraStreamer.outputHeight.takeIf { it > 0 } ?: ui.resolution.height
                     val ok = LanVidNative.nativeStartSender(
                         ui.destIp,
                         ui.destPort,
-                        ui.resolution.width,
-                        ui.resolution.height,
+                        encW,
+                        encH,
                         60,
                         ui.quality,
                         ui.fecGroup,
@@ -281,7 +422,7 @@ fun BroadcastScreen(
                         if (ui.audioSource == AudioSourceOption.MIC) micStreamer.start(null)
                         ui = ui.copy(
                             senderActive = true,
-                            statusMessage = "${ui.source.title} (${ui.codec.shortLabel}) -> ${ui.destIp}:${ui.destPort}"
+                            statusMessage = "${ui.source.title} ${encW}×${encH} (${ui.codec.shortLabel}) -> ${ui.destIp}:${ui.destPort}"
                         )
                     } else {
                         ui = ui.copy(statusMessage = "Failed to start LanVid sender")
@@ -320,12 +461,14 @@ fun BroadcastScreen(
         else -> TallyVisual.OFF
     }
 
+    val safeInsets = WindowInsets.safeDrawing.union(WindowInsets.displayCutout)
+
     Box(
         Modifier
             .fillMaxSize()
             .background(Bm.bg)
     ) {
-        // 1. Full-bleed live preview surface (Camera2 viewfinder in TX Camera mode, ANativeWindow in RX mode)
+        // 1. Full-bleed aspect-ratio-preserving live preview (TextureView with Crop/Fit matrix in Camera mode)
         if (ui.mode == BroadcastMode.RECEIVER) {
             AndroidView(
                 factory = { ctx ->
@@ -348,18 +491,33 @@ fun BroadcastScreen(
         } else if (ui.source != CaptureSource.SCREEN) {
             AndroidView(
                 factory = { ctx ->
-                    SurfaceView(ctx).apply {
-                        holder.addCallback(object : SurfaceHolder.Callback {
-                            override fun surfaceCreated(h: SurfaceHolder) {
-                                cameraPreviewSurface = h.surface
+                    TextureView(ctx).apply {
+                        cameraTextureView = this
+                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                            override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                viewW = w
+                                viewH = h
+                                cameraSurfaceTexture = st
+                                st.setDefaultBufferSize(camBufW, camBufH)
+                                cameraPreviewSurface?.release()
+                                cameraPreviewSurface = Surface(st)
                             }
-                            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
-                                cameraPreviewSurface = h.surface
+
+                            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {
+                                viewW = w
+                                viewH = h
                             }
-                            override fun surfaceDestroyed(h: SurfaceHolder) {
+
+                            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                                cameraStreamer.stop()
+                                cameraSurfaceTexture = null
+                                cameraPreviewSurface?.release()
                                 cameraPreviewSurface = null
+                                return true
                             }
-                        })
+
+                            override fun onSurfaceTextureUpdated(st: SurfaceTexture) = Unit
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxSize()
@@ -383,33 +541,15 @@ fun BroadcastScreen(
             FrameGuidesOverlay(Modifier.fillMaxSize())
         }
 
-        // Tap on empty preview closes open tool panel
-        if (!hudHidden && selectedTool != null) {
-            Box(Modifier.fillMaxSize().clickableNoRipple { selectedTool = null })
-        }
-
-        // 3. Broadcast Tally outer border + Pro Cine Manual Camera & Duplex Intercom HUD
+        // 3. Broadcast Tally outer border
         TallyBorder(tally)
-        if (ui.mode == BroadcastMode.SENDER && !hudHidden) {
-            ProCameraHudOverlay(
-                state = proState,
-                onStateChange = { proState = it },
-                onIntercomChanged = { talk, listenMuted, rxGain ->
-                    LanVidNative.nativeIntercomSetState(talk, listenMuted, rxGain, 0f)
-                },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(top = 56.dp, bottom = 78.dp)
-            )
-        }
 
-        // 4. HUD Overlay (Hidden vs Full Broadcast HUD)
+        // 4. Unified non-overlapping HUD Overlay (respects DisplayCutout + status/navigation bars)
         if (hudHidden) {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .windowInsetsPadding(safeInsets)
                     .padding(12.dp)
             ) {
                 TallyBadge(tally, Modifier.align(Alignment.TopStart))
@@ -437,8 +577,9 @@ fun BroadcastScreen(
             Column(
                 Modifier
                     .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .windowInsetsPadding(safeInsets)
             ) {
+                // 4a. Top Bar (status, tally, timer, bitrate, format, battery, HUD/mode toggle)
                 TopHudBar(
                     ui = ui,
                     tally = tally,
@@ -446,84 +587,203 @@ fun BroadcastScreen(
                     txStats = txStats,
                     rxStats = rxStats,
                     battery = battery,
-                    onHideHud = { hudHidden = true },
+                    onHideHud = {
+                        selectedTool = null
+                        showManualDeck = false
+                        showEncoderDrawer = false
+                        hudHidden = true
+                    },
                     onSwitchMode = {
                         stopAll()
                         selectedTool = null
+                        showManualDeck = false
+                        showEncoderDrawer = false
                         ui = ui.copy(mode = if (ui.mode == BroadcastMode.SENDER) BroadcastMode.RECEIVER else BroadcastMode.SENDER)
                     }
                 )
 
-                // Dismissible status banner
-                ui.statusMessage?.let { msg ->
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text(
-                            "$msg   ✕",
-                            style = Bm.mono(11.sp),
-                            color = Color.White,
+                // 4b. Sub-Top Bar (CAM label + MANUAL / ENC drawers) — strictly below TopHudBar
+                if (ui.mode == BroadcastMode.SENDER) {
+                    ProSubTopBar(
+                        state = proState,
+                        showManualDeck = showManualDeck,
+                        showEncoderDrawer = showEncoderDrawer,
+                        onToggleManual = {
+                            showManualDeck = !showManualDeck
+                            if (showManualDeck) {
+                                showEncoderDrawer = false
+                                selectedTool = null
+                            }
+                        },
+                        onToggleEncoder = {
+                            showEncoderDrawer = !showEncoderDrawer
+                            if (showEncoderDrawer) {
+                                showManualDeck = false
+                                selectedTool = null
+                            }
+                        }
+                    )
+                }
+
+                // 4c. Center Viewfinder Zone (banners + slide-out MANUAL / ENC / Tool drawers)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .then(
+                            if (selectedTool != null || showManualDeck || showEncoderDrawer) {
+                                Modifier.clickableNoRipple {
+                                    selectedTool = null
+                                    showManualDeck = false
+                                    showEncoderDrawer = false
+                                }
+                            } else Modifier
+                        )
+                ) {
+                    // Dismissible status / error banner
+                    ui.statusMessage?.let { msg ->
+                        Box(
+                            Modifier
+                                .align(Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "$msg   ✕",
+                                style = Bm.mono(11.sp),
+                                color = Color.White,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .background(Bm.panelHi.copy(alpha = 0.92f), RoundedCornerShape(14.dp))
+                                    .clickableNoRipple { ui = ui.copy(statusMessage = null) }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+
+                    if (ui.mode == BroadcastMode.SENDER && showManualDeck) {
+                        ProManualDeckDrawer(
+                            state = proState,
+                            onStateChange = { next ->
+                                val prevLens = proState.lens
+                                proState = next
+                                if (next.lens != prevLens) {
+                                    val nextSource = if (next.lens == "Front") CaptureSource.FRONT_CAM else CaptureSource.BACK_CAM
+                                    if (ui.source != nextSource) ui = ui.copy(source = nextSource)
+                                }
+                            },
+                            modifier = Modifier.align(Alignment.CenterStart)
+                        )
+                    }
+
+                    if (ui.mode == BroadcastMode.SENDER && showEncoderDrawer) {
+                        ProEncoderDrawer(
+                            state = proState,
+                            onStateChange = { next ->
+                                proState = next
+                                val nextRes = when (next.resolution) {
+                                    "4K UHD" -> ResolutionPreset.UHD_4K
+                                    "1080p" -> ResolutionPreset.FHD_1080
+                                    else -> ResolutionPreset.HD_720
+                                }
+                                val nextCodec = when (next.codec) {
+                                    "H.265" -> VideoCodecOption.H265
+                                    "H.264" -> VideoCodecOption.H264
+                                    else -> VideoCodecOption.DCT
+                                }
+                                ui = ui.copy(
+                                    resolution = nextRes,
+                                    codec = nextCodec,
+                                    bitrateMbps = next.bitrateMbps.toDouble().coerceIn(1.0, 50.0)
+                                )
+                            },
+                            modifier = Modifier.align(Alignment.CenterEnd)
+                        )
+                    }
+
+                    selectedTool?.let { tool ->
+                        ToolPanel(
+                            tool = tool,
+                            ui = ui,
+                            appVersion = appVersion,
+                            simdInfo = simdInfo,
+                            txStats = txStats,
+                            rxStats = rxStats,
+                            lanPeers = lanPeers,
+                            scanning = scanning,
+                            onScanLan = {
+                                if (!scanning) {
+                                    scanning = true
+                                    scope.launch {
+                                        lanPeers = withContext(Dispatchers.IO) { LanVidNative.scanLanPeers(450) }
+                                        scanning = false
+                                    }
+                                }
+                            },
+                            onUpdate = { ui = it },
+                            onSwitchMode = { next ->
+                                if (next != ui.mode) {
+                                    stopAll()
+                                    ui = ui.copy(mode = next)
+                                }
+                            },
+                            onVolumeChange = { v ->
+                                ui = ui.copy(volume = v)
+                                LanVidNative.nativeSetVolume(v)
+                            },
+                            onAudioLatencyChange = { ms ->
+                                ui = ui.copy(audioLatencyMs = ms)
+                                if (ui.receiverActive) LanVidNative.nativeSetAudioLatencyMs(ms)
+                            },
                             modifier = Modifier
-                                .padding(top = 4.dp)
-                                .background(Bm.panelHi.copy(alpha = 0.9f), RoundedCornerShape(50))
-                                .clickableNoRipple { ui = ui.copy(statusMessage = null) }
-                                .padding(horizontal = 12.dp, vertical = 5.dp)
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
                 }
 
-                Spacer(Modifier.weight(1f))
+                // 4d. Sequential Bottom Stack: Intercom Strip -> Telemetry Row -> Bottom Action Deck (0 overlap!)
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (ui.mode == BroadcastMode.SENDER) {
+                        ProIntercomStrip(
+                            state = proState,
+                            onStateChange = { proState = it },
+                            onIntercomChanged = { talk, listenMuted, rxGain ->
+                                LanVidNative.nativeIntercomSetState(talk, listenMuted, rxGain, 0f)
+                            }
+                        )
+                    }
 
-                if (ui.showTimer || ui.showTraffic) {
-                    TrafficAndTimerCard(
-                        traffic = traffic,
-                        isSender = ui.mode == BroadcastMode.SENDER,
-                        showTimer = ui.showTimer,
-                        showTraffic = ui.showTraffic,
-                        modifier = Modifier.padding(start = 12.dp, bottom = 6.dp)
-                    )
+                    if (ui.showTimer || ui.showTraffic) {
+                        TrafficAndTimerCard(
+                            traffic = traffic,
+                            isSender = ui.mode == BroadcastMode.SENDER,
+                            showTimer = ui.showTimer,
+                            showTraffic = ui.showTraffic,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
 
-                selectedTool?.let { tool ->
-                    ToolPanel(
-                        tool = tool,
-                        ui = ui,
-                        appVersion = appVersion,
-                        simdInfo = simdInfo,
-                        txStats = txStats,
-                        rxStats = rxStats,
-                        lanPeers = lanPeers,
-                        scanning = scanning,
-                        onScanLan = {
-                            if (!scanning) {
-                                scanning = true
-                                scope.launch {
-                                    lanPeers = withContext(Dispatchers.IO) { LanVidNative.scanLanPeers(450) }
-                                    scanning = false
-                                }
-                            }
-                        },
-                        onUpdate = { ui = it },
-                        onSwitchMode = { next ->
-                            if (next != ui.mode) {
-                                stopAll()
-                                ui = ui.copy(mode = next)
-                            }
-                        },
-                        onVolumeChange = { v ->
-                            ui = ui.copy(volume = v)
-                            LanVidNative.nativeSetVolume(v)
-                        },
-                        onAudioLatencyChange = { ms ->
-                            ui = ui.copy(audioLatencyMs = ms)
-                            if (ui.receiverActive) LanVidNative.nativeSetAudioLatencyMs(ms)
-                        },
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
-                    )
-                }
-
+                // 4e. Bottom Action Deck (5 equal-weight buttons + GO LIVE)
                 BottomBar(
                     ui = ui,
                     selectedTool = selectedTool,
-                    onSelectTool = { t -> selectedTool = if (selectedTool == t) null else t },
+                    onSelectTool = { t ->
+                        val next = if (selectedTool == t) null else t
+                        selectedTool = next
+                        if (next != null) {
+                            showManualDeck = false
+                            showEncoderDrawer = false
+                        }
+                    },
                     onToggleLive = { toggleLive() }
                 )
             }
@@ -533,7 +793,7 @@ fun BroadcastScreen(
 
 @Composable
 private fun FrameGuidesOverlay(modifier: Modifier) = Canvas(modifier) {
-    val c = Color.White.copy(alpha = 0.45f)
+    val c = Color.White.copy(alpha = 0.40f)
     for (i in 1..2) {
         drawLine(c, Offset(size.width * i / 3f, 0f), Offset(size.width * i / 3f, size.height), strokeWidth = 1f)
         drawLine(c, Offset(0f, size.height * i / 3f), Offset(size.width, size.height * i / 3f), strokeWidth = 1f)
@@ -560,8 +820,8 @@ private fun TopHudBar(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.80f), Color.Transparent)))
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.82f), Color.Transparent)))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
@@ -579,11 +839,13 @@ private fun TopHudBar(
             }
             Text(
                 statusLabel,
-                style = Bm.mono(11.sp),
+                style = Bm.mono(10.sp, FontWeight.Bold),
                 color = Color.White,
+                maxLines = 1,
+                softWrap = false,
                 modifier = Modifier
                     .background(statusBg, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                    .padding(horizontal = 7.dp, vertical = 3.dp)
             )
             TallyBadge(tally)
             if (ui.showTimer) {
@@ -599,13 +861,13 @@ private fun TopHudBar(
                 } else {
                     "${ui.resolution.label} · 60 · ${ui.codec.shortLabel} ${ui.bitrateMbps.toInt()}M"
                 }
-                Text(fmtLabel, style = Bm.mono(11.sp), color = Bm.text)
+                Text(fmtLabel, style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
                 if (ui.senderActive) {
                     Chip("%.1f fps".format(txStats.fps), if (txStats.fps >= 55.0) Bm.good else Bm.warn)
                 }
                 Chip("LANVID ${ui.destIp}:${ui.destPort}", Bm.accent)
             } else {
-                Text("UDP :${ui.listenPort} · AoIP ${ui.audioLatencyMs}ms", style = Bm.mono(11.sp), color = Bm.text)
+                Text("UDP :${ui.listenPort} · AoIP ${ui.audioLatencyMs}ms", style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
                 if (ui.receiverActive) {
                     Chip("%.1f fps".format(rxStats.fps), if (rxStats.fps >= 55.0) Bm.good else Bm.warn)
                     Chip("E2E %.1f ms".format(rxStats.latP50), Bm.accent)
@@ -615,21 +877,27 @@ private fun TopHudBar(
 
         Text(
             if (battery >= 0) "$battery%" else "–",
-            style = Bm.mono(11.sp),
-            color = if (battery in 0..14) Bm.live else Bm.text
+            style = Bm.mono(10.sp),
+            color = if (battery in 0..14) Bm.live else Bm.text,
+            maxLines = 1,
+            softWrap = false
         )
         Text(
             "HUD",
-            style = Bm.mono(11.sp),
+            style = Bm.mono(10.sp),
             color = Color.White,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier
                 .clickableNoRipple(onHideHud)
-                .padding(horizontal = 4.dp)
+                .padding(horizontal = 3.dp)
         )
         Text(
             if (ui.mode == BroadcastMode.SENDER) "RX" else "TX",
-            style = Bm.mono(11.sp, FontWeight.Bold),
+            style = Bm.mono(10.sp, FontWeight.Bold),
             color = Bm.accent,
+            maxLines = 1,
+            softWrap = false,
             modifier = Modifier
                 .background(Bm.panelHi, RoundedCornerShape(4.dp))
                 .clickableNoRipple(onSwitchMode)
@@ -646,55 +914,50 @@ private fun TrafficAndTimerCard(
     showTraffic: Boolean,
     modifier: Modifier = Modifier
 ) {
-    Column(
+    Row(
         modifier
-            .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(8.dp))
+            .background(Color.Black.copy(alpha = 0.70f), RoundedCornerShape(8.dp))
             .border(1.dp, Bm.panelHi, RoundedCornerShape(8.dp))
             .padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp)
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         if (showTimer) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 Box(Modifier.size(7.dp).background(if (traffic.live) Bm.live else Bm.dim, CircleShape))
-                Text(if (traffic.live) "ON AIR TIME" else "STREAM TIME", style = Bm.mono(9.sp), color = Bm.dim)
-                Text(
-                    traffic.timerText,
-                    style = Bm.mono(14.sp, FontWeight.Bold),
-                    color = if (traffic.live) Bm.accent else Bm.text
-                )
+                Column {
+                    Text(
+                        if (traffic.live) "ON AIR" else "STREAM TIME",
+                        style = Bm.mono(8.sp),
+                        color = Bm.dim,
+                        maxLines = 1
+                    )
+                    Text(
+                        traffic.timerText,
+                        style = Bm.mono(12.sp, FontWeight.Bold),
+                        color = if (traffic.live) Bm.accent else Bm.text,
+                        maxLines = 1
+                    )
+                }
             }
         }
         if (showTraffic) {
             val arrow = if (isSender) "↑" else "↓"
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "$arrow %.1f Mb/s".format(traffic.instantMbps),
-                    style = Bm.mono(13.sp, FontWeight.Bold),
-                    color = if (traffic.live) Bm.good else Bm.dim
+                    "$arrow %.1f Mb/s (%.2f MB/s)".format(traffic.instantMbps, traffic.instantMBps),
+                    style = Bm.mono(11.sp, FontWeight.Bold),
+                    color = if (traffic.live) Bm.good else Bm.dim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                Text("(%.2f MB/s)".format(traffic.instantMBps), style = Bm.mono(10.sp), color = Bm.text)
-            }
-            Text(
-                "PEAK %.1f Mb/s  ·  TOTAL %s".format(traffic.peakMbps, traffic.totalDataText),
-                style = Bm.mono(9.sp),
-                color = Bm.dim
-            )
-            if (traffic.historyMbps.isNotEmpty()) {
-                val maxV = (traffic.historyMbps.maxOrNull() ?: 1f).coerceAtLeast(1f)
-                Canvas(Modifier.size(160.dp, 26.dp).padding(top = 2.dp)) {
-                    val n = 30
-                    val bw = size.width / n
-                    val offset = (n - traffic.historyMbps.size).coerceAtLeast(0)
-                    traffic.historyMbps.forEachIndexed { idx, v ->
-                        val norm = (v / maxV).coerceIn(0.05f, 1f)
-                        val x = (offset + idx) * bw
-                        drawRect(
-                            color = Bm.good.copy(alpha = 0.85f),
-                            topLeft = Offset(x, size.height * (1f - norm)),
-                            size = Size((bw - 1f).coerceAtLeast(1f), size.height * norm)
-                        )
-                    }
-                }
+                Text(
+                    "PEAK %.1f Mb/s · TOTAL %s".format(traffic.peakMbps, traffic.totalDataText),
+                    style = Bm.mono(9.sp),
+                    color = Bm.dim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -703,15 +966,15 @@ private fun TrafficAndTimerCard(
 @Composable
 private fun TallyBorder(tally: TallyVisual) {
     val (width, color) = when (tally) {
-        TallyVisual.OFF -> 3.dp to Color.White.copy(alpha = 0.25f)
-        TallyVisual.PREVIEW -> 8.dp to Bm.good
-        TallyVisual.PROGRAM -> 8.dp to Bm.live
+        TallyVisual.OFF -> 2.dp to Color.White.copy(alpha = 0.20f)
+        TallyVisual.PREVIEW -> 6.dp to Bm.good
+        TallyVisual.PROGRAM -> 6.dp to Bm.live
     }
     Box(
         Modifier
             .fillMaxSize()
-            .padding(3.dp)
-            .border(width, color, RoundedCornerShape(18.dp))
+            .padding(2.dp)
+            .border(width, color, RoundedCornerShape(14.dp))
     )
 }
 
@@ -726,11 +989,11 @@ private fun TallyBadge(tally: TallyVisual, modifier: Modifier = Modifier) {
         modifier
             .background(bg, RoundedCornerShape(4.dp))
             .border(1.dp, border, RoundedCornerShape(4.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .padding(horizontal = 7.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Box(Modifier.size(7.dp).background(if (tally == TallyVisual.OFF) Bm.dim else fg, CircleShape))
-        Text(tally.badgeLabel, style = Bm.mono(11.sp, FontWeight.Bold), color = fg)
+        Box(Modifier.size(6.dp).background(if (tally == TallyVisual.OFF) Bm.dim else fg, CircleShape))
+        Text(tally.badgeLabel, style = Bm.mono(10.sp, FontWeight.Bold), color = fg, maxLines = 1, softWrap = false)
     }
 }

@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lanvid.app.LanPeer
@@ -50,7 +51,8 @@ enum class AudioSourceOption(val id: Int, val title: String) {
 
 enum class ResolutionPreset(val width: Int, val height: Int, val label: String) {
     HD_720(1280, 720, "720p"),
-    FHD_1080(1920, 1080, "1080p")
+    FHD_1080(1920, 1080, "1080p"),
+    UHD_4K(3840, 2160, "4K")
 }
 
 enum class HudTool(val title: String) {
@@ -77,6 +79,7 @@ data class HudUiState(
     val volume: Float = 1.0f,
     val audioLatencyMs: Int = 20,
     val frameGuides: Boolean = true,
+    val previewCropToFill: Boolean = true,
     val showTimer: Boolean = true,
     val showTraffic: Boolean = true,
     val senderActive: Boolean = false,
@@ -105,35 +108,49 @@ fun BottomBar(
     Row(
         modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f))))
-            .padding(vertical = 6.dp),
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(
-            Modifier
-                .weight(1f)
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             HudTool.entries.forEach { t ->
                 val sel = selectedTool == t
                 Column(
                     Modifier
-                        .widthIn(min = 66.dp)
+                        .weight(1f)
                         .background(
-                            if (sel) Bm.accent else Bm.panelHi.copy(alpha = 0.88f),
+                            if (sel) Bm.accent else Bm.panelHi.copy(alpha = 0.90f),
                             RoundedCornerShape(6.dp)
                         )
                         .clickableNoRipple { onSelectTool(t) }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                        .padding(horizontal = 3.dp, vertical = 6.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Text(t.title, style = Bm.mono(9.sp), color = if (sel) Color.Black else Bm.dim)
-                    Text(ui.toolSummary(t), style = Bm.mono(12.sp), color = if (sel) Color.Black else Bm.text)
+                    Text(
+                        t.title,
+                        style = Bm.mono(8.sp),
+                        color = if (sel) Color.Black else Bm.dim,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        ui.toolSummary(t),
+                        style = Bm.mono(10.sp, FontWeight.SemiBold),
+                        color = if (sel) Color.Black else Bm.text,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
+
+        Spacer(Modifier.width(8.dp))
 
         val liveBg = when {
             ui.isLive -> Bm.live
@@ -147,13 +164,18 @@ fun BottomBar(
         }
         Box(
             Modifier
-                .padding(end = 14.dp)
-                .size(width = 100.dp, height = 42.dp)
+                .size(width = 82.dp, height = 42.dp)
                 .background(liveBg, RoundedCornerShape(8.dp))
                 .clickableNoRipple(onToggleLive),
             contentAlignment = Alignment.Center
         ) {
-            Text(liveLabel, style = Bm.mono(13.sp, FontWeight.Bold), color = Color.White)
+            Text(
+                liveLabel,
+                style = Bm.mono(12.sp, FontWeight.Bold),
+                color = Color.White,
+                maxLines = 1,
+                softWrap = false
+            )
         }
     }
 }
@@ -503,6 +525,9 @@ fun ToolPanel(
                 Text("OPERATOR MONITORING — NEVER SENT OVER LAN", style = Bm.mono(10.sp), color = Bm.accent)
                 SwitchRow("Frame guides (rule of thirds + safe area)", ui.frameGuides) {
                     onUpdate(ui.copy(frameGuides = it))
+                }
+                SwitchRow("Fill viewfinder (Crop vs Fit)", ui.previewCropToFill) {
+                    onUpdate(ui.copy(previewCropToFill = it))
                 }
                 SwitchRow("Stream uptime timer", ui.showTimer) {
                     onUpdate(ui.copy(showTimer = it))
