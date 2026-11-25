@@ -1,5 +1,8 @@
 ; LanVid Studio + LanVid Grid (L2 · 256ch) + DSP Server — Inno Setup 6 Full Ecosystem Installer
 ; Build with: iscc installer\windows\lanvid.iss
+; Silent CLI:
+;   LanVid_Setup_v2.6.0.exe /VERYSILENT /TYPE=auto
+;   LanVid_Setup_v2.6.0.exe /VERYSILENT /COMPONENTS="core,dsp_server,virtual_audio"
 ;
 ; Note: CMake target `lanvid_core_shared` sets OUTPUT_NAME "lanvid_core", producing build\lanvid_core.dll.
 
@@ -35,22 +38,22 @@ Name: "ukrainian"; MessagesFile: "compiler:Languages\Ukrainian.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Types]
-Name: "full"; Description: "Повне встановлення (Studio + Grid L2 + DSP Server + Virtual ASIO + OBS)"
-Name: "compact"; Description: "Базове встановлення (LanVid Studio + Virtual ASIO)"
-Name: "custom"; Description: "Вибіркове встановлення"; Flags: iscustom
+Name: "auto"; Description: "Автоматичне встановлення (Рекомендовано — усі компоненти, драйвери, служба DSP, OBS та мережа)"
+Name: "custom"; Description: "Ручний вибір (Вибіркове встановлення компонентів і налаштувань)"; Flags: iscustom
 
 [Components]
-Name: "core"; Description: "LanVid Studio, ядро (lanvid_core.dll) та утиліти діагностики (обов'язково)"; Types: full compact custom; Flags: fixed
-Name: "dsp_server"; Description: "LanVid Grid DSP Server (фонова служба LanVidGridDSP 256ch + Failover)"; Types: full
-Name: "virtual_audio"; Description: "Віртуальний аудіодрайвер LanVid Virtual ASIO (64 In / 64 Out)"; Types: full compact
-Name: "grid_l2_npcap"; Description: "LanVid Grid Layer 2 (перевірка та встановлення Npcap для прямого Ethernet)"; Types: full
-Name: "obs_plugin"; Description: "Плагін OBS Studio (obs-lanvid.dll + локалізації, автовиявлення OBS)"; Types: full
+Name: "core"; Description: "LanVid Studio, ядро (lanvid_core.dll) та утиліти діагностики (обов'язково)"; Types: auto custom; Flags: fixed
+Name: "dsp_server"; Description: "LanVid Grid DSP Server (фонова служба LanVidGridDSP 256ch + Failover)"; Types: auto custom
+Name: "virtual_audio"; Description: "Віртуальний аудіодрайвер LanVid Virtual ASIO (64 In / 64 Out)"; Types: auto custom
+Name: "grid_l2_npcap"; Description: "LanVid Grid Layer 2 (перевірка та встановлення Npcap для прямого Ethernet)"; Types: auto custom
+Name: "obs_plugin"; Description: "Плагін OBS Studio (obs-lanvid.dll + локалізації, автовиявлення OBS)"; Types: auto custom
+Name: "net_power_opt"; Description: "Оптимізація мережі (Firewall, QoS DSCP=46, сокети) та живлення High Performance"; Types: auto
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "firewall"; Description: "Налаштувати Windows Defender Firewall (UDP 5000-5035, 5099, 5353 mDNS та TCP для Studio і DSP)"; GroupDescription: "Мережа та продуктивність:"; Flags: checkedonce
-Name: "qos_dscp"; Description: "Увімкнути Policy-based QoS DSCP=46 (EF) та оптимізувати буфери сокетів для аудіо/відео"; GroupDescription: "Мережа та продуктивність:"; Flags: checkedonce
-Name: "high_perf_power"; Description: "Увімкнути профіль живлення «Висока продуктивність» (High Performance, без засинання NIC)"; GroupDescription: "Мережа та продуктивність:"; Flags: unchecked
+Name: "firewall"; Description: "Налаштувати Windows Defender Firewall (UDP 5000-5035, 5099, 5353 mDNS та TCP для Studio і DSP)"; GroupDescription: "Мережа та продуктивність:"; Components: core; Flags: checkedonce
+Name: "qos_dscp"; Description: "Увімкнути Policy-based QoS DSCP=46 (EF) та оптимізувати буфери сокетів для аудіо/відео"; GroupDescription: "Мережа та продуктивність:"; Components: net_power_opt; Flags: checkedonce
+Name: "high_perf_power"; Description: "Увімкнути профіль живлення «Висока продуктивність» (High Performance, без засинання NIC)"; GroupDescription: "Мережа та продуктивність:"; Components: net_power_opt; Flags: checkedonce
 
 [Files]
 ; Core (Studio GUI, shared core DLL, CLI tools, preflight configurator & docs)

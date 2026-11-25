@@ -3,6 +3,7 @@
     <title>LanVid Studio + Grid L2 + SDK v2.6.0</title>
     <organization>com.lanvid</organization>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false" />
+    <!-- Standard Install installs all checked packages automatically; Customize lets the user toggle optional modules -->
     <options customize="allow" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
 
     <volume-check>
@@ -15,32 +16,50 @@
     <conclusion file="conclusion.html" mime-type="text/html" />
 
     <choices-outline>
-        <line choice="choice_core" />
-        <line choice="choice_grid" />
+        <line choice="choice_studio" />
+        <line choice="choice_dspserver" />
+        <line choice="choice_chmodbpf" />
+        <line choice="choice_obsplugin" />
         <line choice="choice_hal" />
         <line choice="choice_swift" />
         <line choice="choice_extras" />
     </choices-outline>
 
-    <choice id="choice_core"
-            title="LanVid Studio, Core SDK &amp; DSP CLI"
-            description="LanVid Studio.app (when bundled), Universal liblanvid_core.dylib &amp; lanvid_dsp_server (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages."
+    <choice id="choice_studio"
+            title="LanVid Studio &amp; Core SDK (Обов'язково)"
+            description="LanVid Studio.app (/Applications), Universal liblanvid_core.dylib (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages, and macOS Application Firewall exemptions."
             start_selected="true"
             enabled="false">
-        <pkg-ref id="com.lanvid.sdk.core" />
+        <pkg-ref id="com.lanvid.pkg.studio" />
     </choice>
 
-    <choice id="choice_grid"
-            title="LanVid Grid L2 (ChmodBPF) + DSP Server Auto-Start + OBS &amp; Firewall"
-            description="Installs LaunchDaemons for rootless Layer 2 Ethernet (/dev/bpf* via access_bpf group) and auto-starting 256ch LanVid Grid DSP Server, configures macOS Application Firewall, and auto-installs obs-lanvid plugin when OBS Studio is present."
+    <choice id="choice_dspserver"
+            title="LanVid Grid DSP Server (LaunchDaemon автозапуск)"
+            description="Installs universal /usr/local/bin/lanvid_dsp_server (256ch LV-DSP + Failover) and auto-starting /Library/LaunchDaemons/com.lanvid.dspserver.plist (KeepAlive + RunAtLoad) with Firewall allowance."
             start_selected="true"
             enabled="true">
-        <pkg-ref id="com.lanvid.grid.system" />
+        <pkg-ref id="com.lanvid.pkg.dspserver" />
+    </choice>
+
+    <choice id="choice_chmodbpf"
+            title="LanVid Grid Layer 2 — ChmodBPF (/dev/bpf* без root)"
+            description="Installs /Library/LaunchDaemons/com.lanvid.chmod-bpf.plist, creates the access_bpf group, adds the active user, and grants rw access to /dev/bpf* for sub-millisecond Layer 2 Ethernet audio."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.pkg.chmodbpf" />
+    </choice>
+
+    <choice id="choice_obsplugin"
+            title="OBS Studio Plugin (obs-lanvid.plugin)"
+            description="Stages obs-lanvid.plugin and Ukrainian/English locales and automatically installs them into ~/Library/Application Support/obs-studio/plugins/ when OBS Studio is detected."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.pkg.obsplugin" />
     </choice>
 
     <choice id="choice_hal"
             title="Virtual Audio Device «LanVid Virtual 64ch»"
-            description="CoreAudio HAL plug-in (64 In / 64 Out, Float32, 48/96 kHz) installed to /Library/Audio/Plug-Ins/HAL. Appears in Audio MIDI Setup, Logic Pro, REAPER and OBS; streams through LanVid Studio. Restarts coreaudiod."
+            description="CoreAudio HAL plug-in (64 In / 64 Out, Float32, 48/96 kHz) installed to /Library/Audio/Plug-Ins/HAL. Appears in Audio MIDI Setup, Logic Pro, REAPER and OBS. Restarts coreaudiod."
             start_selected="true"
             enabled="true">
         <pkg-ref id="com.lanvid.audio.hal" />
@@ -55,15 +74,17 @@
     </choice>
 
     <choice id="choice_extras"
-            title="Python Bindings, OBS Plugin Bundle &amp; Examples"
-            description="Zero-dependency Python ctypes/NumPy wrapper (lanvid_sdk.py), obs-lanvid plugin resources, SwiftUI iOSCameraSender &amp; MacReceiverMetal examples, and CMake C++17 client."
+            title="Python Bindings &amp; Xcode/CMake Examples"
+            description="Zero-dependency Python ctypes/NumPy wrapper (lanvid_sdk.py), SwiftUI iOSCameraSender &amp; MacReceiverMetal examples, and CMake C++17 client."
             start_selected="true"
             enabled="true">
         <pkg-ref id="com.lanvid.sdk.extras" />
     </choice>
 
-    <pkg-ref id="com.lanvid.sdk.core" version="2.6.0" onConclusion="none">lanvid-core.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.grid.system" version="2.6.0" onConclusion="none">lanvid-grid.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.studio" version="2.6.0" onConclusion="none">lanvid-studio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.dspserver" version="2.6.0" onConclusion="none">lanvid-dspserver.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.chmodbpf" version="2.6.0" onConclusion="none">lanvid-chmodbpf.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.obsplugin" version="2.6.0" onConclusion="none">lanvid-obsplugin.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.audio.hal" version="2.6.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.swift" version="2.6.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.extras" version="2.6.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>

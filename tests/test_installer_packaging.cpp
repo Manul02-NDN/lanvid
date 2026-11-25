@@ -1,6 +1,7 @@
 // Dry-run validator for cross-platform LanVid installers (Windows, macOS, Linux & Release CI).
-// Verifies syntax invariants (LF-only Unix shell scripts, balanced Inno Setup/XML sections) and
-// guarantees every full-ecosystem component is wired across all platforms:
+// Verifies syntax invariants (LF-only Unix shell scripts, balanced Inno Setup/XML sections),
+// Auto ("Рекомендовано") vs Custom ("Ручний вибір") installation modes, and guarantees every
+// full-ecosystem component is wired across all platforms:
 //   - LanVid Studio + Core + lanvid_dsp_server + Virtual Audio (ASIO/CoreAudio HAL/JACK)
 //   - Layer 2 permissions/drivers (Windows Npcap, macOS ChmodBPF access_bpf, Linux setcap cap_net_raw)
 //   - Background DSP auto-start (LanVidGridDSP / com.lanvid.dspserver.plist / lanvid-dsp.service)
@@ -68,9 +69,11 @@ TEST(installer_windows_ecosystem_validation) {
     REQUIRE(read_file_raw(root / "installer/windows/build_windows_setup.ps1", build_ps1));
     REQUIRE(read_file_raw(root / "installer/windows/setup_wizard.cpp", wizard));
 
-    // 1. Inno Setup script sections, components, files, tasks & uninstall hooks
+    // 1. Inno Setup script sections, Auto/Custom [Types], [Components], [Tasks], [Run], [UninstallRun]
     check_all_tokens("lanvid.iss", iss, {
         "[Setup]", "[Types]", "[Components]", "[Tasks]", "[Files]", "[Icons]", "[Run]", "[UninstallRun]",
+        "Name: \"auto\"", "Name: \"custom\"", "Flags: iscustom",
+        "Types: auto custom", "Types: auto",
         "Name: \"core\"", "Name: \"dsp_server\"", "Name: \"virtual_audio\"",
         "Name: \"grid_l2_npcap\"", "Name: \"obs_plugin\"",
         "lanvid_app.exe", "lanvid_core.dll", "lanvid_dsp_server.exe",
@@ -92,18 +95,21 @@ TEST(installer_windows_ecosystem_validation) {
         "regsvr32.exe", "Remove-NetFirewallRule", "-Uninstall"
     });
 
-    // 3. Packaging script & standalone Win32 setup wizard
+    // 3. Packaging script & standalone Win32 setup wizard (Auto + Custom pages + /S + /COMPONENTS=)
     check_all_tokens("build_windows_setup.ps1", build_ps1, {
         "lanvid_app.exe", "lanvid_core.dll", "lanvid_dsp_server.exe", "LanVidASIO.dll",
-        "preflight.ps1", "obs-lanvid.dll", "npcap-*.exe", "lanvid.iss"
+        "preflight.ps1", "obs-lanvid.dll", "npcap-*.exe", "lanvid.iss", "/COMPONENTS="
     });
     check_all_tokens("setup_wizard.cpp", wizard, {
+        "PAGE_MODE", "PAGE_CUSTOM", "PAGE_PROGRESS",
+        "IDC_RAD_AUTO", "IDC_RAD_CUSTOM", "IDC_CHK_CORE", "IDC_CHK_ASIO",
+        "BS_AUTORADIOBUTTON", "/components=", "/s", "--auto", "--custom", "--check-only",
         "lanvid_dsp_server.exe", "LanVidASIO.dll", "preflight.ps1",
         "-ConfigureFirewall", "-ConfigureQoS", "-InstallDspService",
-        "-InstallNpcap", "-InstallObsPlugin", "-Uninstall", "--check-only"
+        "-InstallNpcap", "-InstallObsPlugin", "-Uninstall"
     });
 
-    std::printf("    [installer-win] lanvid.iss + preflight.ps1 + build_windows_setup.ps1 + setup_wizard.cpp OK\n");
+    std::printf("    [installer-win] lanvid.iss (auto/custom) + preflight.ps1 + build_windows_setup.ps1 + setup_wizard.cpp OK\n");
 }
 
 TEST(installer_macos_ecosystem_validation) {
@@ -122,29 +128,39 @@ TEST(installer_macos_ecosystem_validation) {
     check_all_tokens("sdk/apple/build_macos_pkg.sh", sdk_pkg, {
         "LanVid Studio.app", "/usr/local/bin/lanvid_dsp_server", "/usr/local/lib/liblanvid_core.dylib",
         "LanVidAudio.driver",
+        "com.lanvid.pkg.studio", "com.lanvid.pkg.dspserver", "com.lanvid.pkg.chmodbpf", "com.lanvid.pkg.obsplugin",
         "com.lanvid.dspserver.plist", "<key>KeepAlive</key>", "<key>RunAtLoad</key>",
         "com.lanvid.chmod-bpf.plist", "access_bpf", "/dev/bpf*", "dseditgroup",
         "obs-lanvid.plugin", "Library/Application Support/obs-studio",
-        "socketfilterfw", "--add", "--unblockapp", "com.lanvid.grid.system"
+        "socketfilterfw", "--add", "--unblockapp"
     });
 
     check_all_tokens("installer/macos/build_studio_pkg.sh", studio_pkg, {
+        "customize=\"allow\"",
+        "com.lanvid.pkg.studio", "com.lanvid.pkg.dspserver", "com.lanvid.pkg.chmodbpf", "com.lanvid.pkg.obsplugin",
         "LanVid Studio.app", "lanvid_dsp_server", "liblanvid_core.dylib", "LanVidAudio.driver",
         "com.lanvid.dspserver.plist", "com.lanvid.chmod-bpf.plist", "access_bpf", "/dev/bpf*",
         "obs-lanvid.plugin", "socketfilterfw", "--add", "--unblockapp"
     });
 
+    // macOS Standard Install (all checked) vs Customize (optional modules toggleable, Studio mandatory enabled="false")
     check_all_tokens("sdk/apple/installer/distribution.xml", dist_xml, {
-        "<installer-gui-script", "</installer-gui-script>",
-        "choice_core", "choice_grid", "choice_hal", "com.lanvid.grid.system", "lanvid-grid.pkg"
+        "<installer-gui-script", "</installer-gui-script>", "customize=\"allow\"",
+        "choice_studio", "enabled=\"false\"", "com.lanvid.pkg.studio", "lanvid-studio.pkg",
+        "choice_dspserver", "com.lanvid.pkg.dspserver", "lanvid-dspserver.pkg",
+        "choice_chmodbpf", "com.lanvid.pkg.chmodbpf", "lanvid-chmodbpf.pkg",
+        "choice_obsplugin", "com.lanvid.pkg.obsplugin", "lanvid-obsplugin.pkg",
+        "choice_hal", "com.lanvid.audio.hal"
     });
 
+    // Postinstall must conditionally skip disabled Customize components
     check_all_tokens("sdk/apple/installer/scripts/postinstall", postinst, {
         "/Applications/LanVid Studio.app", "/usr/local/bin/lanvid_dsp_server",
-        "socketfilterfw", "--add", "--unblockapp"
+        "com.lanvid.chmod-bpf.plist", "com.lanvid.dspserver.plist",
+        "Customize mode", "socketfilterfw", "--add", "--unblockapp"
     });
 
-    std::printf("    [installer-mac] build_macos_pkg.sh + build_studio_pkg.sh + distribution.xml + postinstall OK (LF clean)\n");
+    std::printf("    [installer-mac] build_macos_pkg.sh + build_studio_pkg.sh + distribution.xml (Standard/Customize) + postinstall OK (LF clean)\n");
 }
 
 TEST(installer_linux_and_release_ci_validation) {
@@ -170,6 +186,9 @@ TEST(installer_linux_and_release_ci_validation) {
     });
 
     check_all_tokens("installer/linux/install_lanvid.sh", install_linux, {
+        "--auto", "--custom", "--check-only", "ask_yn",
+        "[1]", "[2]", "INSTALL_MODE=\"auto\"", "INSTALL_MODE=\"custom\"",
+        "INSTALL_DSP", "INSTALL_SETCAP", "INSTALL_OBS", "INSTALL_FIREWALL",
         "lanvid_studio", "lanvid_dsp_server", "liblanvid_core.so", "ldconfig",
         "setcap cap_net_raw,cap_net_admin=eip",
         "/etc/systemd/system/lanvid-dsp.service",
@@ -183,5 +202,5 @@ TEST(installer_linux_and_release_ci_validation) {
         "build_studio_pkg.sh", "build_macos_pkg.sh", "lanvid_dsp_server"
     });
 
-    std::printf("    [installer-linux+ci] build_linux_packages.sh + install_lanvid.sh + release.yml OK (LF clean)\n");
+    std::printf("    [installer-linux+ci] build_linux_packages.sh + install_lanvid.sh (auto/custom/check-only) + release.yml OK (LF clean)\n");
 }

@@ -1,14 +1,26 @@
 // LanVid Studio + LanVid Grid (L2 · 256ch) + DSP Server — Standalone One-Click Windows Setup Wizard
 // Zero external runtime dependencies (pure Win32 + COM + D3D11 + Winsock2 + embedded ZIP payload).
-// Performs full out-of-the-box ecosystem setup:
-//   1. Detects & gracefully closes running lanvid_app.exe / lanvid_dsp_server.exe / sender.exe / receiver.exe
-//   2. Probes UDP port 5000 availability; auto-selects free port (5002+) in %APPDATA%\LanVid\config.json
-//   3. Verifies VC++ 2015-2022 (x64) Redistributable in Registry; silent auto-installs if missing
-//   4. Probes Direct3D 11 hardware support & checks Npcap (System32\Npcap\wpcap.dll) for Grid L2
-//   5. Extracts embedded payload (Studio, Grid DSP Server, Virtual ASIO, OBS plugin, preflight.ps1)
-//   6. Registers 64ch LanVid Virtual ASIO, LanVidGridDSP auto-start background service, Npcap L2 driver,
-//      OBS Studio plugin (auto-detected), Windows Defender Firewall (Domain/Private/Public), Policy-based
-//      QoS DSCP=46 (EF), socket buffer/MMCSS tuning, optional High Performance power plan, and clean Uninstaller.
+//
+// Wizard Modes:
+//   Page 0 (Mode Selection):
+//     1. Автоматичне встановлення (Рекомендовано) — 1-click full ecosystem deployment
+//     2. Ручний вибір (Вибіркове встановлення)    — interactive component selection page
+//   Page 1 (Custom Components):
+//     - LanVid Studio (обов'язково, locked)
+//     - LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP
+//     - LanVid Virtual ASIO Driver (64ch)
+//     - Npcap Driver (Layer 2 Grid 256ch)
+//     - OBS Studio Plugin (obs-lanvid.dll)
+//     - Правила Windows Firewall та QoS DSCP=46
+//     - Профіль живлення High Performance
+//     - Ярлик на Робочому столі
+//   Page 2 (Installation Progress & Launch)
+//
+// CLI flags:
+//   /S | --silent | --auto        Silent automatic full installation
+//   --custom                      Open wizard directly on the custom components page
+//   /COMPONENTS=core,dsp_server,… Select specific components (works with /S or interactive)
+//   --check-only                  Run pre-flight environment diagnostics and exit 0
 
 #ifndef UNICODE
 #define UNICODE
@@ -29,9 +41,11 @@
 #include <tlhelp32.h>
 #include <urlmon.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -54,17 +68,38 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr int IDC_LOG = 1001;
-constexpr int IDC_PROGRESS = 1002;
-constexpr int IDC_CHK_DESKTOP = 1003;
-constexpr int IDC_CHK_FIREWALL = 1004;
-constexpr int IDC_CHK_DSP_SVC = 1005;
-constexpr int IDC_CHK_NPCAP = 1006;
-constexpr int IDC_CHK_OBS = 1007;
-constexpr int IDC_CHK_HIGH_PERF = 1008;
-constexpr int IDC_CHK_LAUNCH = 1009;
-constexpr int IDC_BTN_INSTALL = 1010;
-constexpr int IDC_BTN_CLOSE = 1011;
+enum WizardPage {
+    PAGE_MODE = 0,
+    PAGE_CUSTOM = 1,
+    PAGE_PROGRESS = 2,
+};
+
+// Control IDs
+constexpr int IDC_TITLE = 1000;
+constexpr int IDC_SUBTITLE = 1001;
+// Page 0: Mode selection
+constexpr int IDC_RAD_AUTO = 1010;
+constexpr int IDC_DESC_AUTO = 1011;
+constexpr int IDC_RAD_CUSTOM = 1012;
+constexpr int IDC_DESC_CUSTOM = 1013;
+constexpr int IDC_PREFLIGHT_SUMMARY = 1014;
+// Page 1: Custom components
+constexpr int IDC_CHK_CORE = 1020;
+constexpr int IDC_CHK_DSP_SVC = 1021;
+constexpr int IDC_CHK_ASIO = 1022;
+constexpr int IDC_CHK_NPCAP = 1023;
+constexpr int IDC_CHK_OBS = 1024;
+constexpr int IDC_CHK_FIREWALL = 1025;
+constexpr int IDC_CHK_HIGH_PERF = 1026;
+constexpr int IDC_CHK_DESKTOP = 1027;
+// Page 2: Progress
+constexpr int IDC_LOG = 1030;
+constexpr int IDC_PROGRESS = 1031;
+constexpr int IDC_CHK_LAUNCH = 1032;
+// Navigation buttons
+constexpr int IDC_BTN_BACK = 1040;
+constexpr int IDC_BTN_NEXT = 1041;
+constexpr int IDC_BTN_CLOSE = 1042;
 
 struct PreflightReport {
     int running_procs = 0;
@@ -79,29 +114,96 @@ struct PreflightReport {
 };
 
 struct InstallOptions {
-    bool desktop = true;
-    bool firewall_qos = true;
+    bool auto_mode = true;
+    bool core = true;              // always required
     bool dsp_service = true;
+    bool virtual_audio = true;
     bool grid_npcap = true;
     bool obs_plugin = true;
+    bool firewall_qos = true;
     bool high_perf_power = false;
+    bool desktop = true;
     bool silent = false;
 };
 
 HWND g_hwnd = nullptr;
-HWND g_log = nullptr;
-HWND g_prog = nullptr;
-HWND g_chk_desktop = nullptr;
-HWND g_chk_fw = nullptr;
+HWND g_title = nullptr;
+HWND g_sub = nullptr;
+// Page 0 controls
+HWND g_rad_auto = nullptr;
+HWND g_desc_auto = nullptr;
+HWND g_rad_custom = nullptr;
+HWND g_desc_custom = nullptr;
+HWND g_preflight_box = nullptr;
+// Page 1 controls
+HWND g_chk_core = nullptr;
 HWND g_chk_dsp = nullptr;
+HWND g_chk_asio = nullptr;
 HWND g_chk_npcap = nullptr;
 HWND g_chk_obs = nullptr;
+HWND g_chk_fw = nullptr;
 HWND g_chk_highperf = nullptr;
+HWND g_chk_desktop = nullptr;
+// Page 2 controls
+HWND g_log = nullptr;
+HWND g_prog = nullptr;
 HWND g_chk_launch = nullptr;
-HWND g_btn_install = nullptr;
+// Navigation
+HWND g_btn_back = nullptr;
+HWND g_btn_next = nullptr;
 HWND g_btn_close = nullptr;
+
 PreflightReport g_rep{};
+InstallOptions g_cli_opt{};
+WizardPage g_page = PAGE_MODE;
+bool g_start_on_custom = false;
 bool g_installed = false;
+
+std::wstring to_lower_copy(std::wstring s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    return s;
+}
+
+bool parse_cli_components(const std::wstring& cmd_line, InstallOptions& opt) {
+    const std::wstring lower = to_lower_copy(cmd_line);
+    const std::wstring key = L"/components=";
+    size_t pos = lower.find(key);
+    if (pos == std::wstring::npos) return false;
+    pos += key.size();
+    std::wstring val;
+    if (pos < cmd_line.size() && cmd_line[pos] == L'"') {
+        ++pos;
+        size_t end = cmd_line.find(L'"', pos);
+        val = cmd_line.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+    } else {
+        size_t end = cmd_line.find_first_of(L" \t", pos);
+        val = cmd_line.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
+    }
+
+    opt.auto_mode = false;
+    opt.core = true;  // mandatory
+    opt.dsp_service = false;
+    opt.virtual_audio = false;
+    opt.grid_npcap = false;
+    opt.obs_plugin = false;
+    opt.firewall_qos = false;
+    opt.high_perf_power = false;
+
+    std::wstringstream ss(to_lower_copy(val));
+    std::wstring item;
+    while (std::getline(ss, item, L',')) {
+        if (item == L"core" || item == L"studio") opt.core = true;
+        else if (item == L"dsp_server" || item == L"dsp") opt.dsp_service = true;
+        else if (item == L"virtual_audio" || item == L"asio") opt.virtual_audio = true;
+        else if (item == L"grid_l2_npcap" || item == L"npcap" || item == L"grid_l2") opt.grid_npcap = true;
+        else if (item == L"obs_plugin" || item == L"obs") opt.obs_plugin = true;
+        else if (item == L"firewall" || item == L"qos" || item == L"firewall_qos" || item == L"net_opt")
+            opt.firewall_qos = true;
+        else if (item == L"high_perf_power" || item == L"high_perf" || item == L"power")
+            opt.high_perf_power = true;
+    }
+    return true;
+}
 
 void append_log(const std::wstring& line) {
     if (!g_log) return;
@@ -405,6 +507,10 @@ bool execute_install(const InstallOptions& opt) {
         if (!opt.silent && g_prog) SendMessageW(g_prog, PBM_SETPOS, pct, 0);
     };
 
+    log_msg(opt.auto_mode
+                ? L"Режим: Автоматичне встановлення (Рекомендовано — повна екосистема)"
+                : L"Режим: Ручний вибір (Вибіркове встановлення обраних компонентів)");
+
     set_prog(10);
     if (g_rep.running_procs > 0) {
         log_msg(L"[1/7] Закриття активних процесів LanVid / DSP Server...");
@@ -429,15 +535,20 @@ bool execute_install(const InstallOptions& opt) {
     }
 
     set_prog(40);
-    log_msg(L"[3/7] Розпакування Studio, Grid DSP Server, ASIO та плагіна OBS у " +
-            g_rep.install_dir.wstring() + L"...");
+    log_msg(L"[3/7] Розпакування файлів у " + g_rep.install_dir.wstring() + L"...");
     if (!extract_embedded_payload(g_rep.install_dir)) {
         log_msg(L"ПОМИЛКА: не вдалося розпакувати інсталяційний архів.");
         return false;
     }
 
+    // Remove unselected optional binaries/staging if user explicitly unchecked them in custom mode
+    std::error_code rem_ec;
+    if (!opt.dsp_service) {
+        fs::remove(g_rep.install_dir / L"lanvid_dsp_server.exe", rem_ec);
+    }
+
     set_prog(55);
-    {   // 64-channel virtual ASIO device (64-bit COM registration in HKLM\SOFTWARE\ASIO)
+    if (opt.virtual_audio) {
         const std::wstring asio = (g_rep.install_dir / L"LanVidASIO.dll").wstring();
         const std::wstring regsvr = L"C:\\Windows\\System32\\regsvr32.exe";
         const std::wstring reg_args = L"/s \"" + asio + L"\"";
@@ -455,6 +566,8 @@ bool execute_install(const InstallOptions& opt) {
         } else {
             log_msg(L"[4/7] ASIO-драйвер: реєстрація пропущена (потрібні права Адміністратора).");
         }
+    } else {
+        log_msg(L"[4/7] ASIO-драйвер «LanVid Virtual ASIO»: пропущено користувачем.");
     }
 
     set_prog(68);
@@ -463,9 +576,10 @@ bool execute_install(const InstallOptions& opt) {
     write_initial_config(g_rep.chosen_port, g_rep.d3d11_ok);
 
     set_prog(82);
-    {   // Delegate Firewall, QoS DSCP=46, socket buffers, LanVidGridDSP, Npcap, OBS plugin to preflight.ps1
+    {
         const fs::path pf = g_rep.install_dir / L"preflight.ps1";
-        if (fs::exists(pf)) {
+        if (fs::exists(pf) &&
+            (opt.firewall_qos || opt.high_perf_power || opt.dsp_service || opt.grid_npcap || opt.obs_plugin)) {
             std::wstring ps_args = L"-NoProfile -ExecutionPolicy Bypass -File \"" + pf.wstring() +
                                    L"\" -InstallDir \"" + g_rep.install_dir.wstring() + L"\"";
             if (opt.firewall_qos) ps_args += L" -ConfigureFirewall -ConfigureQoS -TuneNetwork";
@@ -475,7 +589,7 @@ bool execute_install(const InstallOptions& opt) {
             if (opt.obs_plugin) ps_args += L" -InstallObsPlugin";
             if (opt.silent) ps_args += L" -Silent";
 
-            log_msg(L"[6/7] Налаштування Firewall, QoS DSCP=46, LanVidGridDSP, Npcap L2 та OBS...");
+            log_msg(L"[6/7] Виконання системного налаштування обраних модулів...");
             DWORD ec_pf = 0;
             run_hidden_cmd(L"powershell.exe " + ps_args, &ec_pf, 300000);
             if (ec_pf == 0) {
@@ -483,6 +597,8 @@ bool execute_install(const InstallOptions& opt) {
             } else {
                 log_msg(L"      Системне налаштування завершено з попередженням (код " + std::to_wstring(ec_pf) + L").");
             }
+        } else {
+            log_msg(L"[6/7] Додаткові системні модулі пропущено згідно з вибором користувача.");
         }
     }
 
@@ -494,7 +610,7 @@ bool execute_install(const InstallOptions& opt) {
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &sm_dir))) {
         create_shortcut(fs::path(sm_dir) / L"LanVid Studio" / L"LanVid Studio.lnk", app_exe,
                         g_rep.install_dir, L"LanVid Studio + Grid L2 — Ultra-Low Latency LAN Video & Audio");
-        if (fs::exists(dsp_exe)) {
+        if (opt.dsp_service && fs::exists(dsp_exe)) {
             create_shortcut(fs::path(sm_dir) / L"LanVid Studio" / L"LanVid Grid DSP Server.lnk", dsp_exe,
                             g_rep.install_dir, L"LanVid Grid 256ch Layer 2 Distributed DSP Server");
         }
@@ -516,107 +632,222 @@ bool execute_install(const InstallOptions& opt) {
     return true;
 }
 
+void show_page(WizardPage p) {
+    g_page = p;
+    auto set_vis = [](HWND h, bool show) {
+        if (h) ShowWindow(h, show ? SW_SHOW : SW_HIDE);
+    };
+
+    const bool p0 = (p == PAGE_MODE);
+    const bool p1 = (p == PAGE_CUSTOM);
+    const bool p2 = (p == PAGE_PROGRESS);
+
+    set_vis(g_rad_auto, p0);
+    set_vis(g_desc_auto, p0);
+    set_vis(g_rad_custom, p0);
+    set_vis(g_desc_custom, p0);
+    set_vis(g_preflight_box, p0);
+
+    set_vis(g_chk_core, p1);
+    set_vis(g_chk_dsp, p1);
+    set_vis(g_chk_asio, p1);
+    set_vis(g_chk_npcap, p1);
+    set_vis(g_chk_obs, p1);
+    set_vis(g_chk_fw, p1);
+    set_vis(g_chk_highperf, p1);
+    set_vis(g_chk_desktop, p1);
+
+    set_vis(g_log, p2);
+    set_vis(g_prog, p2);
+    set_vis(g_chk_launch, p2);
+
+    if (p0) {
+        SetWindowTextW(g_sub, L"Оберіть режим встановлення LanVid Studio + Grid L2:");
+        set_vis(g_btn_back, false);
+        const bool is_auto = (SendMessageW(g_rad_auto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        SetWindowTextW(g_btn_next, is_auto ? L"Встановити" : L"Далі >");
+        SetWindowTextW(g_btn_close, L"Скасувати");
+        EnableWindow(g_btn_next, TRUE);
+    } else if (p1) {
+        SetWindowTextW(g_sub, L"Ручний вибір (Вибіркове встановлення) — позначте потрібні модулі:");
+        set_vis(g_btn_back, true);
+        SetWindowTextW(g_btn_next, L"Встановити");
+        SetWindowTextW(g_btn_close, L"Скасувати");
+        EnableWindow(g_btn_next, TRUE);
+    } else {
+        SetWindowTextW(g_sub, L"Виконання встановлення та налаштування системи:");
+        set_vis(g_btn_back, false);
+        SetWindowTextW(g_btn_next, g_installed ? L"Готово" : L"Встановлення...");
+        SetWindowTextW(g_btn_close, g_installed ? L"Закрити" : L"Скасувати");
+    }
+}
+
+InstallOptions read_custom_checkboxes() {
+    InstallOptions opt{};
+    opt.auto_mode = false;
+    opt.core = true;
+    opt.dsp_service = SendMessageW(g_chk_dsp, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.virtual_audio = SendMessageW(g_chk_asio, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.grid_npcap = SendMessageW(g_chk_npcap, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.obs_plugin = SendMessageW(g_chk_obs, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.firewall_qos = SendMessageW(g_chk_fw, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.high_perf_power = SendMessageW(g_chk_highperf, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.desktop = SendMessageW(g_chk_desktop, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.silent = false;
+    return opt;
+}
+
+void start_install_ui(const InstallOptions& opt) {
+    show_page(PAGE_PROGRESS);
+    EnableWindow(g_btn_next, FALSE);
+    UpdateWindow(g_hwnd);
+    if (execute_install(opt)) {
+        SetWindowTextW(g_btn_next, L"Готово");
+        SetWindowTextW(g_btn_close, L"Закрити");
+        EnableWindow(g_btn_next, TRUE);
+    } else {
+        SetWindowTextW(g_btn_next, L"Повторити");
+        EnableWindow(g_btn_next, TRUE);
+    }
+}
+
 LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             HFONT font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                      0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-            HFONT bold = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                     0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-
-            HWND title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio + Grid L2 v2.6.0",
-                                       WS_VISIBLE | WS_CHILD, 20, 12, 560, 26, hwnd, nullptr, nullptr, nullptr);
-            SendMessageW(title, WM_SETFONT, WPARAM(bold), TRUE);
-
-            HWND sub = CreateWindowW(
-                L"STATIC", L"Автоматичне налаштування Studio, Grid L2 (256ch), DSP Server, ASIO, OBS та Firewall:",
-                WS_VISIBLE | WS_CHILD, 20, 40, 560, 20, hwnd, nullptr, nullptr, nullptr);
-            SendMessageW(sub, WM_SETFONT, WPARAM(font), TRUE);
+            HFONT font_bold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                          0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HFONT title_font = CreateFontW(-20, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                           0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
             auto ctl_id = [](int id) { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); };
 
-            g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                    WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-                                    20, 66, 560, 185, hwnd, ctl_id(IDC_LOG), nullptr, nullptr);
-            SendMessageW(g_log, WM_SETFONT, WPARAM(font), TRUE);
+            g_title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio + Grid L2 v2.6.0",
+                                    WS_VISIBLE | WS_CHILD, 20, 14, 570, 28, hwnd, ctl_id(IDC_TITLE), nullptr, nullptr);
+            SendMessageW(g_title, WM_SETFONT, WPARAM(title_font), TRUE);
 
-            g_prog = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_VISIBLE | WS_CHILD,
-                                     20, 258, 560, 16, hwnd, ctl_id(IDC_PROGRESS), nullptr, nullptr);
-            SendMessageW(g_prog, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+            g_sub = CreateWindowW(L"STATIC", L"Оберіть режим встановлення LanVid Studio + Grid L2:",
+                                  WS_VISIBLE | WS_CHILD, 20, 44, 570, 22, hwnd, ctl_id(IDC_SUBTITLE), nullptr, nullptr);
+            SendMessageW(g_sub, WM_SETFONT, WPARAM(font), TRUE);
 
-            auto make_chk = [&](const wchar_t* label, int y, int id, bool checked) -> HWND {
-                HWND h = CreateWindowW(L"BUTTON", label, WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                                       20, y, 560, 21, hwnd, ctl_id(id), nullptr, nullptr);
+            // ---- PAGE 0: Mode Selection ----
+            g_rad_auto = CreateWindowW(
+                L"BUTTON", L"Автоматичне встановлення (Рекомендовано)",
+                WS_CHILD | WS_GROUP | BS_AUTORADIOBUTTON, 24, 82, 560, 24, hwnd, ctl_id(IDC_RAD_AUTO), nullptr, nullptr);
+            SendMessageW(g_rad_auto, WM_SETFONT, WPARAM(font_bold), TRUE);
+            SendMessageW(g_rad_auto, BM_SETCHECK, g_start_on_custom ? BST_UNCHECKED : BST_CHECKED, 0);
+
+            g_desc_auto = CreateWindowW(
+                L"STATIC",
+                L"У 1 клік встановлює всі компоненти: LanVid Studio, LanVid Grid DSP Server (фонова служба\r\n"
+                L"з автозапуском), 64ch Virtual ASIO, Npcap (Layer 2 Ethernet), OBS Studio плагін,\r\n"
+                L"правила Firewall, QoS DSCP=46 та оптимізацію мережі без зайвих вікон.",
+                WS_CHILD, 44, 108, 540, 56, hwnd, ctl_id(IDC_DESC_AUTO), nullptr, nullptr);
+            SendMessageW(g_desc_auto, WM_SETFONT, WPARAM(font), TRUE);
+
+            g_rad_custom = CreateWindowW(
+                L"BUTTON", L"Ручний вибір (Вибіркове встановлення)",
+                WS_CHILD | BS_AUTORADIOBUTTON, 24, 178, 560, 24, hwnd, ctl_id(IDC_RAD_CUSTOM), nullptr, nullptr);
+            SendMessageW(g_rad_custom, WM_SETFONT, WPARAM(font_bold), TRUE);
+            SendMessageW(g_rad_custom, BM_SETCHECK, g_start_on_custom ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            g_desc_custom = CreateWindowW(
+                L"STATIC",
+                L"Відкриває сторінку вибору компонентів, де ви самостійно вмикаєте/вимикаєте DSP Server,\r\n"
+                L"Virtual ASIO (64ch), Npcap L2, OBS плагін, правила Firewall/QoS та профіль High Performance.",
+                WS_CHILD, 44, 204, 540, 42, hwnd, ctl_id(IDC_DESC_CUSTOM), nullptr, nullptr);
+            SendMessageW(g_desc_custom, WM_SETFONT, WPARAM(font), TRUE);
+
+            std::wstring summary =
+                L"Папка встановлення: " + g_rep.install_dir.wstring() + L"\r\n" +
+                (g_rep.vc_redist_ok ? L"[OK] VC++ 2015-2022 Redistributable (x64)   " : L"[ІНФО] VC++ Redist буде довстановлено   ") +
+                (g_rep.d3d11_ok ? L"[OK] Direct3D 11\r\n" : L"[ІНФО] GDI fallback\r\n") +
+                (g_rep.npcap_ok ? L"[OK] Npcap (Grid L2 готовий)   " : L"[ІНФО] Npcap буде перевірено/встановлено   ") +
+                (g_rep.obs_found ? L"[OK] OBS Studio виявлено" : L"[ІНФО] OBS Studio не знайдено");
+            g_preflight_box = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", summary.c_str(),
+                WS_CHILD | ES_MULTILINE | ES_READONLY, 24, 266, 560, 82, hwnd, ctl_id(IDC_PREFLIGHT_SUMMARY), nullptr, nullptr);
+            SendMessageW(g_preflight_box, WM_SETFONT, WPARAM(font), TRUE);
+
+            // ---- PAGE 1: Custom Components ----
+            auto make_chk = [&](const wchar_t* label, int y, int id, bool checked, bool enabled = true) -> HWND {
+                HWND h = CreateWindowW(L"BUTTON", label, WS_CHILD | BS_AUTOCHECKBOX,
+                                       24, y, 560, 24, hwnd, ctl_id(id), nullptr, nullptr);
                 SendMessageW(h, WM_SETFONT, WPARAM(font), TRUE);
-                if (checked) SendMessageW(h, BM_SETCHECK, BST_CHECKED, 0);
+                SendMessageW(h, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+                if (!enabled) EnableWindow(h, FALSE);
                 return h;
             };
 
-            g_chk_desktop = make_chk(L"Створити ярлик «LanVid Studio» на Робочому столі", 282, IDC_CHK_DESKTOP, true);
-            g_chk_fw = make_chk(L"Firewall (UDP 5000-5035, 5353 + TCP) + Policy QoS DSCP=46 + буфери сокетів", 306, IDC_CHK_FIREWALL, true);
-            g_chk_dsp = make_chk(L"LanVid Grid DSP Server (фонова служба LanVidGridDSP з автозапуском і Failover)", 330, IDC_CHK_DSP_SVC, true);
-            g_chk_npcap = make_chk(L"LanVid Grid Layer 2: перевірити / встановити драйвер Npcap (для Ethernet 256ch)", 354, IDC_CHK_NPCAP, true);
-            g_chk_obs = make_chk(L"Автоматично встановити плагін OBS Studio (obs-lanvid.dll + локалізації)", 378, IDC_CHK_OBS, true);
-            g_chk_highperf = make_chk(L"Увімкнути профіль живлення «Висока продуктивність» (High Performance)", 402, IDC_CHK_HIGH_PERF, false);
-            g_chk_launch = make_chk(L"Запустити LanVid Studio після встановлення", 426, IDC_CHK_LAUNCH, true);
+            g_chk_core = make_chk(L"LanVid Studio (обов'язково — основний застосунок і ядро lanvid_core.dll)", 82, IDC_CHK_CORE, true, false);
+            g_chk_dsp = make_chk(L"LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP", 112, IDC_CHK_DSP_SVC, g_cli_opt.dsp_service);
+            g_chk_asio = make_chk(L"LanVid Virtual ASIO Driver (64ch In / 64ch Out)", 142, IDC_CHK_ASIO, g_cli_opt.virtual_audio);
+            g_chk_npcap = make_chk(L"Npcap Driver (Layer 2 Grid 256ch Ethernet)", 172, IDC_CHK_NPCAP, g_cli_opt.grid_npcap);
+            g_chk_obs = make_chk(L"OBS Studio Plugin (obs-lanvid.dll + локалізації)", 202, IDC_CHK_OBS, g_cli_opt.obs_plugin);
+            g_chk_fw = make_chk(L"Правила Windows Firewall та QoS DSCP=46 (EF) + оптимізація сокетів", 232, IDC_CHK_FIREWALL, g_cli_opt.firewall_qos);
+            g_chk_highperf = make_chk(L"Профіль живлення High Performance (максимальна стабільність аудіо)", 262, IDC_CHK_HIGH_PERF, g_cli_opt.high_perf_power);
+            g_chk_desktop = make_chk(L"Створити ярлик «LanVid Studio» на Робочому столі", 298, IDC_CHK_DESKTOP, g_cli_opt.desktop);
 
-            g_btn_install = CreateWindowW(L"BUTTON", L"Встановити зараз",
-                                          WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 342, 460, 140, 34,
-                                          hwnd, ctl_id(IDC_BTN_INSTALL), nullptr, nullptr);
-            SendMessageW(g_btn_install, WM_SETFONT, WPARAM(font), TRUE);
+            // ---- PAGE 2: Progress ----
+            g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                    WS_CHILD | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+                                    20, 76, 564, 248, hwnd, ctl_id(IDC_LOG), nullptr, nullptr);
+            SendMessageW(g_log, WM_SETFONT, WPARAM(font), TRUE);
+
+            g_prog = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD,
+                                     20, 332, 564, 18, hwnd, ctl_id(IDC_PROGRESS), nullptr, nullptr);
+            SendMessageW(g_prog, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+
+            g_chk_launch = make_chk(L"Запустити LanVid Studio після встановлення", 360, IDC_CHK_LAUNCH, true);
+
+            // ---- Navigation Buttons ----
+            g_btn_back = CreateWindowW(L"BUTTON", L"< Назад", WS_CHILD,
+                                       226, 404, 100, 34, hwnd, ctl_id(IDC_BTN_BACK), nullptr, nullptr);
+            SendMessageW(g_btn_back, WM_SETFONT, WPARAM(font), TRUE);
+
+            g_btn_next = CreateWindowW(L"BUTTON", L"Встановити",
+                                       WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON, 336, 404, 142, 34,
+                                       hwnd, ctl_id(IDC_BTN_NEXT), nullptr, nullptr);
+            SendMessageW(g_btn_next, WM_SETFONT, WPARAM(font), TRUE);
 
             g_btn_close = CreateWindowW(L"BUTTON", L"Скасувати", WS_VISIBLE | WS_CHILD,
-                                        492, 460, 88, 34, hwnd, ctl_id(IDC_BTN_CLOSE), nullptr, nullptr);
+                                        488, 404, 96, 34, hwnd, ctl_id(IDC_BTN_CLOSE), nullptr, nullptr);
             SendMessageW(g_btn_close, WM_SETFONT, WPARAM(font), TRUE);
 
-            append_log(L"Папка встановлення: " + g_rep.install_dir.wstring());
-            append_log(g_rep.running_procs > 0
-                           ? (L"[УВАГА] Знайдено активних процесів LanVid: " + std::to_wstring(g_rep.running_procs) + L" (будуть закриті)")
-                           : L"[OK] Активних конфліктних процесів немає.");
-            append_log(g_rep.port_5000_busy
-                           ? (L"[УВАГА] UDP порт 5000 зайнятий -> автопризначено порт " + std::to_wstring(g_rep.chosen_port))
-                           : L"[OK] UDP порт 5000 вільний.");
-            append_log(g_rep.vc_redist_ok
-                           ? L"[OK] Visual C++ 2015-2022 Redistributable (x64) встановлено."
-                           : L"[ІНФО] VC++ Redistributable x64 відсутній -> буде встановлено автоматично.");
-            append_log(g_rep.d3d11_ok
-                           ? L"[OK] Апаратний Direct3D 11 підтримується."
-                           : L"[ІНФО] Direct3D 11 недоступний -> буде активовано GDI fallback.");
-            append_log(g_rep.npcap_ok
-                           ? L"[OK] Npcap (System32\\Npcap\\wpcap.dll) знайдено — LanVid Grid L2 готовий."
-                           : L"[ІНФО] Npcap не знайдено — буде запропоновано встановлення для LanVid Grid L2.");
-            append_log(g_rep.obs_found
-                           ? L"[OK] OBS Studio виявлено — плагін obs-lanvid буде скопійовано автоматично."
-                           : L"[ІНФО] OBS Studio не виявлено (файли плагіна збережуться у папці LanVid).");
+            show_page(g_start_on_custom ? PAGE_CUSTOM : PAGE_MODE);
             return 0;
         }
         case WM_COMMAND: {
             const int id = LOWORD(wp);
-            if (id == IDC_BTN_INSTALL) {
-                if (!g_installed) {
-                    EnableWindow(g_btn_install, FALSE);
-                    InstallOptions opt{};
-                    opt.desktop = SendMessageW(g_chk_desktop, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.firewall_qos = SendMessageW(g_chk_fw, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.dsp_service = SendMessageW(g_chk_dsp, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.grid_npcap = SendMessageW(g_chk_npcap, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.obs_plugin = SendMessageW(g_chk_obs, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.high_perf_power = SendMessageW(g_chk_highperf, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    opt.silent = false;
-                    if (execute_install(opt)) {
-                        SetWindowTextW(g_btn_install, L"Готово");
-                        SetWindowTextW(g_btn_close, L"Закрити");
-                        EnableWindow(g_btn_install, TRUE);
+            if (id == IDC_RAD_AUTO || id == IDC_RAD_CUSTOM) {
+                const bool is_auto = (SendMessageW(g_rad_auto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                SetWindowTextW(g_btn_next, is_auto ? L"Встановити" : L"Далі >");
+            } else if (id == IDC_BTN_BACK) {
+                if (g_page == PAGE_CUSTOM) show_page(PAGE_MODE);
+            } else if (id == IDC_BTN_NEXT) {
+                if (g_page == PAGE_MODE) {
+                    const bool is_auto = (SendMessageW(g_rad_auto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    if (is_auto) {
+                        InstallOptions auto_opt{};
+                        auto_opt.auto_mode = true;
+                        start_install_ui(auto_opt);
                     } else {
-                        EnableWindow(g_btn_install, TRUE);
+                        show_page(PAGE_CUSTOM);
                     }
-                } else {
-                    if (SendMessageW(g_chk_launch, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-                        const fs::path exe = g_rep.install_dir / L"lanvid_app.exe";
-                        ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, g_rep.install_dir.c_str(),
-                                      SW_SHOWNORMAL);
+                } else if (g_page == PAGE_CUSTOM) {
+                    start_install_ui(read_custom_checkboxes());
+                } else if (g_page == PAGE_PROGRESS) {
+                    if (!g_installed) {
+                        start_install_ui(read_custom_checkboxes());
+                    } else {
+                        if (SendMessageW(g_chk_launch, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+                            const fs::path exe = g_rep.install_dir / L"lanvid_app.exe";
+                            ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, g_rep.install_dir.c_str(),
+                                          SW_SHOWNORMAL);
+                        }
+                        DestroyWindow(hwnd);
                     }
-                    DestroyWindow(hwnd);
                 }
             } else if (id == IDC_BTN_CLOSE) {
                 DestroyWindow(hwnd);
@@ -641,7 +872,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR cmdLine, int nShow) {
     g_rep = run_preflight_scan();
 
     const std::wstring args = cmdLine ? cmdLine : L"";
-    if (args.find(L"--check-only") != std::wstring::npos) {
+    const std::wstring lower_args = to_lower_copy(args);
+
+    if (lower_args.find(L"--check-only") != std::wstring::npos) {
         std::printf("LanVid_Setup preflight: procs=%d port5000_busy=%d chosen_port=%u vc_redist=%d d3d11=%d npcap=%d obs=%d\n",
                     g_rep.running_procs, g_rep.port_5000_busy ? 1 : 0, unsigned(g_rep.chosen_port),
                     g_rep.vc_redist_ok ? 1 : 0, g_rep.d3d11_ok ? 1 : 0,
@@ -650,13 +883,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR cmdLine, int nShow) {
         WSACleanup();
         return 0;
     }
-    if (args.find(L"--silent") != std::wstring::npos) {
-        InstallOptions opt{};
-        opt.silent = true;
-        const bool ok = execute_install(opt);
+
+    const bool has_components = parse_cli_components(args, g_cli_opt);
+    const bool silent_flag = (lower_args.find(L"--silent") != std::wstring::npos ||
+                              lower_args.find(L"--auto") != std::wstring::npos ||
+                              lower_args.find(L"/s") != std::wstring::npos);
+
+    if (silent_flag) {
+        g_cli_opt.silent = true;
+        if (!has_components) g_cli_opt.auto_mode = true;
+        const bool ok = execute_install(g_cli_opt);
         CoUninitialize();
         WSACleanup();
         return ok ? 0 : 1;
+    }
+
+    if (has_components || lower_args.find(L"--custom") != std::wstring::npos) {
+        g_start_on_custom = true;
     }
 
     WNDCLASSEXW wc{sizeof(wc)};
@@ -669,7 +912,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR cmdLine, int nShow) {
 
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"LanVid Studio + Grid L2 — Встановлення",
                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 616, 548, nullptr, nullptr, hInst, nullptr);
+                             CW_USEDEFAULT, CW_USEDEFAULT, 620, 492, nullptr, nullptr, hInst, nullptr);
     ShowWindow(g_hwnd, nShow);
     UpdateWindow(g_hwnd);
 

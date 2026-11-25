@@ -4,20 +4,15 @@
 #   - dist/apple/LanVidSDK-v2.6.0-macOS.pkg  (Universal arm64 NEON + x86_64 AVX2 Installer.app package)
 #   - dist/apple/LanVidSDK-v2.6.0-macOS.dmg  (Drag/double-click Finder disk image with .pkg + Verify script)
 #
-# Installs out of the box:
-#   1. LanVid Studio.app -> /Applications/ (when built), lanvid_dsp_server -> /usr/local/bin/lanvid_dsp_server,
-#      liblanvid_core.dylib -> /usr/local/lib/liblanvid_core.dylib
-#   2. LanVidAudio.driver (64ch CoreAudio HAL) -> /Library/Audio/Plug-Ins/HAL/
-#   3. LanVid Grid DSP Server LaunchDaemon -> /Library/LaunchDaemons/com.lanvid.dspserver.plist (KeepAlive + RunAtLoad)
-#   4. LanVid Grid L2 ChmodBPF LaunchDaemon -> /Library/LaunchDaemons/com.lanvid.chmod-bpf.plist
-#      (grants access_bpf group rw on /dev/bpf* and adds console user to access_bpf for rootless L2 Ethernet)
-#   5. Automatic OBS Studio plugin installation (obs-lanvid.plugin -> ~/Library/Application Support/obs-studio/plugins/)
-#   6. macOS Application Firewall exemptions via socketfilterfw (--add & --unblockapp)
-#
-# Run on macOS (Apple Silicon M1-M4 or Intel Mac) with Xcode Command Line Tools + CMake:
-#   ./sdk/apple/build_macos_pkg.sh
-# Optional signing:
-#   LANVID_INSTALLER_SIGN_ID="Developer ID Installer: Your Name (TEAMID)" ./sdk/apple/build_macos_pkg.sh
+# Supports BOTH Installer.app modes via distribution.xml (customize="allow"):
+#   - Standard Install ("Інсталювати"): automatically installs all packages (Studio + DSP Server + ChmodBPF + OBS + HAL)
+#   - Customize ("Налаштувати"): lets users toggle individual optional components:
+#       * com.lanvid.pkg.studio     (mandatory, enabled="false"): LanVid Studio.app + liblanvid_core.dylib + SDK + Firewall
+#       * com.lanvid.pkg.dspserver  (optional): /usr/local/bin/lanvid_dsp_server + com.lanvid.dspserver.plist (KeepAlive)
+#       * com.lanvid.pkg.chmodbpf   (optional): ChmodBPF helper + com.lanvid.chmod-bpf.plist (access_bpf -> /dev/bpf*)
+#       * com.lanvid.pkg.obsplugin  (optional): obs-lanvid.plugin -> ~/Library/Application Support/obs-studio/plugins/
+#       * com.lanvid.audio.hal      (optional): LanVidAudio.driver (64ch CoreAudio HAL)
+#       * com.lanvid.sdk.swift / com.lanvid.sdk.extras (optional)
 
 set -euo pipefail
 
@@ -99,7 +94,6 @@ lipo -create \
   "$BUILD_DIR/macos-x86_64/lanvid_dsp_server" \
   -output "$UNIV_BIN_DIR/lanvid_dsp_server"
 
-# Set canonical install_name and sign (mandatory on Apple Silicon arm64!)
 install_name_tool -id "/usr/local/lib/liblanvid_core.dylib" "$UNIV_LIB_DIR/liblanvid_core.dylib"
 if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
   codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$UNIV_LIB_DIR/liblanvid_core.dylib"
@@ -116,24 +110,25 @@ if [ -z "${LANVID_SKIP_XCFRAMEWORK:-}" ]; then
   bash "$APPLE_DIR/build_xcframework.sh"
 fi
 
-echo "=== [4/7] Staging installer component roots ==="
-ROOT_CORE="$BUILD_DIR/pkgroot-core/usr/local/LanVidSDK"
-ROOT_SWIFT="$BUILD_DIR/pkgroot-swift/usr/local/LanVidSDK"
-ROOT_EXTRAS="$BUILD_DIR/pkgroot-extras/usr/local/LanVidSDK"
-mkdir -p "$ROOT_CORE/include/lanvid" "$ROOT_CORE/lib/cmake/LanVidSDK" "$ROOT_CORE/lib/pkgconfig" \
-         "$ROOT_CORE/apple" "$BUILD_DIR/pkgroot-core/usr/local/bin" "$BUILD_DIR/pkgroot-core/usr/local/lib" \
-         "$ROOT_SWIFT/apple" "$ROOT_EXTRAS/python" "$ROOT_EXTRAS/examples"
+echo "=== [4/7] Staging modular installer component roots (Standard & Customize) ==="
+# Component 1 (mandatory): com.lanvid.pkg.studio -> LanVid Studio.app + liblanvid_core.dylib + Core SDK
+ROOT_STUDIO="$BUILD_DIR/pkgroot-studio"
+SDK_STAGE="$ROOT_STUDIO/usr/local/LanVidSDK"
+mkdir -p "$SDK_STAGE/include/lanvid" "$SDK_STAGE/lib/cmake/LanVidSDK" "$SDK_STAGE/lib/pkgconfig" \
+         "$SDK_STAGE/apple" "$ROOT_STUDIO/usr/local/lib"
 
-# Component 1: Core C/C++17, Universal dylib & static lib, lanvid_dsp_server, optional LanVid Studio.app, XCFramework
-cp "$BUILD_DIR/install-arm64/include/lanvid/"* "$ROOT_CORE/include/lanvid/"
-cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$ROOT_CORE/lib/"
-cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$BUILD_DIR/pkgroot-core/usr/local/lib/liblanvid_core.dylib"
-cp "$UNIV_LIB_DIR/liblanvid_core.a"     "$ROOT_CORE/lib/"
-cp "$UNIV_BIN_DIR/lanvid_dsp_server"    "$BUILD_DIR/pkgroot-core/usr/local/bin/lanvid_dsp_server"
-chmod 0755 "$BUILD_DIR/pkgroot-core/usr/local/bin/lanvid_dsp_server"
-cp "$BUILD_DIR/install-arm64/lib/cmake/LanVidSDK/"* "$ROOT_CORE/lib/cmake/LanVidSDK/"
+cp "$BUILD_DIR/install-arm64/include/lanvid/"* "$SDK_STAGE/include/lanvid/"
+cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$SDK_STAGE/lib/"
+cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$ROOT_STUDIO/usr/local/lib/liblanvid_core.dylib"
+cp "$UNIV_LIB_DIR/liblanvid_core.a"     "$SDK_STAGE/lib/"
+cp "$BUILD_DIR/install-arm64/lib/cmake/LanVidSDK/"* "$SDK_STAGE/lib/cmake/LanVidSDK/"
+sed "s|^prefix=.*|prefix=/usr/local/LanVidSDK|" \
+  "$BUILD_DIR/install-arm64/lib/pkgconfig/lanvid-sdk.pc" > "$SDK_STAGE/lib/pkgconfig/lanvid-sdk.pc"
+if [ -d "$DIST_APPLE/LanVidCore.xcframework" ]; then
+  cp -R "$DIST_APPLE/LanVidCore.xcframework" "$SDK_STAGE/apple/"
+fi
+cp "$ROOT/sdk/README.md" "$SDK_STAGE/README.md"
 
-# Bundle LanVid Studio.app -> /Applications/ when prebuilt (e.g. build-macos-app or build-studio-pkg)
 STUDIO_APP_SRC=""
 for cand in "$ROOT/build-macos-app/LanVid Studio.app" "$ROOT/build-studio-pkg/cmake/LanVid Studio.app" "$ROOT/build/LanVid Studio.app"; do
   if [ -d "$cand" ]; then
@@ -142,112 +137,17 @@ for cand in "$ROOT/build-macos-app/LanVid Studio.app" "$ROOT/build-studio-pkg/cm
   fi
 done
 if [ -n "$STUDIO_APP_SRC" ]; then
-  mkdir -p "$BUILD_DIR/pkgroot-core/Applications"
-  cp -R "$STUDIO_APP_SRC" "$BUILD_DIR/pkgroot-core/Applications/"
+  mkdir -p "$ROOT_STUDIO/Applications"
+  cp -R "$STUDIO_APP_SRC" "$ROOT_STUDIO/Applications/"
   echo "[OK] Staged LanVid Studio.app -> /Applications/ from $STUDIO_APP_SRC"
 fi
 
-# Rewrite installed prefix inside lanvid-sdk.pc to canonical /usr/local/LanVidSDK
-sed "s|^prefix=.*|prefix=/usr/local/LanVidSDK|" \
-  "$BUILD_DIR/install-arm64/lib/pkgconfig/lanvid-sdk.pc" > "$ROOT_CORE/lib/pkgconfig/lanvid-sdk.pc"
-
-if [ -d "$DIST_APPLE/LanVidCore.xcframework" ]; then
-  cp -R "$DIST_APPLE/LanVidCore.xcframework" "$ROOT_CORE/apple/"
-fi
-cp "$ROOT/sdk/README.md" "$ROOT_CORE/README.md"
-
-# Component 2: Swift Package LanVidKit (adjust binaryTarget path for installed /usr/local/LanVidSDK/apple layout)
-cp -R "$APPLE_DIR/LanVidKit" "$ROOT_SWIFT/apple/"
-sed 's|../../dist/apple/LanVidCore.xcframework|LanVidCore.xcframework|g' \
-  "$APPLE_DIR/Package.swift" > "$ROOT_SWIFT/apple/Package.swift"
-
-# Component 3: Python Bindings, Examples & obs-lanvid plugin + locales
-cp "$ROOT/sdk/python/lanvid_sdk.py" "$ROOT_EXTRAS/python/"
-cp -R "$APPLE_DIR/Examples" "$ROOT_EXTRAS/apple-examples"
-cp -R "$ROOT/sdk/examples/cpp_client" "$ROOT_EXTRAS/examples/"
-
-if [ -d "$ROOT/plugins/obs-lanvid/data/locale" ]; then
-  mkdir -p "$ROOT_EXTRAS/obs-lanvid/locale"
-  cp "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$ROOT_EXTRAS/obs-lanvid/locale/"
-fi
-for obs_cand in "$ROOT/build/plugins/obs-lanvid/obs-lanvid.plugin" "$ROOT/build-macos-app/plugins/obs-lanvid/obs-lanvid.plugin"; do
-  if [ -d "$obs_cand" ]; then
-    mkdir -p "$ROOT_EXTRAS/obs-lanvid"
-    cp -R "$obs_cand" "$ROOT_EXTRAS/obs-lanvid/"
-    break
-  fi
-done
-
-echo "=== [4b/7] Building LanVidAudio.driver (CoreAudio HAL plug-in, Universal arm64 + x86_64) ==="
-HAL_BUILD="$BUILD_DIR/hal"
-cmake -S "$ROOT" -B "$HAL_BUILD" -G "$GENERATOR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
-  -DLANVID_BUILD_GUI=OFF -DLANVID_BUILD_CLI=OFF -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=ON
-cmake --build "$HAL_BUILD" --target LanVidAudio --parallel "$NCPU"
-HAL_BUNDLE="$HAL_BUILD/LanVidAudio.driver"
-[ -f "$HAL_BUNDLE/Contents/MacOS/LanVidAudio" ] || { echo "[ERROR] LanVidAudio.driver missing" >&2; exit 1; }
-if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
-  codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$HAL_BUNDLE"
-else
-  codesign --force --sign - "$HAL_BUNDLE"
-fi
-echo "[OK] LanVidAudio.driver slices: $(lipo -archs "$HAL_BUNDLE/Contents/MacOS/LanVidAudio")"
-ROOT_HAL="$BUILD_DIR/pkgroot-hal/Library/Audio/Plug-Ins/HAL"
-mkdir -p "$ROOT_HAL"
-cp -R "$HAL_BUNDLE" "$ROOT_HAL/"
-HAL_SCRIPTS="$BUILD_DIR/scripts-hal"
-mkdir -p "$HAL_SCRIPTS"
-cat > "$HAL_SCRIPTS/postinstall" <<'HALEOF'
-#!/bin/bash
-# Reload the HAL so "LanVid Virtual 64ch" appears in Audio MIDI Setup / DAWs (launchd restarts coreaudiod).
-chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/LanVidAudio.driver" 2>/dev/null || true
-killall -9 coreaudiod 2>/dev/null || true
-exit 0
-HALEOF
-chmod 0755 "$HAL_SCRIPTS/postinstall"
-
-echo "=== [4c/7] Staging LanVid Grid L2 (ChmodBPF) & DSP Server LaunchDaemons ==="
-ROOT_GRID="$BUILD_DIR/pkgroot-grid"
-mkdir -p "$ROOT_GRID/Library/LaunchDaemons" \
-         "$ROOT_GRID/Library/Application Support/LanVid/ChmodBPF"
-
-# Helper script run by com.lanvid.chmod-bpf.plist at every boot (grants access_bpf rw on /dev/bpf*)
-cat > "$ROOT_GRID/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" <<'BPFEOF'
-#!/bin/bash
-# LanVid Grid Layer 2 BPF permission helper (analogous to Wireshark ChmodBPF).
-# Allows non-root users in group `access_bpf` to open /dev/bpf* for sub-ms Layer 2 Ethernet audio.
-set -e
-GROUP="access_bpf"
-if ! dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
-  dseditgroup -q -o create "$GROUP" || true
-fi
-chgrp "$GROUP" /dev/bpf* 2>/dev/null || true
-chmod g+rw /dev/bpf* 2>/dev/null || true
-exit 0
-BPFEOF
-chmod 0755 "$ROOT_GRID/Library/Application Support/LanVid/ChmodBPF/ChmodBPF"
-
-# LaunchDaemon 1: /Library/LaunchDaemons/com.lanvid.chmod-bpf.plist
-cat > "$ROOT_GRID/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist" <<'PLISTBPF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.lanvid.chmod-bpf</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Library/Application Support/LanVid/ChmodBPF/ChmodBPF</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
-PLISTBPF
-
-# LaunchDaemon 2: /Library/LaunchDaemons/com.lanvid.dspserver.plist (KeepAlive + RunAtLoad)
-cat > "$ROOT_GRID/Library/LaunchDaemons/com.lanvid.dspserver.plist" <<'PLISTDSP'
+# Component 2 (optional): com.lanvid.pkg.dspserver -> /usr/local/bin/lanvid_dsp_server + LaunchDaemon
+ROOT_DSP="$BUILD_DIR/pkgroot-dspserver"
+mkdir -p "$ROOT_DSP/usr/local/bin" "$ROOT_DSP/Library/LaunchDaemons"
+cp "$UNIV_BIN_DIR/lanvid_dsp_server" "$ROOT_DSP/usr/local/bin/lanvid_dsp_server"
+chmod 0755 "$ROOT_DSP/usr/local/bin/lanvid_dsp_server"
+cat > "$ROOT_DSP/Library/LaunchDaemons/com.lanvid.dspserver.plist" <<'PLISTDSP'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -273,42 +173,112 @@ cat > "$ROOT_GRID/Library/LaunchDaemons/com.lanvid.dspserver.plist" <<'PLISTDSP'
 </dict>
 </plist>
 PLISTDSP
-chmod 0644 "$ROOT_GRID/Library/LaunchDaemons/"*.plist
+chmod 0644 "$ROOT_DSP/Library/LaunchDaemons/com.lanvid.dspserver.plist"
 
-GRID_SCRIPTS="$BUILD_DIR/scripts-grid"
-mkdir -p "$GRID_SCRIPTS"
-cat > "$GRID_SCRIPTS/postinstall" <<'GRIDPOST'
+SCRIPTS_DSP="$BUILD_DIR/scripts-dspserver"
+mkdir -p "$SCRIPTS_DSP"
+cat > "$SCRIPTS_DSP/postinstall" <<'DSPPOST'
 #!/usr/bin/env bash
 set -euo pipefail
+PLIST="/Library/LaunchDaemons/com.lanvid.dspserver.plist"
+if [ -x "/usr/local/bin/lanvid_dsp_server" ] && [ -f "$PLIST" ]; then
+  chown root:wheel "$PLIST" 2>/dev/null || true
+  chmod 0644 "$PLIST" 2>/dev/null || true
+  launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload -w "$PLIST" 2>/dev/null || true
+  launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || true
+  FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
+  if [ -x "$FW" ]; then
+    "$FW" --add "/usr/local/bin/lanvid_dsp_server" >/dev/null 2>&1 || true
+    "$FW" --unblockapp "/usr/local/bin/lanvid_dsp_server" >/dev/null 2>&1 || true
+  fi
+fi
+exit 0
+DSPPOST
+chmod 0755 "$SCRIPTS_DSP/postinstall"
 
+# Component 3 (optional): com.lanvid.pkg.chmodbpf -> ChmodBPF helper + LaunchDaemon (/dev/bpf* via access_bpf)
+ROOT_BPF="$BUILD_DIR/pkgroot-chmodbpf"
+mkdir -p "$ROOT_BPF/Library/LaunchDaemons" "$ROOT_BPF/Library/Application Support/LanVid/ChmodBPF"
+cat > "$ROOT_BPF/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" <<'BPFEOF'
+#!/bin/bash
+# LanVid Grid Layer 2 BPF permission helper (analogous to Wireshark ChmodBPF).
+set -e
+GROUP="access_bpf"
+if ! dscl . -read "/Groups/$GROUP" >/dev/null 2>&1; then
+  dseditgroup -q -o create "$GROUP" || true
+fi
+chgrp "$GROUP" /dev/bpf* 2>/dev/null || true
+chmod g+rw /dev/bpf* 2>/dev/null || true
+exit 0
+BPFEOF
+chmod 0755 "$ROOT_BPF/Library/Application Support/LanVid/ChmodBPF/ChmodBPF"
+
+cat > "$ROOT_BPF/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist" <<'PLISTBPF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lanvid.chmod-bpf</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/LanVid/ChmodBPF/ChmodBPF</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+PLISTBPF
+chmod 0644 "$ROOT_BPF/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist"
+
+SCRIPTS_BPF="$BUILD_DIR/scripts-chmodbpf"
+mkdir -p "$SCRIPTS_BPF"
+cat > "$SCRIPTS_BPF/postinstall" <<'BPFPOST'
+#!/usr/bin/env bash
+set -euo pipefail
 CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "${USER:-root}")"
-if [ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ]; then
-  CONSOLE_USER="root"
+if [ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ]; then CONSOLE_USER="root"; fi
+HELPER="/Library/Application Support/LanVid/ChmodBPF/ChmodBPF"
+PLIST="/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist"
+if [ -x "$HELPER" ] && [ -f "$PLIST" ]; then
+  if ! dscl . -read /Groups/access_bpf >/dev/null 2>&1; then
+    dseditgroup -q -o create access_bpf || true
+  fi
+  if [ "$CONSOLE_USER" != "root" ]; then
+    dseditgroup -q -o edit -a "$CONSOLE_USER" -t user access_bpf || true
+  fi
+  chown -R root:wheel "/Library/Application Support/LanVid/ChmodBPF" 2>/dev/null || true
+  chmod 0755 "$HELPER" 2>/dev/null || true
+  "$HELPER" || true
+  chown root:wheel "$PLIST" 2>/dev/null || true
+  chmod 0644 "$PLIST" 2>/dev/null || true
+  launchctl bootout system "$PLIST" 2>/dev/null || launchctl unload -w "$PLIST" 2>/dev/null || true
+  launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || true
 fi
+exit 0
+BPFPOST
+chmod 0755 "$SCRIPTS_BPF/postinstall"
 
-# 1. Configure access_bpf group, add current user, and apply /dev/bpf* rw permissions
-if ! dscl . -read /Groups/access_bpf >/dev/null 2>&1; then
-  dseditgroup -q -o create access_bpf || true
+# Component 4 (optional): com.lanvid.pkg.obsplugin -> OBS Studio plugin + locales
+ROOT_OBS="$BUILD_DIR/pkgroot-obsplugin/usr/local/LanVidSDK/obs-lanvid"
+mkdir -p "$ROOT_OBS/locale"
+if [ -d "$ROOT/plugins/obs-lanvid/data/locale" ]; then
+  cp "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$ROOT_OBS/locale/"
 fi
-if [ "$CONSOLE_USER" != "root" ]; then
-  dseditgroup -q -o edit -a "$CONSOLE_USER" -t user access_bpf || true
-fi
-chown -R root:wheel "/Library/Application Support/LanVid/ChmodBPF" 2>/dev/null || true
-chmod 0755 "/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" 2>/dev/null || true
-"/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" || true
-
-# 2. Load LaunchDaemons (com.lanvid.chmod-bpf.plist & com.lanvid.dspserver.plist)
-for plist in "/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist" "/Library/LaunchDaemons/com.lanvid.dspserver.plist"; do
-  if [ -f "$plist" ]; then
-    chown root:wheel "$plist" 2>/dev/null || true
-    chmod 0644 "$plist" 2>/dev/null || true
-    launchctl bootout system "$plist" 2>/dev/null || launchctl unload -w "$plist" 2>/dev/null || true
-    launchctl bootstrap system "$plist" 2>/dev/null || launchctl load -w "$plist" 2>/dev/null || true
+for obs_cand in "$ROOT/build/plugins/obs-lanvid/obs-lanvid.plugin" "$ROOT/build-macos-app/plugins/obs-lanvid/obs-lanvid.plugin"; do
+  if [ -d "$obs_cand" ]; then
+    cp -R "$obs_cand" "$ROOT_OBS/"
+    break
   fi
 done
-
-# 3. Auto-install OBS Studio plugin (obs-lanvid.plugin) if OBS Studio is detected
-if [ "$CONSOLE_USER" != "root" ]; then
+SCRIPTS_OBS="$BUILD_DIR/scripts-obsplugin"
+mkdir -p "$SCRIPTS_OBS"
+cat > "$SCRIPTS_OBS/postinstall" <<'OBSPOST'
+#!/usr/bin/env bash
+set -euo pipefail
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "${USER:-root}")"
+if [ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ]; then CONSOLE_USER="root"; fi
+if [ "$CONSOLE_USER" != "root" ] && [ -d "/usr/local/LanVidSDK/obs-lanvid" ]; then
   USER_HOME="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || echo "/Users/$CONSOLE_USER")"
   OBS_USER_DIR="$USER_HOME/Library/Application Support/obs-studio"
   if [ -d "/Applications/OBS.app" ] || [ -d "$OBS_USER_DIR" ]; then
@@ -325,74 +295,79 @@ if [ "$CONSOLE_USER" != "root" ]; then
     chown -R "$CONSOLE_USER":staff "$OBS_USER_DIR" 2>/dev/null || true
   fi
 fi
-
-# 4. macOS Application Firewall exemptions (socketfilterfw)
-FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
-if [ -x "$FW" ]; then
-  for target in \
-      "/Applications/LanVid Studio.app" \
-      "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio" \
-      "/usr/local/bin/lanvid_dsp_server" \
-      "/usr/local/lib/liblanvid_core.dylib"; do
-    if [ -e "$target" ]; then
-      "$FW" --add "$target" >/dev/null 2>&1 || true
-      "$FW" --unblockapp "$target" >/dev/null 2>&1 || true
-    fi
-  done
-fi
 exit 0
-GRIDPOST
-chmod 0755 "$GRID_SCRIPTS/postinstall"
+OBSPOST
+chmod 0755 "$SCRIPTS_OBS/postinstall"
 
-# Ensure installer scripts have +x and Unix LF endings
+# Component 5 & 6 (optional): Swift Package LanVidKit + Python/Examples
+ROOT_SWIFT="$BUILD_DIR/pkgroot-swift/usr/local/LanVidSDK"
+ROOT_EXTRAS="$BUILD_DIR/pkgroot-extras/usr/local/LanVidSDK"
+mkdir -p "$ROOT_SWIFT/apple" "$ROOT_EXTRAS/python" "$ROOT_EXTRAS/examples"
+cp -R "$APPLE_DIR/LanVidKit" "$ROOT_SWIFT/apple/"
+sed 's|../../dist/apple/LanVidCore.xcframework|LanVidCore.xcframework|g' \
+  "$APPLE_DIR/Package.swift" > "$ROOT_SWIFT/apple/Package.swift"
+cp "$ROOT/sdk/python/lanvid_sdk.py" "$ROOT_EXTRAS/python/"
+cp -R "$APPLE_DIR/Examples" "$ROOT_EXTRAS/apple-examples"
+cp -R "$ROOT/sdk/examples/cpp_client" "$ROOT_EXTRAS/examples/"
+
+echo "=== [4b/7] Building LanVidAudio.driver (CoreAudio HAL plug-in, Universal arm64 + x86_64) ==="
+HAL_BUILD="$BUILD_DIR/hal"
+cmake -S "$ROOT" -B "$HAL_BUILD" -G "$GENERATOR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+  -DLANVID_BUILD_GUI=OFF -DLANVID_BUILD_CLI=OFF -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=ON
+cmake --build "$HAL_BUILD" --target LanVidAudio --parallel "$NCPU"
+HAL_BUNDLE="$HAL_BUILD/LanVidAudio.driver"
+[ -f "$HAL_BUNDLE/Contents/MacOS/LanVidAudio" ] || { echo "[ERROR] LanVidAudio.driver missing" >&2; exit 1; }
+if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
+  codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$HAL_BUNDLE"
+else
+  codesign --force --sign - "$HAL_BUNDLE"
+fi
+echo "[OK] LanVidAudio.driver slices: $(lipo -archs "$HAL_BUNDLE/Contents/MacOS/LanVidAudio")"
+ROOT_HAL="$BUILD_DIR/pkgroot-hal/Library/Audio/Plug-Ins/HAL"
+mkdir -p "$ROOT_HAL"
+cp -R "$HAL_BUNDLE" "$ROOT_HAL/"
+HAL_SCRIPTS="$BUILD_DIR/scripts-hal"
+mkdir -p "$HAL_SCRIPTS"
+cat > "$HAL_SCRIPTS/postinstall" <<'HALEOF'
+#!/bin/bash
+chown -R root:wheel "/Library/Audio/Plug-Ins/HAL/LanVidAudio.driver" 2>/dev/null || true
+killall -9 coreaudiod 2>/dev/null || true
+exit 0
+HALEOF
+chmod 0755 "$HAL_SCRIPTS/postinstall"
+
 SCRIPTS_STAGE="$BUILD_DIR/scripts"
 mkdir -p "$SCRIPTS_STAGE"
 cp "$INST_DIR/scripts/preinstall" "$INST_DIR/scripts/postinstall" "$SCRIPTS_STAGE/"
 chmod 0755 "$SCRIPTS_STAGE/preinstall" "$SCRIPTS_STAGE/postinstall"
 
-echo "=== [5/7] Packaging component .pkgs and building final LanVidSDK-v${SDK_VERSION}-macOS.pkg ==="
+echo "=== [5/7] Packaging modular component .pkgs and building LanVidSDK-v${SDK_VERSION}-macOS.pkg ==="
 COMP_DIR="$BUILD_DIR/components"
 mkdir -p "$COMP_DIR"
 
-pkgbuild \
-  --root "$BUILD_DIR/pkgroot-core" \
-  --identifier "com.lanvid.sdk.core" \
-  --version "$SDK_VERSION" \
-  --scripts "$SCRIPTS_STAGE" \
-  --install-location "/" \
-  "$COMP_DIR/lanvid-core.pkg"
+pkgbuild --root "$ROOT_STUDIO" --identifier "com.lanvid.pkg.studio" --version "$SDK_VERSION" \
+  --scripts "$SCRIPTS_STAGE" --install-location "/" "$COMP_DIR/lanvid-studio.pkg"
 
-pkgbuild \
-  --root "$BUILD_DIR/pkgroot-swift" \
-  --identifier "com.lanvid.sdk.swift" \
-  --version "$SDK_VERSION" \
-  --install-location "/" \
-  "$COMP_DIR/lanvid-swift.pkg"
+pkgbuild --root "$ROOT_DSP" --identifier "com.lanvid.pkg.dspserver" --version "$SDK_VERSION" \
+  --scripts "$SCRIPTS_DSP" --install-location "/" "$COMP_DIR/lanvid-dspserver.pkg"
 
-pkgbuild \
-  --root "$BUILD_DIR/pkgroot-extras" \
-  --identifier "com.lanvid.sdk.extras" \
-  --version "$SDK_VERSION" \
-  --install-location "/" \
-  "$COMP_DIR/lanvid-extras.pkg"
+pkgbuild --root "$ROOT_BPF" --identifier "com.lanvid.pkg.chmodbpf" --version "$SDK_VERSION" \
+  --scripts "$SCRIPTS_BPF" --install-location "/" "$COMP_DIR/lanvid-chmodbpf.pkg"
 
-pkgbuild \
-  --root "$BUILD_DIR/pkgroot-hal" \
-  --identifier "com.lanvid.audio.hal" \
-  --version "$SDK_VERSION" \
-  --scripts "$HAL_SCRIPTS" \
-  --install-location "/" \
-  "$COMP_DIR/lanvid-hal.pkg"
+pkgbuild --root "$BUILD_DIR/pkgroot-obsplugin" --identifier "com.lanvid.pkg.obsplugin" --version "$SDK_VERSION" \
+  --scripts "$SCRIPTS_OBS" --install-location "/" "$COMP_DIR/lanvid-obsplugin.pkg"
 
-pkgbuild \
-  --root "$ROOT_GRID" \
-  --identifier "com.lanvid.grid.system" \
-  --version "$SDK_VERSION" \
-  --scripts "$GRID_SCRIPTS" \
-  --install-location "/" \
-  "$COMP_DIR/lanvid-grid.pkg"
+pkgbuild --root "$BUILD_DIR/pkgroot-hal" --identifier "com.lanvid.audio.hal" --version "$SDK_VERSION" \
+  --scripts "$HAL_SCRIPTS" --install-location "/" "$COMP_DIR/lanvid-hal.pkg"
 
-# Detect optional Developer ID Installer certificate in Keychain (falls back to unsigned local pkg)
+pkgbuild --root "$BUILD_DIR/pkgroot-swift" --identifier "com.lanvid.sdk.swift" --version "$SDK_VERSION" \
+  --install-location "/" "$COMP_DIR/lanvid-swift.pkg"
+
+pkgbuild --root "$BUILD_DIR/pkgroot-extras" --identifier "com.lanvid.sdk.extras" --version "$SDK_VERSION" \
+  --install-location "/" "$COMP_DIR/lanvid-extras.pkg"
+
 SIGN_ID="${LANVID_INSTALLER_SIGN_ID:-}"
 if [ -z "$SIGN_ID" ] && command -v security >/dev/null 2>&1; then
   SIGN_ID="$(security find-identity -v -p basic 2>/dev/null | grep 'Developer ID Installer:' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"

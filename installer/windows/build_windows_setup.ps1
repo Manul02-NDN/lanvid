@@ -95,6 +95,7 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath, (
 Copy-Item -Force $outExe $outExeVersioned
 $item = Get-Item $outExeVersioned
 Write-Host ("Built {0} and {1} ({2:N0} bytes)" -f $item.FullName, $outExe, $item.Length)
+Write-Host "  CLI modes: /S (Auto silent) | /COMPONENTS=core,dsp_server,virtual_audio,grid_l2_npcap,obs_plugin,firewall,high_perf_power | --custom | --check-only"
 
 # 5. Optional Inno Setup 6 compilation of lanvid.iss
 if ($BuildInno) {

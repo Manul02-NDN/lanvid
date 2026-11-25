@@ -171,22 +171,48 @@ EOF
 chmod 0755 /usr/local/bin/lanvid-sdk-info
 echo "[OK] Installed /usr/local/bin/lanvid-sdk-info"
 
-# 5. Add macOS Application Firewall exemptions so LAN Discovery, Grid DSP & UDP streams are never blocked
+# 5. Conditional configuration of optional Customize components & macOS Application Firewall
+# Only activates LaunchDaemons / ChmodBPF / OBS Plugin if the user left those components selected!
+if [ -x "/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" ] && \
+   [ -f "/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist" ]; then
+  if ! dscl . -read /Groups/access_bpf >/dev/null 2>&1; then
+    dseditgroup -q -o create access_bpf || true
+  fi
+  if [ "$CONSOLE_USER" != "root" ]; then
+    dseditgroup -q -o edit -a "$CONSOLE_USER" -t user access_bpf || true
+  fi
+  "/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" || true
+  echo "[OK] ChmodBPF component selected -> access_bpf permissions applied."
+else
+  echo "[INFO] ChmodBPF component unchecked in Customize mode -> skipping /dev/bpf* setup."
+fi
+
+if [ -x "/usr/local/bin/lanvid_dsp_server" ] && \
+   [ -f "/Library/LaunchDaemons/com.lanvid.dspserver.plist" ]; then
+  echo "[OK] DSP Server component selected -> LaunchDaemon com.lanvid.dspserver ready."
+else
+  echo "[INFO] DSP Server component unchecked in Customize mode -> skipping LaunchDaemon start."
+fi
+
 FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
 if [ -x "$FW" ]; then
-  for target in \
-      "/Applications/LanVid Studio.app" \
-      "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio" \
-      "/usr/local/bin/lanvid_dsp_server" \
-      "$SDK_ROOT/lib/liblanvid_core.dylib" \
-      "/usr/local/lib/liblanvid_core.dylib" \
-      "/usr/local/bin/lanvid-sdk-info"; do
+  FW_TARGETS=(
+    "/Applications/LanVid Studio.app"
+    "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio"
+    "$SDK_ROOT/lib/liblanvid_core.dylib"
+    "/usr/local/lib/liblanvid_core.dylib"
+    "/usr/local/bin/lanvid-sdk-info"
+  )
+  if [ -x "/usr/local/bin/lanvid_dsp_server" ]; then
+    FW_TARGETS+=("/usr/local/bin/lanvid_dsp_server")
+  fi
+  for target in "${FW_TARGETS[@]}"; do
     if [ -e "$target" ]; then
       "$FW" --add "$target" >/dev/null 2>&1 || true
       "$FW" --unblockapp "$target" >/dev/null 2>&1 || true
     fi
   done
-  echo "[OK] Configured macOS Application Firewall rules (LanVid Studio, DSP Server & Core SDK)."
+  echo "[OK] Configured macOS Application Firewall rules for installed LanVid components."
 fi
 
 # 6. Open /usr/local/LanVidSDK in Finder for the logged-in user (interactive installs only)
