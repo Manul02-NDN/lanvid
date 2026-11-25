@@ -13,7 +13,12 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
     : cfg_(cfg),
       user_on_frame_(std::move(on_frame)),
       pool_(cfg.decode_threads),
-      assembler_(cfg.assembler, [this](const CompletedFrame& cf) { on_frame_internal(cf); }, &pool_),
+      assembler_(
+          [](AssemblerConfig a) {
+              a.async_inter_decode = true;  // H.264/H.265 decode never stalls AUDIO2 / MIDI / clock packets
+              return a;
+          }(cfg.assembler),
+          [this](const CompletedFrame& cf) { on_frame_internal(cf); }, &pool_),
       audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms),
       matrix_(cfg.audio_sample_rate),
       arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
@@ -35,20 +40,28 @@ bool UdpReceiver::init() {
     return true;
 }
 
-void UdpReceiver::on_frame_internal(const CompletedFrame& cf) {
-    last_completed_fid_ = cf.frame_id;
-    fb_dec_us_sum_ += cf.decode_time_us;
-    ++fb_dec_cnt_;
+UdpReceiver::~UdpReceiver() {
+    // H.264 / H.265 frames are decoded (and their callbacks run) on the assembler's worker thread:
+    // stop it while everything the callbacks touch is still alive.
+    assembler_.stop_decoder_worker();
+}
 
+void UdpReceiver::on_frame_internal(const CompletedFrame& cf) {
     const double lat_us =
         std::max(0.0, estimate_latency_ms(cf.complete_time_us, cf.sender_timestamp_us) * 1000.0);
-    if (has_prev_lat_) {
-        const double d = std::abs(lat_us - prev_lat_us_);
-        jitter_us_ += (d - jitter_us_) / 16.0;
-    } else {
-        has_prev_lat_ = true;
+    {
+        std::lock_guard<std::mutex> lk(fb_mu_);
+        last_completed_fid_ = cf.frame_id;
+        fb_dec_us_sum_ += cf.decode_time_us;
+        ++fb_dec_cnt_;
+        if (has_prev_lat_) {
+            const double d = std::abs(lat_us - prev_lat_us_);
+            jitter_us_ += (d - jitter_us_) / 16.0;
+        } else {
+            has_prev_lat_ = true;
+        }
+        prev_lat_us_ = lat_us;
     }
-    prev_lat_us_ = lat_us;
 
     if (user_on_frame_) user_on_frame_(cf);
 }
@@ -106,15 +119,18 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
     fb_prev_fec_par_ = cur_fec_par;
 
     FeedbackPayload fb;
-    fb.last_completed_frame_id = last_completed_fid_;
     fb.packet_loss_permille =
         d_exp ? uint16_t(std::min<uint64_t>(1000, (d_lost * 1000 + d_exp / 2) / d_exp)) : 0;
     fb.fec_recovered_permille =
         d_data_est ? uint16_t(std::min<uint64_t>(1000, (d_fec_rec * 1000 + d_data_est / 2) / d_data_est)) : 0;
-    fb.jitter_us = uint32_t(std::min<double>(jitter_us_, 1e7));
-    fb.decode_time_us = fb_dec_cnt_ ? uint32_t(fb_dec_us_sum_ / fb_dec_cnt_) : 0;
-    fb_dec_us_sum_ = 0;
-    fb_dec_cnt_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(fb_mu_);
+        fb.last_completed_frame_id = last_completed_fid_;
+        fb.jitter_us = uint32_t(std::min<double>(jitter_us_, 1e7));
+        fb.decode_time_us = fb_dec_cnt_ ? uint32_t(fb_dec_us_sum_ / fb_dec_cnt_) : 0;
+        fb_dec_us_sum_ = 0;
+        fb_dec_cnt_ = 0;
+    }
 
     uint8_t fb_bytes[kFeedbackSize];
     write_feedback(fb_bytes, fb);
@@ -134,10 +150,13 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
 void UdpReceiver::send_pli_now(uint64_t now) {
     if (!has_sender_) return;
     FeedbackPayload fb;
-    fb.last_completed_frame_id = last_completed_fid_;
+    {
+        std::lock_guard<std::mutex> lk(fb_mu_);
+        fb.last_completed_frame_id = last_completed_fid_;
+        fb.jitter_us = uint32_t(std::min<double>(jitter_us_, 1e7));
+    }
     fb.packet_loss_permille = 0;
     fb.fec_recovered_permille = 0;
-    fb.jitter_us = uint32_t(std::min<double>(jitter_us_, 1e7));
     fb.decode_time_us = 0;
     fb.request_idr = true;
 
@@ -179,6 +198,8 @@ void UdpReceiver::handle_pong(const uint8_t* payload, size_t len, uint32_t t4_us
         sync_.synced = true;
         sync_.min_rtt_us = sync_.min_rtt_us == 0 ? uint32_t(rtt) : std::min(sync_.min_rtt_us, uint32_t(rtt));
         sync_.offset_us = offset;
+        sync_offset_pub_.store(offset, std::memory_order_relaxed);
+        sync_synced_pub_.store(true, std::memory_order_release);
     } else {
         sync_.min_rtt_us += 5;
     }
@@ -419,7 +440,10 @@ void UdpReceiver::flush() { assembler_.flush(now_us()); }
 
 double UdpReceiver::estimate_latency_ms(uint64_t recv_complete_us, uint32_t sender_ts_us) const {
     const int64_t raw = int64_t(diff_us32(uint32_t(recv_complete_us), sender_ts_us));
-    const int64_t adj = sync_.synced ? (raw + sync_.offset_us) : raw;
+    // Called from the decode worker too: read the published copy, not the network thread's sync_.
+    const int64_t adj = sync_synced_pub_.load(std::memory_order_acquire)
+                            ? (raw + sync_offset_pub_.load(std::memory_order_relaxed))
+                            : raw;
     return double(adj) / 1000.0;
 }
 

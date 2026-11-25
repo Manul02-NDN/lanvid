@@ -20,6 +20,7 @@
 #include "audio/master_clock.hpp"
 #include "audio/personal_monitor_bus.hpp"
 #include "common/clock.hpp"
+#include "common/rt_thread.hpp"
 #include "gui/app_config.hpp"
 #include "lanvid/lanvid_sdk.h"
 #include "net/network_interfaces.hpp"
@@ -244,6 +245,7 @@ TEST(network_dual_nic_1plus1_failover_zero_dropouts) {
 
         std::atomic<bool> stop{false};
         std::thread mixer([&] {
+            lv::RealtimeThreadScope rt{5000u};  // like Studio's mixer thread (real-time scheduling)
             constexpr uint32_t kBlk = 240;  // 5 ms @ 48 kHz
             std::vector<float> ch(kBlk);
             uint64_t sample_pos = 0;
@@ -262,6 +264,7 @@ TEST(network_dual_nic_1plus1_failover_zero_dropouts) {
 
         constexpr uint32_t kPop = 240;
         std::vector<float> stereo(kPop * 2, 0.0f);
+        lv::RealtimeThreadScope phone_rt{5000u};  // the phone's audio IO thread is real-time too
         const uint64_t t_start = lv::now_us();
         const uint64_t t_warm = t_start + 350'000;
         const uint64_t t_pull = t_start + 750'000;

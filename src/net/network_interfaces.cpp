@@ -316,6 +316,7 @@ std::vector<NetworkInterfaceInfo> enumerate_network_interfaces(bool include_disc
     struct ScMeta {
         std::string display_name;
         NetworkInterfaceType type = NetworkInterfaceType::kOther;
+        std::string mac;  // real hardware address (getifaddrs is redacted to 02:00:00:00:00:00 on macOS 26+)
     };
     std::map<std::string, ScMeta> sc_map;
 #if defined(LV_HAVE_MACOS_SC)
@@ -328,6 +329,8 @@ std::vector<NetworkInterfaceInfo> enumerate_network_interfaces(bool include_disc
             if (bsd.empty()) continue;
             ScMeta m{};
             m.display_name = cfstr_to_utf8(SCNetworkInterfaceGetLocalizedDisplayName(iface));
+            m.mac = cfstr_to_utf8(SCNetworkInterfaceGetHardwareAddressString(iface));
+            for (auto& ch : m.mac) ch = char(std::toupper(static_cast<unsigned char>(ch)));
             CFStringRef itype = SCNetworkInterfaceGetInterfaceType(iface);
             if (itype && CFEqual(itype, kSCNetworkInterfaceTypeIEEE80211)) {
                 m.type = NetworkInterfaceType::kWiFi;
@@ -424,6 +427,7 @@ std::vector<NetworkInterfaceInfo> enumerate_network_interfaces(bool include_disc
         auto sc_it = sc_map.find(name);
         if (sc_it != sc_map.end()) {
             info.type = sc_it->second.type;
+            if (!sc_it->second.mac.empty()) info.mac_address = sc_it->second.mac;
             info.friendly_name = sc_it->second.display_name.empty()
                                      ? name
                                      : (sc_it->second.display_name + " (" + name + ")");

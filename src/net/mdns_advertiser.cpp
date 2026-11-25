@@ -87,10 +87,28 @@ struct MdnsAdvertiser::Impl {
     PDNS_SERVICE_INSTANCE inst = nullptr;
     std::atomic<bool> ok{false};
     std::wstring w_inst, w_host;
+    // DnsServiceRegister / DnsServiceDeRegister complete asynchronously on a DNSAPI thread with
+    // pQueryContext = this: count the outstanding requests and wait for them before Impl can go away
+    // (otherwise the de-registration callback writes into freed memory).
+    std::atomic<int> pending{0};
+    HANDLE idle = CreateEventW(nullptr, TRUE, TRUE, nullptr);  // signalled while pending == 0
+    bool deregistering = false;
+
+    ~Impl() {
+        if (idle) CloseHandle(idle);
+    }
+    void begin_request() {
+        if (pending.fetch_add(1, std::memory_order_acq_rel) == 0 && idle) ResetEvent(idle);
+    }
+    void end_request() {
+        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1 && idle) SetEvent(idle);
+    }
 
     static VOID WINAPI on_reg(DWORD status, PVOID ctx, PDNS_SERVICE_INSTANCE instance) {
-        static_cast<Impl*>(ctx)->ok.store(status == ERROR_SUCCESS, std::memory_order_release);
+        auto* self = static_cast<Impl*>(ctx);
+        if (!self->deregistering) self->ok.store(status == ERROR_SUCCESS, std::memory_order_release);
         if (instance) DnsServiceFreeInstance(instance);
+        self->end_request();  // last touch of *self
     }
     static std::wstring widen(const std::string& s) {
         if (s.empty()) return {};
@@ -128,8 +146,11 @@ struct MdnsAdvertiser::Impl {
         req.pRegisterCompletionCallback = &Impl::on_reg;
         req.pQueryContext = this;
         req.unicastEnabled = FALSE;
+        deregistering = false;
+        begin_request();
         const DWORD r = DnsServiceRegister(&req, nullptr);
         if (r != DNS_REQUEST_PENDING) {
+            end_request();
             DnsServiceFreeInstance(inst);
             inst = nullptr;
             return false;
@@ -139,7 +160,11 @@ struct MdnsAdvertiser::Impl {
     }
     void stop_all() {
         if (inst) {
-            DnsServiceDeRegister(&req, nullptr);
+            deregistering = true;
+            begin_request();
+            if (DnsServiceDeRegister(&req, nullptr) != DNS_REQUEST_PENDING) end_request();
+            // Wait for the registration and de-registration callbacks (bounded: never hang shutdown).
+            if (idle) WaitForSingleObject(idle, 3000);
             DnsServiceFreeInstance(inst);
             inst = nullptr;
         }

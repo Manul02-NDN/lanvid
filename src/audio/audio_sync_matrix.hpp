@@ -149,6 +149,7 @@ private:
         uint64_t seen_write_count = 0;
         int64_t active_left = 0;
         bool in_gap = false;
+        bool gap_pending = false;        // gap seen, not yet followed by audio (counted on resume)
         float gap_hold = 0.0f;           // last played value, decays through a gap
         float gap_from = 0.0f;
         float gap_decay = 0.93f;         // per-sample (~2 ms to -60 dB at 48 kHz)

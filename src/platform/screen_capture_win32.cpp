@@ -204,10 +204,12 @@ struct ScreenCapture::Impl {
         // Match output by monitor coordinates (robust across multi-GPU & multi-monitor setups).
         for (UINT ai = 0; !target_output; ++ai) {
             IDXGIAdapter1* ad = nullptr;
-            if (factory->EnumAdapters1(ai, &ad) == DXGI_ERROR_NOT_FOUND) break;
+            // Any failure (not only DXGI_ERROR_NOT_FOUND) ends the walk: in a session without an interactive
+            // desktop (SSH / service / locked console) DXGI returns other errors and leaves the pointer null.
+            if (FAILED(factory->EnumAdapters1(ai, &ad)) || !ad) break;
             for (UINT oi = 0;; ++oi) {
                 IDXGIOutput* out = nullptr;
-                if (ad->EnumOutputs(oi, &out) == DXGI_ERROR_NOT_FOUND) break;
+                if (FAILED(ad->EnumOutputs(oi, &out)) || !out) break;
                 DXGI_OUTPUT_DESC desc{};
                 if (SUCCEEDED(out->GetDesc(&desc))) {
                     const RECT& r = desc.DesktopCoordinates;

@@ -37,10 +37,23 @@ inline void record_failure(const char* file, int line, const char* expr, const s
     }
 }
 
+// Filter: one substring, or several separated by ',' (any of them matches), e.g. "udp_,audio2_".
+inline bool name_matches(const char* name, const char* filter) {
+    const char* p = filter;
+    while (*p) {
+        const char* e = std::strchr(p, ',');
+        const size_t n = e ? size_t(e - p) : std::strlen(p);
+        if (n > 0 && std::string(name).find(std::string(p, n)) != std::string::npos) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+
 inline int run_all(const char* filter = nullptr) {
     int passed = 0, failed = 0, ran = 0;
     for (const auto& tc : registry()) {
-        if (filter && !std::strstr(tc.name, filter)) continue;
+        if (filter && !name_matches(tc.name, filter)) continue;
         ++ran;
         const int before = fail_count();
         try {

@@ -66,6 +66,7 @@ void AudioSyncMatrix::reset() {
         c.seen_write_count = c.write_count.load(std::memory_order_relaxed);
         c.active_left = 0;
         c.in_gap = false;
+        c.gap_pending = false;
         c.active.store(false, std::memory_order_relaxed);
     }
     latency_dirty_.store(true, std::memory_order_release);
@@ -482,6 +483,7 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     };
 
     bool gap_event = false;
+    bool resumed_after_gap = false;
     for (uint32_t i = 0; i < frames; ++i) {
         bool ok = false;
         float v = p.hold ? 0.0f : read_at(p.cursor, p.ratio, i, ok);
@@ -498,6 +500,7 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
             if (!p.hold && active && first_ts != UINT64_MAX && uint64_t(std::max<int64_t>(pos, 0)) >= first_ts) {
                 if (!c.in_gap) gap_event = true;
                 c.in_gap = true;
+                c.gap_pending = true;
             }
             // Gap: decay the last played value over 2 ms instead of a hard step to zero.
             c.gap_hold *= c.gap_decay;
@@ -505,6 +508,10 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
             c.gap_fadein = 0;
         } else {
             c.in_gap = false;
+            if (c.gap_pending) {  // audio resumed after a real gap: that was an underrun (not a stream end)
+                c.gap_pending = false;
+                resumed_after_gap = true;
+            }
             if (c.gap_fadein < kGapFadeSamples) {
                 // Resume after a gap: ramp in from the decayed tail (no step, even after a long gap).
                 if (c.gap_fadein == 0) c.gap_from = c.gap_hold;
@@ -516,8 +523,10 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
         dst[size_t(i) * stride] = v;
         peak = std::max(peak, std::fabs(v));
     }
+    // An underrun is counted when audio RESUMES after a gap, so a sender that simply stops (end of stream,
+    // disconnect) does not show up as dropouts. The prefill hysteresis below still reacts at gap start.
+    if (resumed_after_gap) c.underruns.fetch_add(1, std::memory_order_relaxed);
     if (gap_event) {
-        c.underruns.fetch_add(1, std::memory_order_relaxed);
         // Only trigger a prefill halt when the buffer genuinely ran dry (cursor reached/passed
         // newest_media_ts). An isolated lost packet inside a populated buffer is smoothly
         // concealed by Opus PLC / gap-fade without halting playback!

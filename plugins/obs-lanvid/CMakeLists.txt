@@ -16,6 +16,9 @@ endif()
 # 2. Native OBS Studio plugin module (built automatically when libobs + obs-frontend-api are available)
 find_package(libobs QUIET)
 find_package(obs-frontend-api QUIET)
+if(NOT (libobs_FOUND AND obs-frontend-api_FOUND))
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ObsSdkImport.cmake)  # light SDK: headers + installed OBS binaries
+endif()
 find_package(Qt6 COMPONENTS Widgets QUIET)
 
 if(libobs_FOUND AND obs-frontend-api_FOUND)

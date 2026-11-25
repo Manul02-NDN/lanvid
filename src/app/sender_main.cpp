@@ -83,7 +83,7 @@ void print_usage(const char* prog) {
         "  --duration <sec>         Stop after S seconds (default: 0=infinite)\n"
         "  --audio-only, --no-video Send no video at all: only AUDIO2 packets + MasterClock sync\n"
         "                           (use with --audio-device virtual|test or --audio tone)\n"
-        "  --audio-codec <fmt>      AoIP compression: pcm32 (Float32), pcm24 (-25%%), pcm16 (-50%%), opus (ADPCM -85%%)\n"
+        "  --audio-codec <fmt>      AoIP compression: pcm32 (Float32), pcm24 (-25%%), pcm16 (-50%%), opus (Opus CELT, ~-85%%)\n"
         "  --duplex ...             Full-duplex 64x64 AoIP node (see: sender --duplex --help)\n"
         "  -V, --version            Show LanVid version and exit\n"
         "  -h, --help               Show this help\n",
@@ -398,8 +398,10 @@ int main(int argc, char** argv) {
                      std::to_string(prof.nack_attempts) + "]";
         tone_thread = std::thread([&]() {
             const uint32_t blk = std::max<uint32_t>(prof.chunk_samples, uint32_t(audio_rate / 200));  // >= 5 ms
-            std::vector<std::vector<int16_t>> bufs(static_cast<size_t>(audio_channels));
-            for (auto& b : bufs) b.assign(blk, 0);
+            // Float32 so the --audio-codec profile (pcm32 / pcm24 / pcm16 / opus) really applies on the wire:
+            // AudioTxEngine only compresses Float32 input and passes PCM16/24 callers through untouched.
+            std::vector<std::vector<float>> bufs(static_cast<size_t>(audio_channels));
+            for (auto& b : bufs) b.assign(blk, 0.0f);
             std::vector<double> phase(static_cast<size_t>(audio_channels), 0.0);
             const uint64_t period_us = uint64_t(blk) * 1000000ull / uint64_t(audio_rate);
             uint64_t next = lv::now_us() + period_us;
@@ -410,12 +412,12 @@ int main(int argc, char** argv) {
                 for (int c = 0; c < audio_channels; ++c) {
                     const double w = 6.283185307179586 * (110.0 * (c + 1)) / double(audio_rate);
                     for (uint32_t i = 0; i < blk; ++i) {
-                        bufs[size_t(c)][i] = int16_t(std::sin(phase[size_t(c)]) * 6000.0);
+                        bufs[size_t(c)][i] = float(std::sin(phase[size_t(c)]) * (6000.0 / 32768.0));
                         phase[size_t(c)] += w;
                     }
                     phase[size_t(c)] = std::fmod(phase[size_t(c)], 6.283185307179586);
                     sender.push_audio_channel(uint16_t(c), bufs[size_t(c)].data(), blk,
-                                              lv::AudioFormat2::kPcm16, ts);
+                                              lv::AudioFormat2::kFloat32, ts);
                 }
                 sender.set_next_auto_media_ts(ts + blk);
             }
@@ -633,10 +635,12 @@ int main(int argc, char** argv) {
     }
     if (audio_tone || audio_virtual) {
         const auto a2 = sender.audio2_stats();
-        std::printf("[AUDIO64] mode=%s pkts=%llu parity=%llu retransmits=%llu nacks=%llu dup=%llu streams=%u\n",
+        std::printf("[AUDIO64] mode=%s pkts=%llu parity=%llu retransmits=%llu nacks=%llu dup=%llu streams=%u "
+                    "ts_reanchors=%llu\n",
                     lv::audio_mode_name(a2.mode), (unsigned long long)a2.packets_sent,
                     (unsigned long long)a2.parity_sent, (unsigned long long)a2.retransmits,
-                    (unsigned long long)a2.nacks_received, (unsigned long long)a2.duplicates, a2.active_streams);
+                    (unsigned long long)a2.nacks_received, (unsigned long long)a2.duplicates, a2.active_streams,
+                    (unsigned long long)sender.auto_ts_reanchors());
     }
     const auto st = sender.stats();
     const double tot_s = std::max(1e-6, double(lv::now_us() - t_start) / 1e6);

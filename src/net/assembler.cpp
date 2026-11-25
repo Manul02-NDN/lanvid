@@ -1,6 +1,7 @@
 #include "net/assembler.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <thread>
 
@@ -117,6 +118,7 @@ FrameAssembler::FrameAssembler(const AssemblerConfig& cfg, FrameCallback on_fram
 }
 
 FrameAssembler::~FrameAssembler() {
+    stop_decoder_worker();
     for (auto& slot : slots_) {
         while (slot.in_flight.load(std::memory_order_acquire) > 0) {
             std::this_thread::yield();
@@ -211,17 +213,203 @@ void FrameAssembler::trigger_pli(uint32_t failed_frame_id, uint64_t now_us, bool
     if (on_pli_) on_pli_(failed_frame_id);
 }
 
+void FrameAssembler::set_backend(const std::string& name, bool hw) {
+    {
+        std::lock_guard<std::mutex> lk(backend_mu_);
+        decoder_backend_ = name;
+    }
+    decoder_is_hw_.store(hw, std::memory_order_relaxed);
+}
+
 void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us) {
     if (!has_finalized_ || frame_newer(slot.frame_id, last_finalized_id_)) {
         has_finalized_ = true;
         last_finalized_id_ = slot.frame_id;
     }
+    if (!cfg_.async_inter_decode) {
+        decode_inter_frame_sync(slot, now_us);
+        return;
+    }
 
+    // ---- async mode: gate on the ingest thread, decode on the worker ----
+    fold_vdec_feedback(now_us);
+    if (active_codec_ != slot.codec) {
+        active_codec_ = slot.codec;
+        has_submitted_inter_ = false;
+        awaiting_idr_ = !slot.is_keyframe;
+    }
+
+    const bool complete =
+        slot.total_slices >= 1 &&
+        SliceState(slot.slices[0].state.load(std::memory_order_acquire)) == SliceState::kComplete;
+    if (!complete) {
+        ++stats_.frames_concealed;
+        ++stats_.slices_lost;
+        const bool first_loss = !awaiting_idr_;
+        awaiting_idr_ = true;
+        trigger_pli(slot.frame_id, now_us, first_loss);
+        slot.active = false;
+        return;
+    }
+
+    const bool frame_gap = has_submitted_inter_ && (frame_diff(slot.frame_id, last_submitted_fid_) != 1);
+    const bool need_idr_first = !has_submitted_inter_ && !slot.is_keyframe;
+    if (!slot.is_keyframe && (awaiting_idr_ || frame_gap || need_idr_first)) {
+        ++stats_.frames_dropped_awaiting_idr;
+        const bool first_loss = !awaiting_idr_;
+        awaiting_idr_ = true;
+        trigger_pli(slot.frame_id, now_us, first_loss);
+        slot.active = false;
+        return;
+    }
+
+    InterJob job;
+    job.frame_id = slot.frame_id;
+    job.sender_ts_us = slot.sender_ts_us;
+    job.first_arrival_us = slot.first_arrival_us;
+    job.codec = slot.codec;
+    job.is_keyframe = slot.is_keyframe;
+    const SliceSlot& ss = slot.slices[0];
+    job.bits.assign(ss.buf.data(), ss.buf.data() + ss.total_size);
+    bool queued = false;
+    {
+        std::lock_guard<std::mutex> lk(vdec_mu_);
+        if (!vdec_thread_.joinable() && !vdec_stop_) vdec_thread_ = std::thread([this] { vdec_loop(); });
+        if (vdec_q_.size() < kMaxInterQueue) {
+            vdec_q_.push_back(std::move(job));
+            queued = true;
+        } else if (slot.is_keyframe) {  // backlog full: an IDR supersedes the frames still waiting
+            vdec_skipped_.fetch_add(vdec_q_.size(), std::memory_order_relaxed);
+            vdec_q_.clear();
+            vdec_q_.push_back(std::move(job));
+            queued = true;
+        }
+    }
+    if (!queued) {  // decoder cannot keep up: skip ahead to the next IDR instead of growing latency
+        ++stats_.frames_dropped_awaiting_idr;
+        awaiting_idr_ = true;
+        has_submitted_inter_ = false;
+        trigger_pli(slot.frame_id, now_us, true);
+        slot.active = false;
+        return;
+    }
+    vdec_cv_.notify_one();
+    if (slot.is_keyframe) awaiting_idr_ = false;
+    has_submitted_inter_ = true;
+    last_submitted_fid_ = slot.frame_id;
+    slot.active = false;
+}
+
+void FrameAssembler::fold_vdec_feedback(uint64_t now_us) {
+    if (!cfg_.async_inter_decode) return;
+    const uint64_t ok = vdec_ok_.load(std::memory_order_acquire);
+    const uint64_t fail = vdec_fail_.load(std::memory_order_acquire);
+    const uint64_t skipped = vdec_skipped_.load(std::memory_order_acquire);
+    stats_.frames_complete += ok - vdec_ok_seen_;
+    stats_.slices_ok += ok - vdec_ok_seen_;
+    stats_.slices_corrupt += fail - vdec_fail_seen_;
+    stats_.frames_concealed += fail - vdec_fail_seen_;
+    stats_.frames_dropped_awaiting_idr += skipped - vdec_skipped_seen_;
+    vdec_ok_seen_ = ok;
+    vdec_fail_seen_ = fail;
+    vdec_skipped_seen_ = skipped;
+    if (const int w = vdec_w_.load(std::memory_order_relaxed); w > 0) {
+        last_known_w_ = w;
+        last_known_h_ = vdec_h_.load(std::memory_order_relaxed);
+    }
+    if (vdec_error_.exchange(false, std::memory_order_acq_rel)) {
+        awaiting_idr_ = true;
+        has_submitted_inter_ = false;
+        trigger_pli(vdec_error_fid_.load(std::memory_order_relaxed), now_us, true);
+    }
+}
+
+void FrameAssembler::vdec_loop() {
+    for (;;) {
+        InterJob job;
+        {
+            std::unique_lock<std::mutex> lk(vdec_mu_);
+            vdec_cv_.wait(lk, [&] { return vdec_stop_ || !vdec_q_.empty(); });
+            if (vdec_q_.empty()) break;  // stop requested and nothing left
+            job = std::move(vdec_q_.front());
+            vdec_q_.pop_front();
+            vdec_busy_ = true;
+        }
+        // The decoder is created, used and destroyed on this thread only (Media Foundation / COM
+        // apartment and VideoToolbox session stay on one thread).
+        if (!video_decoder_ || video_decoder_->codec_id() != job.codec) {
+            video_decoder_ = create_video_decoder(job.codec, cfg_.output_order);
+            set_backend(video_decoder_ ? video_decoder_->backend_name() : "Unavailable",
+                        video_decoder_ ? video_decoder_->is_hardware() : false);
+            vdec_need_key_ = true;
+        }
+        if (!video_decoder_) {
+            vdec_fail_.fetch_add(1, std::memory_order_relaxed);
+        } else if (vdec_need_key_ && !job.is_keyframe) {
+            vdec_skipped_.fetch_add(1, std::memory_order_relaxed);  // waiting for the IDR the PLI asked for
+        } else {
+            const uint64_t t0 = lv::now_us();
+            const bool decoded = video_decoder_->decode(job.bits.data(), job.bits.size(), cfg_.output_order,
+                                                        vdec_frame_) &&
+                                 vdec_frame_.width > 0 && vdec_frame_.height > 0;
+            const uint64_t dt = lv::now_us() - t0;
+            if (!decoded) {
+                video_decoder_->reset();
+                vdec_need_key_ = true;
+                vdec_fail_.fetch_add(1, std::memory_order_relaxed);
+                vdec_error_fid_.store(job.frame_id, std::memory_order_relaxed);
+                vdec_error_.store(true, std::memory_order_release);
+            } else {
+                vdec_need_key_ = false;
+                vdec_w_.store(vdec_frame_.width, std::memory_order_relaxed);
+                vdec_h_.store(vdec_frame_.height, std::memory_order_relaxed);
+                vdec_ok_.fetch_add(1, std::memory_order_release);
+                if (on_frame_) {
+                    CompletedFrame cf;
+                    cf.frame_id = job.frame_id;
+                    cf.sender_timestamp_us = job.sender_ts_us;
+                    cf.first_arrival_us = job.first_arrival_us;
+                    cf.complete_time_us = lv::now_us();
+                    cf.decode_time_us = uint32_t(dt);
+                    cf.total_slices = 1;
+                    cf.slices_ok = 1;
+                    cf.codec = job.codec;
+                    cf.is_keyframe = job.is_keyframe;
+                    cf.image = &vdec_frame_;
+                    on_frame_(cf);
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(vdec_mu_);
+            vdec_busy_ = false;
+            if (vdec_q_.empty()) vdec_idle_cv_.notify_all();
+        }
+    }
+    video_decoder_.reset();
+}
+
+void FrameAssembler::vdec_drain() {
+    std::unique_lock<std::mutex> lk(vdec_mu_);
+    if (!vdec_thread_.joinable()) return;
+    vdec_idle_cv_.wait_for(lk, std::chrono::seconds(2), [&] { return vdec_q_.empty() && !vdec_busy_; });
+}
+
+void FrameAssembler::stop_decoder_worker() {
+    {
+        std::lock_guard<std::mutex> lk(vdec_mu_);
+        vdec_stop_ = true;
+    }
+    vdec_cv_.notify_all();
+    if (vdec_thread_.joinable()) vdec_thread_.join();
+}
+
+void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
     if (!video_decoder_ || video_decoder_->codec_id() != slot.codec) {
         video_decoder_ = create_video_decoder(slot.codec, cfg_.output_order);
         active_codec_ = slot.codec;
-        decoder_backend_ = video_decoder_ ? video_decoder_->backend_name() : "Unavailable";
-        decoder_is_hw_ = video_decoder_ ? video_decoder_->is_hardware() : false;
+        set_backend(video_decoder_ ? video_decoder_->backend_name() : "Unavailable",
+                    video_decoder_ ? video_decoder_->is_hardware() : false);
         has_decoded_inter_frame_ = false;
         awaiting_idr_ = !slot.is_keyframe;
     }
@@ -317,10 +505,10 @@ void FrameAssembler::finalize_slot(FrameSlot& slot, uint64_t now_us) {
 
     if (active_codec_ != VideoCodecId::kLanVidDct) {
         active_codec_ = VideoCodecId::kLanVidDct;
-        decoder_backend_ = std::string("LanVid DCT (") + dct_kernels_best().name + ")";
-        decoder_is_hw_ = false;
+        set_backend(std::string("LanVid DCT (") + dct_kernels_best().name + ")", false);
         awaiting_idr_ = false;
         has_decoded_inter_frame_ = false;
+        has_submitted_inter_ = false;
     }
 
     bool waited = false;
@@ -724,12 +912,17 @@ void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* p
     try_finalize_ready(now_us);
 }
 
-void FrameAssembler::poll(uint64_t now_us) { try_finalize_ready(now_us); }
+void FrameAssembler::poll(uint64_t now_us) {
+    try_finalize_ready(now_us);
+    fold_vdec_feedback(now_us);
+}
 
 void FrameAssembler::flush(uint64_t now_us) {
     for (size_t idx : active_slots_sorted()) {
         finalize_slot(slots_[idx], now_us);
     }
+    vdec_drain();
+    fold_vdec_feedback(now_us);
 }
 
 }  // namespace lv

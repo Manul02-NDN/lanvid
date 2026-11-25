@@ -31,7 +31,7 @@ constexpr const char* kAudioCodecItems[4] = {
     "Uncompressed (Float32 · ~98 Mbps)",
     "Lossless 24-bit (PCM24 · -25%)",
     "Compact 16-bit (PCM16 · -50%)",
-    "Ultra-Light (Opus / ADPCM · -80%)"
+    "Ultra-Light (Opus CELT · -85%)"
 };
 
 double estimate_aoip_mbps(int channels, int codec, int bitrate_kbps = 0) {
@@ -1725,11 +1725,11 @@ void LanVidStudioApp::draw_audio_bitrate_pills(const char* id) {
     };
     const BitrateOpt opts[6] = {
         {0,   "Lossless", "Без стиснення (PCM 32-bit/24-bit, студійний еталон для Ethernet)"},
-        {256, "256 kbps", "Прозора студійна якість (5-bit ADPCM @ 48 кГц на канал)"},
-        {192, "192 kbps", "Оптимально для Wi-Fi 6 (4-bit IMA-ADPCM @ 48 кГц на канал)"},
-        {128, "128 kbps", "Збалансований потік (5-bit @ 24 кГц, низьке навантаження на Wi-Fi)"},
-        {96,  "96 kbps",  "Економний Wi-Fi (4-bit @ 24 кГц, стабільна передача)"},
-        {64,  "64 kbps",  "Максимальна економія трафіку (4-bit @ 16 кГц, для слабкого Wi-Fi)"},
+        {256, "256 kbps", "Прозора студійна якість (Opus CELT 2,5/5 мс, Fullband 48 кГц на канал)"},
+        {192, "192 kbps", "Оптимально для Wi-Fi 6 (Opus CELT, Fullband 48 кГц на канал)"},
+        {128, "128 kbps", "Збалансований потік (Opus CELT, Fullband 48 кГц, низьке навантаження на Wi-Fi)"},
+        {96,  "96 kbps",  "Економний Wi-Fi (Opus CELT, 48 кГц, стабільна передача)"},
+        {64,  "64 kbps",  "Максимальна економія трафіку (Opus CELT, 48 кГц, для слабкого Wi-Fi)"},
     };
 
     const float avail_x = ImGui::GetContentRegionAvail().x;

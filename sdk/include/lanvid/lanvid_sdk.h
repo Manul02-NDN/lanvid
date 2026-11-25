@@ -108,7 +108,7 @@ LV_API int lv_sender_push_audio_multichannel(LvSenderHandle* handle, const void*
                                              uint64_t media_timestamp_samples);
 /* Sender-side latency budget: selects chunk size, FEC and retransmission policy (2..2000 ms). */
 LV_API int lv_sender_set_audio_latency_ms(LvSenderHandle* handle, uint32_t latency_ms);
-/* Live audio compression profile: 0=PCM32F, 1=PCM24 (-25%), 2=PCM16 (-50%), 3=Opus/ADPCM (-85%). */
+/* Live audio compression profile: 0=PCM32F, 1=PCM24 (-25%), 2=PCM16 (-50%), 3=Opus CELT (-85%; IMA-ADPCM fallback for non-Opus frame sizes). */
 LV_API int lv_sender_set_audio_codec(LvSenderHandle* handle, int codec);
 /* Live per-channel audio bitrate target: 0 = Lossless (PCM), or 256 / 192 / 128 / 96 / 64 kbps/ch. */
 LV_API int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch);
@@ -348,7 +348,7 @@ LV_API int lv_tally_intercom_is_director_speaking(LvTallyIntercomHandle* handle)
 LV_API float lv_tally_intercom_ducking_gain(LvTallyIntercomHandle* handle);
 
 /* ---- Mobile monitor app helpers (additive) ---- */
-/* bitrate_kbps for connect / set_stream: total stereo kbps (128..512 = 64..256 per channel, ADPCM) or: */
+/* bitrate_kbps for connect / set_stream: total stereo kbps (128..512 = 64..256 per channel, Opus CELT) or: */
 #define LV_MONITOR_BITRATE_LOSSLESS 0xFFFF /* 24-bit PCM, ~2.3 Mbps stereo */
 
 typedef struct LV_MonitorMetaChannel {

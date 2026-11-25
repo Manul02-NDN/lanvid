@@ -152,7 +152,7 @@ ComPtr<IDXGIAdapter1> find_adapter_by_luid(const LUID& luid) {
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) return nullptr;
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> adapter;
-        if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(factory->EnumAdapters1(i, &adapter)) || !adapter) break;  // any error, not only NOT_FOUND
         DXGI_ADAPTER_DESC1 desc{};
         if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.AdapterLuid.LowPart == luid.LowPart &&
             desc.AdapterLuid.HighPart == luid.HighPart) {
@@ -186,7 +186,7 @@ ComPtr<IDXGIAdapter1> select_best_video_adapter(const LUID* preferred_luid) {
 
     for (UINT i = 0;; ++i) {
         ComPtr<IDXGIAdapter1> ad;
-        if (factory->EnumAdapters1(i, &ad) == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(factory->EnumAdapters1(i, &ad)) || !ad) break;  // any error, not only NOT_FOUND
         DXGI_ADAPTER_DESC1 desc{};
         if (FAILED(ad->GetDesc1(&desc))) continue;
         if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;

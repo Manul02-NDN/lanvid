@@ -8,11 +8,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "app/stats.hpp"
 #include "codec/dct.hpp"
 #include "common/clock.hpp"
+#include "common/rt_thread.hpp"
 #include "common/cpu_features.hpp"
 #include "common/image.hpp"
 #include "net/receiver.hpp"
@@ -172,7 +175,11 @@ int main(int argc, char** argv) {
     std::unique_ptr<lv::ReceiverStatsTracker> tracker;
     lv::UdpReceiver* rx_ptr = nullptr;
 
+    // Frames arrive on the decode worker (H.264/H.265) or the network thread (DCT); the report below
+    // runs on this thread: one mutex for the tracker and the frame counters.
+    std::mutex frame_mu;
     lv::UdpReceiver receiver(rcfg, [&](const lv::CompletedFrame& cf) {
+        std::lock_guard<std::mutex> flk(frame_mu);
         if (!tracker) {
             t_first_frame = cf.first_arrival_us;
             t_last_report = lv::now_us();
@@ -276,27 +283,42 @@ int main(int argc, char** argv) {
         std::printf("Virtual audio device bridge active: %d channels -> %s\n", aoip_channels, lv::kShmBusName);
     }
 
-    uint64_t next_mon_us = lv::now_us();
-    uint64_t next_aoip_report_us = next_mon_us + 1000000;
-    std::vector<float> mon_f(480 * 2);
-    std::vector<int16_t> mon_i(480 * 2);
+    // AoIP render clock: its own real-time thread on an absolute 5 ms deadline, exactly like an audio device
+    // callback. (Rendering from the network loop below made the playout cursor run in bursts whenever
+    // recv() blocked - on Windows a 2 ms SO_RCVTIMEO rounds up to the 15.6 ms system tick - and the catch-up
+    // blocks then ran into data that had not arrived yet: periodic underruns with zero packet loss.)
+    std::atomic<bool> render_stop{false};
+    std::thread render_thread;
+    if (aoip_channels > 0 && !audio_virtual) {
+        render_thread = std::thread([&] {
+            const uint32_t blk = std::min<uint32_t>(rcfg.audio_sample_rate / 200, 480);  // 5 ms
+            const uint64_t period_us = uint64_t(blk) * 1000000ull / rcfg.audio_sample_rate;
+            lv::RealtimeThreadScope rt{uint32_t(period_us)};
+            std::vector<float> mon_f(size_t(blk) * 2);
+            std::vector<int16_t> mon_i(size_t(blk) * 2);
+            uint64_t next = lv::now_us() + period_us;
+            while (!render_stop.load(std::memory_order_relaxed)) {
+                lv::sleep_until_us(next, [] {});
+                const uint64_t now = lv::now_us();
+                if (now > next + 200000) next = now;  // stalled > 200 ms (suspend): re-anchor
+                next += period_us;
+                // Stereo monitor of channels 1/2 (the matrix is rendered once; meters track all channels).
+                receiver.pop_audio_multichannel_interleaved(mon_f.data(), 2, blk);
+                if (enable_audio && rcfg.audio_sample_rate == 48000) {
+                    for (uint32_t i = 0; i < blk * 2; ++i)
+                        mon_i[i] = int16_t(std::clamp(mon_f[i], -1.0f, 1.0f) * 32767.0f);
+                    receiver.audio_buffer().push_pcm16(mon_i.data(), blk);
+                }
+            }
+        });
+    }
+
+    uint64_t next_aoip_report_us = lv::now_us() + 1000000;
     while (!g_stop.load(std::memory_order_relaxed)) {
         receiver.step_once();
 
         if (aoip_channels > 0) {
             const uint64_t tnow = lv::now_us();
-            const uint32_t blk = rcfg.audio_sample_rate / 200;  // 5 ms
-            if (tnow > next_mon_us + 200000) next_mon_us = tnow;  // stalled > 200 ms: re-anchor
-            while (!audio_virtual && tnow >= next_mon_us) {  // render every due block so the cursor keeps real time
-                next_mon_us += uint64_t(blk) * 1000000ull / rcfg.audio_sample_rate;
-                // Stereo monitor of channels 1/2 (the matrix is rendered once; meters track all channels).
-                receiver.pop_audio_multichannel_interleaved(mon_f.data(), 2, std::min<uint32_t>(blk, 480));
-                if (enable_audio && rcfg.audio_sample_rate == 48000) {
-                    for (uint32_t i = 0; i < blk * 2 && i < mon_i.size(); ++i)
-                        mon_i[i] = int16_t(std::clamp(mon_f[i], -1.0f, 1.0f) * 32767.0f);
-                    receiver.audio_buffer().push_pcm16(mon_i.data(), std::min<uint32_t>(blk, 480));
-                }
-            }
             if (tnow >= next_aoip_report_us) {
                 next_aoip_report_us = tnow + 1000000;
                 int active = 0;
@@ -348,6 +370,7 @@ int main(int argc, char** argv) {
         const uint64_t now = lv::now_us();
         if (max_duration_s > 0.0 && double(now - t_start) / 1e6 >= max_duration_s) break;
 
+        std::unique_lock<std::mutex> report_lk(frame_mu);
         if (tracker && now - t_last_report >= 1000000) {
             const auto cs = receiver.clock_sync();
             const auto ast = receiver.audio_stats();
@@ -375,10 +398,13 @@ int main(int argc, char** argv) {
         }
     }
 
+    render_stop.store(true, std::memory_order_relaxed);
+    if (render_thread.joinable()) render_thread.join();
     vhost.stop();
     audio_out.stop();
+    receiver.flush();  // drains the decode worker (last frames may still present to the preview)
     if (preview) preview->close();
-    receiver.flush();
+    std::lock_guard<std::mutex> final_lk(frame_mu);
     if (tracker) {
         const auto cs = receiver.clock_sync();
         const auto ast = receiver.audio_stats();

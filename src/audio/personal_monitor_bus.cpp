@@ -1679,7 +1679,10 @@ void PersonalMonitorClient::service_flow_reorder(uint64_t now) {
         const uint32_t n_samp = po.hdr.num_samples ? po.hdr.num_samples : 240u;
         const uint16_t mask = po.hdr.channel_mask;
         if (flow_dec_scratch_.size() < n_samp) flow_dec_scratch_.resize(n_samp);
-        while (flow_opus_next_seq_ != s) {
+        // Conceal every missing frame before `s` (wrap-safe), then decode the buffered run in order.
+        // (Flushing inside this loop could move flow_opus_next_seq_ past `s`; a `!= s` condition then never
+        // ended - a ~4e9-iteration hang of the phone's network thread.)
+        while (int32_t(s - flow_opus_next_seq_) > 0) {
             const uint32_t missing_dist = s - flow_opus_next_seq_;
             const uint64_t est_ts =
                 (po.hdr.media_timestamp_samples >= uint64_t(missing_dist) * n_samp)
@@ -1696,8 +1699,8 @@ void PersonalMonitorClient::service_flow_reorder(uint64_t now) {
             }
 #endif
             ++flow_opus_next_seq_;
-            flush_flow_opus_inorder();
         }
+        flush_flow_opus_inorder();
         return;
     }
 }

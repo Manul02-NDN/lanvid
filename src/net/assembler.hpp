@@ -4,6 +4,10 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -57,6 +61,11 @@ struct AssemblerConfig {
     ConcealMode conceal = ConcealMode::kPrev;
     PixelOrder output_order = PixelOrder::kRGBA;
     bool verify_crc = true;
+    // Decode H.264 / H.265 frames on a dedicated worker thread instead of the ingest (network) thread.
+    // A hardware decoder session takes ~100-300 ms to open and a software fallback 10-30 ms per frame;
+    // on the network thread that stalls AUDIO2 / MIDI / clock packets that share the socket.
+    // Frame callbacks then run on the worker thread. flush() drains the worker.
+    bool async_inter_decode = false;
 };
 
 struct CompletedFrame {
@@ -117,8 +126,13 @@ public:
     const SeqLossTracker& seq_tracker() const { return seq_; }
 
     VideoCodecId active_codec() const { return active_codec_; }
-    std::string decoder_backend_name() const { return decoder_backend_; }
-    bool decoder_is_hardware() const { return decoder_is_hw_; }
+    std::string decoder_backend_name() const {
+        std::lock_guard<std::mutex> lk(backend_mu_);
+        return decoder_backend_;
+    }
+    bool decoder_is_hardware() const { return decoder_is_hw_.load(std::memory_order_relaxed); }
+    // Stops the async decode worker (if any). Call before the frame callback's captures go away.
+    void stop_decoder_worker();
     bool awaiting_idr() const { return awaiting_idr_; }
 
     void set_conceal_mode(ConcealMode m) { conceal_mode_.store(uint8_t(m), std::memory_order_relaxed); }
@@ -202,6 +216,19 @@ private:
     void dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id);
     void finalize_slot(FrameSlot& slot, uint64_t now_us);
     void finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us);
+    void decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us);
+    struct InterJob {
+        uint32_t frame_id = 0;
+        uint32_t sender_ts_us = 0;
+        uint64_t first_arrival_us = 0;
+        VideoCodecId codec = VideoCodecId::kH264;
+        bool is_keyframe = false;
+        std::vector<uint8_t> bits;
+    };
+    void vdec_loop();
+    void vdec_drain();
+    void fold_vdec_feedback(uint64_t now_us);
+    void set_backend(const std::string& name, bool hw);
     void trigger_pli(uint32_t failed_frame_id, uint64_t now_us, bool immediate);
     void conceal_strip(Image& dst, int y0, int y1) const;
     void try_finalize_ready(uint64_t now_us);
@@ -229,10 +256,30 @@ private:
     uint32_t last_finalized_id_ = 0;
 
     // Inter-frame (H.264 / H.265) decoder & PLI recovery state
-    std::unique_ptr<IVideoDecoder> video_decoder_;
+    std::unique_ptr<IVideoDecoder> video_decoder_;  // owned by the worker thread in async mode
     VideoCodecId active_codec_ = VideoCodecId::kLanVidDct;
+    mutable std::mutex backend_mu_;
     std::string decoder_backend_ = "LanVid DCT";
-    bool decoder_is_hw_ = false;
+    std::atomic<bool> decoder_is_hw_{false};
+
+    // Async inter-frame decode worker (AssemblerConfig::async_inter_decode).
+    static constexpr size_t kMaxInterQueue = 16;  // ~270 ms @ 60 fps: covers a decoder session start-up
+    std::thread vdec_thread_;
+    std::mutex vdec_mu_;
+    std::condition_variable vdec_cv_;
+    std::condition_variable vdec_idle_cv_;
+    std::deque<InterJob> vdec_q_;
+    bool vdec_busy_ = false;
+    bool vdec_stop_ = false;
+    bool vdec_need_key_ = true;                // worker: fresh / failed decoder waits for an IDR
+    Image vdec_frame_;                         // worker-owned output image
+    std::atomic<bool> vdec_error_{false};      // worker -> ingest thread: decode failed, request IDR
+    std::atomic<uint32_t> vdec_error_fid_{0};
+    std::atomic<uint64_t> vdec_ok_{0}, vdec_fail_{0}, vdec_skipped_{0};
+    std::atomic<int> vdec_w_{0}, vdec_h_{0};
+    uint64_t vdec_ok_seen_ = 0, vdec_fail_seen_ = 0, vdec_skipped_seen_ = 0;
+    bool has_submitted_inter_ = false;         // ingest thread: frame-gap tracking in async mode
+    uint32_t last_submitted_fid_ = 0;
     bool awaiting_idr_ = false;
     bool has_decoded_inter_frame_ = false;
     uint32_t last_decoded_inter_fid_ = 0;

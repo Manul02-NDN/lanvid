@@ -52,7 +52,7 @@ public:
                                              const AudioHeader& hdr, const uint8_t* pcm_data)>;
 
     UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame);
-    ~UdpReceiver() = default;
+    ~UdpReceiver();
 
     void set_audio_callback(AudioCallback cb) { audio_cb_ = std::move(cb); }
 
@@ -74,7 +74,10 @@ public:
     uint64_t feedbacks_sent() const { return feedbacks_sent_; }
     uint64_t plis_sent() const { return plis_sent_; }
     uint64_t video_packets_ignored() const { return video_ignored_; }
-    uint32_t jitter_us() const { return uint32_t(jitter_us_); }
+    uint32_t jitter_us() const {
+        std::lock_guard<std::mutex> lk(fb_mu_);
+        return uint32_t(jitter_us_);
+    }
 
     AudioJitterBuffer& audio_buffer() { return audio_buf_; }
     AudioStats audio_stats() const { return audio_buf_.stats(); }
@@ -174,12 +177,15 @@ private:
     uint64_t last_ping_us_ = 0;
     uint32_t ping_seq_ = 0;
     ClockSyncInfo sync_{};
+    std::atomic<int64_t> sync_offset_pub_{0};
+    std::atomic<bool> sync_synced_pub_{false};
 
     uint64_t last_fb_us_ = 0;
     uint64_t fb_prev_rx_ = 0;
     uint64_t fb_prev_lost_ = 0;
     uint64_t fb_prev_fec_rec_ = 0;
     uint64_t fb_prev_fec_par_ = 0;
+    mutable std::mutex fb_mu_;  // frame-callback stats (decode worker) vs. feedback (network thread)
     uint32_t last_completed_fid_ = 0;
     bool has_prev_lat_ = false;
     double prev_lat_us_ = 0.0;

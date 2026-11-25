@@ -45,6 +45,9 @@
 #include <net/if_dl.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <map>
+#include <string>
+#include <SystemConfiguration/SystemConfiguration.h>
 #endif
 #endif
 
@@ -383,6 +386,34 @@ std::vector<L2AdapterInfo> list_l2_adapters() {
         }
     }
 #elif defined(LV_L2_LINUX_AF_PACKET) || defined(LV_L2_MACOS_BPF)
+#if defined(LV_L2_MACOS_BPF)
+    struct ScMeta {
+        MacAddress mac{};
+        bool has_mac = false;
+        bool is_ethernet = false;
+        std::string display_name;
+    };
+    std::map<std::string, ScMeta> sc_meta;
+    auto cf_str = [](CFStringRef s) -> std::string {
+        if (!s) return {};
+        char buf[256] = {};
+        return CFStringGetCString(s, buf, sizeof(buf), kCFStringEncodingUTF8) ? std::string(buf) : std::string();
+    };
+    if (CFArrayRef arr = SCNetworkInterfaceCopyAll()) {
+        for (CFIndex i = 0; i < CFArrayGetCount(arr); ++i) {
+            auto iface = static_cast<SCNetworkInterfaceRef>(const_cast<void*>(CFArrayGetValueAtIndex(arr, i)));
+            const std::string bsd = cf_str(SCNetworkInterfaceGetBSDName(iface));
+            if (bsd.empty()) continue;
+            ScMeta m;
+            m.display_name = cf_str(SCNetworkInterfaceGetLocalizedDisplayName(iface));
+            m.has_mac = MacAddress::parse(cf_str(SCNetworkInterfaceGetHardwareAddressString(iface)), m.mac);
+            const CFStringRef t = SCNetworkInterfaceGetInterfaceType(iface);
+            m.is_ethernet = t && CFEqual(t, kSCNetworkInterfaceTypeEthernet);
+            sc_meta[bsd] = std::move(m);
+        }
+        CFRelease(arr);
+    }
+#endif
     ifaddrs* ifa = nullptr;
     if (getifaddrs(&ifa) == 0 && ifa) {
         for (auto* cur = ifa; cur != nullptr; cur = cur->ifa_next) {
@@ -404,9 +435,25 @@ std::vector<L2AdapterInfo> list_l2_adapters() {
             info.device_name = cur->ifa_name;
             info.friendly_name = cur->ifa_name;
             std::memcpy(info.mac.bytes.data(), LLADDR(sdl), 6);
+            // macOS 26+ hands unprivileged processes a redacted link address (02:00:00:00:00:00) via
+            // getifaddrs. Grid frames carry the source MAC explicitly (BPF header-complete mode), so take the
+            // real one from SystemConfiguration, which also tells Ethernet from Wi-Fi / virtual interfaces.
+            if (const auto it = sc_meta.find(info.device_name); it != sc_meta.end()) {
+                if (it->second.has_mac) info.mac = it->second.mac;
+                if (!it->second.display_name.empty()) info.friendly_name = it->second.display_name + " (" + info.device_name + ")";
+                info.is_ethernet = it->second.is_ethernet;
+            } else {
+                info.is_ethernet = false;  // not a SystemConfiguration network service (awdl, llw, anpi, ...)
+            }
+            if (cur->ifa_data) {
+                const auto* ifd = static_cast<const if_data*>(cur->ifa_data);
+                info.speed_mbps = uint32_t(ifd->ifi_baudrate / 1'000'000ull);
+            }
 #endif
             info.link_up = (cur->ifa_flags & IFF_UP) && (cur->ifa_flags & IFF_RUNNING);
+#if defined(LV_L2_LINUX_AF_PACKET)
             info.is_ethernet = true;
+#endif
             out.push_back(std::move(info));
         }
         freeifaddrs(ifa);
