@@ -19,6 +19,8 @@ void on_signal(int) { g_stop.store(true, std::memory_order_release); }
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Line-buffered: as a LaunchDaemon / service stdout is a log file and would otherwise only be written at exit.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
