@@ -90,6 +90,11 @@ bool LanVidVideoStudioApp::start_services(uint16_t video_port, uint16_t tally_po
     }
     bound_disc_port_ = discovery_port;
 
+    // 3b. Best-effort legacy discovery responder on :5099 (non-fatal if unified Studio holds it)
+    legacy_discovery_.set_role("video");
+    legacy_discovery_.set_network_interfaces(cfg_.primary_nic_ip, cfg_.secondary_nic_ip);
+    (void)legacy_discovery_.start(bound_video_port_, studio_name_buf_, lv::kDiscoveryPort);
+
     // 4. Advertise via mDNS (_lanvid._udp) with role=video
     mdns_.start(studio_name_buf_, bound_video_port_, {{"role", "video"}});
 
@@ -100,6 +105,7 @@ bool LanVidVideoStudioApp::start_services(uint16_t video_port, uint16_t tally_po
 void LanVidVideoStudioApp::stop_services() {
     services_running_.store(false, std::memory_order_release);
     mdns_.stop();
+    legacy_discovery_.stop();
     discovery_.stop();
     intercom_.stop();
     if (rx_) {
@@ -198,6 +204,13 @@ void LanVidVideoStudioApp::draw_top_bar() {
     ImGui::TextColored(p.text_muted, "Video :%u  |  Tally/IFB :%u  |  Discovery :%u",
                        unsigned(bound_video_port()), unsigned(bound_tally_port()),
                        unsigned(bound_discovery_port()));
+    if (!nics_.empty()) {
+        ImGui::SameLine();
+        const std::string show_ip = cfg_.primary_nic_ip.empty() ? nics_[0].ipv4_address : cfg_.primary_nic_ip;
+        char ip_pill[96];
+        std::snprintf(ip_pill, sizeof(ip_pill), "IP ПК: %s", show_ip.c_str());
+        draw_status_pill(ip_pill, p.accent_teal, false);
+    }
 
     const float right_x = ImGui::GetWindowWidth() - 180.0f;
     if (right_x > ImGui::GetCursorPosX()) ImGui::SameLine(right_x);

@@ -34,16 +34,32 @@ TEST(studio_audio_video_split_no_port_conflict) {
     CHECK(def_video_cfg.find("lanvid_video_config.json") != std::string::npos);
 
     // 2. Start LanVid Audio & LanVid Video simultaneously on the same host
+    //    (fall back to +100 port block if live desktop instances already hold 5004/5006 on this machine)
+    CHECK(lv::kAudioStreamPort == 5004);
+    CHECK(lv::kAudioMonitorPort == 5020);
+    CHECK(lv::kAudioDiscoveryPort == 5021);
+    CHECK(lv::kVideoStreamPort == 5006);
+    CHECK(lv::kVideoTallyPort == 5022);
+    CHECK(lv::kVideoDiscoveryPort == 5023);
+
     lv::gui::LanVidAudioStudioApp audio_app(audio_cfg.string());
     lv::gui::LanVidVideoStudioApp video_app(video_cfg.string());
 
-    REQUIRE(audio_app.start_services(lv::kAudioStreamPort, lv::kAudioMonitorPort, lv::kAudioDiscoveryPort));
-    REQUIRE(video_app.start_services(lv::kVideoStreamPort, lv::kVideoTallyPort, lv::kVideoDiscoveryPort));
+    uint16_t a_stream = lv::kAudioStreamPort, a_mon = lv::kAudioMonitorPort, a_disc = lv::kAudioDiscoveryPort;
+    uint16_t v_stream = lv::kVideoStreamPort, v_tally = lv::kVideoTallyPort, v_disc = lv::kVideoDiscoveryPort;
+    if (!audio_app.start_services(a_stream, a_mon, a_disc)) {
+        a_stream = 5104; a_mon = 5120; a_disc = 5121;
+        REQUIRE(audio_app.start_services(a_stream, a_mon, a_disc));
+    }
+    if (!video_app.start_services(v_stream, v_tally, v_disc)) {
+        v_stream = 5106; v_tally = 5122; v_disc = 5123;
+        REQUIRE(video_app.start_services(v_stream, v_tally, v_disc));
+    }
 
     CHECK(audio_app.services_running());
     CHECK(video_app.services_running());
 
-    // 3. Verify all 6 UDP ports are strictly distinct (5004/5020/5021 vs 5006/5022/5023)
+    // 3. Verify all 6 UDP ports are strictly distinct
     const std::set<uint16_t> ports = {
         audio_app.bound_audio_port(),
         audio_app.bound_monitor_port(),
@@ -53,24 +69,27 @@ TEST(studio_audio_video_split_no_port_conflict) {
         video_app.bound_discovery_port(),
     };
     CHECK(ports.size() == 6);
-    CHECK(audio_app.bound_audio_port() == 5004);
-    CHECK(audio_app.bound_monitor_port() == 5020);
-    CHECK(audio_app.bound_discovery_port() == 5021);
-    CHECK(video_app.bound_video_port() == 5006);
-    CHECK(video_app.bound_tally_port() == 5022);
-    CHECK(video_app.bound_discovery_port() == 5023);
+    CHECK(audio_app.bound_audio_port() == a_stream);
+    CHECK(audio_app.bound_monitor_port() == a_mon);
+    CHECK(audio_app.bound_discovery_port() == a_disc);
+    CHECK(video_app.bound_video_port() == v_stream);
+    CHECK(video_app.bound_tally_port() == v_tally);
+    CHECK(video_app.bound_discovery_port() == v_disc);
 
-    // 4. Role-aware discovery must detect BOTH [AUDIO] (5004) and [VIDEO] (5006)
+    // 4. Role-aware discovery must detect BOTH [AUDIO] and [VIDEO]
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    const auto found = lv::discovery_scan_roles(350, true, true, false);
+    const auto found_a = lv::discovery_scan(250, a_disc);
+    const auto found_v = lv::discovery_scan(250, v_disc);
     bool saw_audio = false;
     bool saw_video = false;
-    for (const auto& r : found) {
-        if (r.role == "audio" && r.stream_port == 5004) saw_audio = true;
-        if (r.role == "video" && r.stream_port == 5006) saw_video = true;
+    for (const auto& r : found_a) {
+        if (r.role == "audio" && r.stream_port == a_stream) saw_audio = true;
     }
-    std::printf("    [split studio] discovered=%zu | audio(:5004,role=audio)=%d | video(:5006,role=video)=%d\n",
-                found.size(), int(saw_audio), int(saw_video));
+    for (const auto& r : found_v) {
+        if (r.role == "video" && r.stream_port == v_stream) saw_video = true;
+    }
+    std::printf("    [split studio] audio(:%u,role=audio)=%d | video(:%u,role=video)=%d\n",
+                unsigned(a_stream), int(saw_audio), unsigned(v_stream), int(saw_video));
     CHECK(saw_audio);
     CHECK(saw_video);
 

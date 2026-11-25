@@ -73,9 +73,10 @@ data class HudUiState(
     val quality: Int = 80,
     val fecGroup: Int = 6,
     val adaptive: Boolean = true,
-    val destIp: String = "192.168.1.100",
-    val destPort: Int = 5000,
-    val listenPort: Int = 5000,
+    val destIp: String = "",
+    val destPort: Int = 5006,
+    val destName: String = "",
+    val listenPort: Int = 5006,
     val volume: Float = 1.0f,
     val audioLatencyMs: Int = 20,
     val frameGuides: Boolean = true,
@@ -91,7 +92,9 @@ data class HudUiState(
     fun toolSummary(tool: HudTool): String = when (tool) {
         HudTool.SOURCE -> if (mode == BroadcastMode.SENDER) source.shortLabel else "RX"
         HudTool.CODEC -> if (codec == VideoCodecOption.DCT) "Q$quality" else "${codec.shortLabel} ${bitrateMbps.toInt()}M"
-        HudTool.NETWORK -> if (mode == BroadcastMode.SENDER) ":${destPort}" else ":${listenPort}"
+        HudTool.NETWORK -> if (mode == BroadcastMode.SENDER) {
+            if (destName.isNotBlank()) destName.take(8) else if (destIp.isNotBlank()) ":${destPort}" else "ПОШУК"
+        } else ":${listenPort}"
         HudTool.AUDIO -> if (mode == BroadcastMode.SENDER) audioSource.title else "${audioLatencyMs}ms"
         HudTool.MONITOR -> if (frameGuides) "GRID" else "OFF"
     }
@@ -334,6 +337,7 @@ fun ToolPanel(
     lanPeers: List<LanPeer>,
     scanning: Boolean,
     onScanLan: () -> Unit,
+    onSelectPeerAndGoLive: ((LanPeer) -> Unit)? = null,
     onUpdate: (HudUiState) -> Unit,
     onSwitchMode: (BroadcastMode) -> Unit,
     onVolumeChange: (Float) -> Unit,
@@ -437,11 +441,16 @@ fun ToolPanel(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text("RECEIVER", style = Bm.mono(10.sp), color = Bm.dim)
+                        Text("ПК ПРИЙМАЧ", style = Bm.mono(10.sp), color = Bm.dim)
                         Text(
-                            "${ui.destIp}:${ui.destPort}",
+                            if (ui.destIp.isNotBlank()) {
+                                val nm = if (ui.destName.isNotBlank()) "${ui.destName} · " else ""
+                                "$nm${ui.destIp}:${ui.destPort}"
+                            } else "Пошук ПК у Wi-Fi...",
                             style = Bm.mono(11.sp),
-                            color = Bm.accent,
+                            color = if (ui.destIp.isNotBlank()) Bm.good else Bm.warn,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
                         OutlinedButton(
@@ -449,42 +458,60 @@ fun ToolPanel(
                             enabled = !scanning,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                         ) {
-                            Text(if (scanning) "Scanning…" else "Scan LAN", style = Bm.mono(10.sp), color = Bm.accent)
+                            Text(if (scanning) "Пошук…" else "Оновити", style = Bm.mono(10.sp), color = Bm.accent)
                         }
                     }
 
                     if (lanPeers.isNotEmpty()) {
-                        Row(
-                            Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             lanPeers.forEach { p ->
                                 val sel = ui.destIp == p.ip && ui.destPort == p.port
-                                OutlinedButton(
-                                    onClick = { onUpdate(ui.copy(destIp = p.ip, destPort = p.port)) },
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            if (sel) Bm.accent.copy(alpha = 0.22f) else Bm.panelHi.copy(alpha = 0.85f),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .clickableNoRipple {
+                                            onUpdate(ui.copy(destIp = p.ip, destPort = p.port, destName = p.name))
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
-                                    Text(
-                                        "${p.name} (${p.ip}:${p.port}) · ${p.rttMs} ms",
-                                        style = Bm.mono(10.sp),
-                                        color = if (sel) Bm.accent else Bm.good
-                                    )
+                                    Chip(p.roleBadge, if (p.role == "video") Bm.good else Bm.accent)
+                                    Column(Modifier.weight(1f)) {
+                                        Text(p.name, style = Bm.mono(11.sp, FontWeight.Bold), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("${p.ip}:${p.port} · ${p.rttMs} ms", style = Bm.mono(9.sp), color = Bm.dim)
+                                    }
+                                    if (onSelectPeerAndGoLive != null && !ui.senderActive && p.role != "audio") {
+                                        Button(
+                                            onClick = { onSelectPeerAndGoLive(p) },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Bm.good)
+                                        ) {
+                                            Text("GO LIVE", style = Bm.mono(10.sp, FontWeight.Bold), color = Color.Black)
+                                        }
+                                    } else if (sel) {
+                                        Text("ОБРАНО", style = Bm.mono(10.sp, FontWeight.Bold), color = Bm.good)
+                                    }
                                 }
                             }
                         }
-                    } else if (!scanning) {
+                    } else {
                         Text(
-                            "Tap Scan LAN (UDP :5099) or enter LanVid Studio receiver IP below.",
+                            "Автопошук активний (mDNS + LAN Broadcast :5023 / :5099). Запустіть LanVid Video або LanVid Studio на ПК у тій же Wi-Fi мережі — ПК з'явиться тут автоматично.",
                             style = Bm.mono(10.sp),
                             color = Bm.dim
                         )
                     }
 
-                    TextSetting("RECEIVER IP", ui.destIp) { onUpdate(ui.copy(destIp = it)) }
-                    TextSetting("UDP PORT", ui.destPort.toString(), numeric = true) { v ->
+                    TextSetting("IP ПК (ВРУЧНУ)", ui.destIp) { onUpdate(ui.copy(destIp = it, destName = "")) }
+                    TextSetting("UDP ПОРТ", ui.destPort.toString(), numeric = true) { v ->
                         v.toIntOrNull()?.let { p -> onUpdate(ui.copy(destPort = p.coerceIn(1024, 65535))) }
                     }
-                    PresetRow(listOf(5000, 5001, 5002), ui.destPort, { ":$it" }) {
+                    PresetRow(listOf(5006, 5000, 5001), ui.destPort, { ":$it" }) {
                         onUpdate(ui.copy(destPort = it))
                     }
                 } else {

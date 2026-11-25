@@ -154,19 +154,56 @@ fun BroadcastScreen(
     val appVersion = remember { LanVidNative.nativeGetVersion() }
     val simdInfo = remember { LanVidNative.nativeGetSimdInfo() }
 
-    var ui by remember { mutableStateOf(HudUiState()) }
+    val prefs = remember { context.getSharedPreferences("lanvid_camera", Context.MODE_PRIVATE) }
+    val discovery = remember { LanPeerDiscovery(context) }
+    DisposableEffect(Unit) {
+        discovery.start()
+        onDispose { discovery.stop() }
+    }
+
+    var ui by remember {
+        mutableStateOf(
+            HudUiState(
+                destIp = prefs.getString("destIp", "") ?: "",
+                destPort = prefs.getInt("destPort", 5006),
+                destName = prefs.getString("destName", "") ?: ""
+            )
+        )
+    }
+    var userManuallyPickedIp by remember { mutableStateOf(false) }
     var selectedTool by remember { mutableStateOf<HudTool?>(null) }
     var showManualDeck by remember { mutableStateOf(false) }
     var showEncoderDrawer by remember { mutableStateOf(false) }
     var hudHidden by remember { mutableStateOf(false) }
 
-    var lanPeers by remember { mutableStateOf<List<LanPeer>>(emptyList()) }
-    var scanning by remember { mutableStateOf(false) }
+    val lanPeers = discovery.peers
+    val scanning = discovery.scanning
     var txStats by remember { mutableStateOf(SenderStats()) }
     var rxStats by remember { mutableStateOf(ReceiverStats()) }
     var traffic by remember { mutableStateOf(TrafficState()) }
     var battery by remember { mutableIntStateOf(-1) }
     var proState by remember { mutableStateOf(ProCameraState()) }
+
+    fun saveTargetPc(ip: String, port: Int, name: String) {
+        prefs.edit()
+            .putString("destIp", ip)
+            .putInt("destPort", port)
+            .putString("destName", name)
+            .apply()
+    }
+
+    // Auto-select the best discovered [VIDEO] or [STUDIO] PC automatically so the user just taps GO LIVE!
+    LaunchedEffect(lanPeers.size, ui.senderActive) {
+        if (ui.senderActive || lanPeers.isEmpty()) return@LaunchedEffect
+        val preferred = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
+            ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+            ?: return@LaunchedEffect
+        val currentStillOnline = lanPeers.any { it.ip == ui.destIp && it.port == ui.destPort }
+        if (ui.destIp.isBlank() || ui.destIp == "192.168.1.100" || (!userManuallyPickedIp && !currentStillOnline)) {
+            ui = ui.copy(destIp = preferred.ip, destPort = preferred.port, destName = preferred.name)
+            saveTargetPc(preferred.ip, preferred.port, preferred.name)
+        }
+    }
 
     var cameraTextureView by remember { mutableStateOf<TextureView?>(null) }
     var cameraSurfaceTexture by remember { mutableStateOf<SurfaceTexture?>(null) }
@@ -345,11 +382,8 @@ fun BroadcastScreen(
         }
     }
 
-    // Initial LAN discovery + 500 ms telemetry & traffic sparkline loop
+    // 500 ms telemetry & traffic sparkline loop (discovery runs continuously in LanPeerDiscovery)
     LaunchedEffect(Unit) {
-        scanning = true
-        lanPeers = withContext(Dispatchers.IO) { LanVidNative.scanLanPeers(450) }
-        scanning = false
         var liveStartMs = 0L
         var wasLive = false
         while (true) {
@@ -395,9 +429,32 @@ fun BroadcastScreen(
         ui = ui.copy(senderActive = false, receiverActive = false)
     }
 
-    fun toggleLive() {
+    fun toggleLive(overridePeer: LanPeer? = null) {
         if (ui.mode == BroadcastMode.SENDER) {
             if (!ui.senderActive) {
+                // Auto-resolve best discovered PC if none selected yet
+                var targetIp = overridePeer?.ip ?: ui.destIp
+                var targetPort = overridePeer?.port ?: ui.destPort
+                var targetName = overridePeer?.name ?: ui.destName
+                if (targetIp.isBlank()) {
+                    val auto = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
+                        ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+                    if (auto != null) {
+                        targetIp = auto.ip
+                        targetPort = auto.port
+                        targetName = auto.name
+                    } else {
+                        selectedTool = HudTool.NETWORK
+                        discovery.refreshNow()
+                        ui = ui.copy(statusMessage = "ПК не знайдено — відкрийте LanVid Video на ПК у тій же Wi-Fi мережі")
+                        return
+                    }
+                }
+                if (targetIp != ui.destIp || targetPort != ui.destPort || targetName != ui.destName) {
+                    ui = ui.copy(destIp = targetIp, destPort = targetPort, destName = targetName)
+                }
+                saveTargetPc(targetIp, targetPort, targetName)
+
                 if (ui.source == CaptureSource.SCREEN) {
                     val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projectionLauncher.launch(mpm.createScreenCaptureIntent())
@@ -406,8 +463,8 @@ fun BroadcastScreen(
                     val encW = cameraStreamer.outputWidth.takeIf { it > 0 } ?: ui.resolution.width
                     val encH = cameraStreamer.outputHeight.takeIf { it > 0 } ?: ui.resolution.height
                     val ok = LanVidNative.nativeStartSender(
-                        ui.destIp,
-                        ui.destPort,
+                        targetIp,
+                        targetPort,
                         encW,
                         encH,
                         60,
@@ -420,9 +477,10 @@ fun BroadcastScreen(
                     if (ok) {
                         cameraStreamer.setStreamingEnabled(true)
                         if (ui.audioSource == AudioSourceOption.MIC) micStreamer.start(null)
+                        val lbl = if (targetName.isNotBlank()) "$targetName ($targetIp:$targetPort)" else "$targetIp:$targetPort"
                         ui = ui.copy(
                             senderActive = true,
-                            statusMessage = "${ui.source.title} ${encW}×${encH} (${ui.codec.shortLabel}) -> ${ui.destIp}:${ui.destPort}"
+                            statusMessage = "LIVE -> $lbl · ${encW}×${encH}"
                         )
                     } else {
                         ui = ui.copy(statusMessage = "Failed to start LanVid sender")
@@ -713,16 +771,19 @@ fun BroadcastScreen(
                             rxStats = rxStats,
                             lanPeers = lanPeers,
                             scanning = scanning,
-                            onScanLan = {
-                                if (!scanning) {
-                                    scanning = true
-                                    scope.launch {
-                                        lanPeers = withContext(Dispatchers.IO) { LanVidNative.scanLanPeers(450) }
-                                        scanning = false
-                                    }
-                                }
+                            onScanLan = { discovery.refreshNow() },
+                            onSelectPeerAndGoLive = { peer ->
+                                userManuallyPickedIp = true
+                                selectedTool = null
+                                toggleLive(overridePeer = peer)
                             },
-                            onUpdate = { ui = it },
+                            onUpdate = { next ->
+                                if (next.destIp != ui.destIp || next.destPort != ui.destPort) {
+                                    userManuallyPickedIp = true
+                                    saveTargetPc(next.destIp, next.destPort, next.destName)
+                                }
+                                ui = next
+                            },
                             onSwitchMode = { next ->
                                 if (next != ui.mode) {
                                     stopAll()
@@ -865,7 +926,12 @@ private fun TopHudBar(
                 if (ui.senderActive) {
                     Chip("%.1f fps".format(txStats.fps), if (txStats.fps >= 55.0) Bm.good else Bm.warn)
                 }
-                Chip("LANVID ${ui.destIp}:${ui.destPort}", Bm.accent)
+                if (ui.destIp.isNotBlank()) {
+                    val pcLbl = if (ui.destName.isNotBlank()) "● ${ui.destName} :${ui.destPort}" else "● ${ui.destIp}:${ui.destPort}"
+                    Chip(pcLbl, Bm.good)
+                } else {
+                    Chip("Пошук ПК…", Bm.warn)
+                }
             } else {
                 Text("UDP :${ui.listenPort} · AoIP ${ui.audioLatencyMs}ms", style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
                 if (ui.receiverActive) {

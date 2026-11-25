@@ -78,6 +78,7 @@ private:
 
     lv::TallyIntercomEngine intercom_;
     lv::DiscoveryResponder discovery_;
+    lv::DiscoveryResponder legacy_discovery_;
     lv::MdnsAdvertiser mdns_;
 
     bool director_ptt_ = false;

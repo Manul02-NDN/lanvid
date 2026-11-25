@@ -11,8 +11,16 @@ data class LanPeer(
     val name: String,
     val os: String,
     val simd: String,
-    val rttMs: Int
-)
+    val rttMs: Int,
+    val role: String = ""
+) {
+    val roleBadge: String
+        get() = when (role.lowercase()) {
+            "video" -> "[VIDEO]"
+            "audio" -> "[AUDIO]"
+            else -> "[STUDIO]"
+        }
+}
 
 data class SenderStats(
     val running: Boolean = false,
@@ -130,7 +138,8 @@ object LanVidNative {
                 name = o.optString("name", "Receiver"),
                 os = o.optString("os", "?"),
                 simd = o.optString("simd", "scalar"),
-                rttMs = o.optInt("rtt_ms", 0)
+                rttMs = o.optInt("rtt_ms", 0),
+                role = o.optString("role", "")
             )
         }
     }
