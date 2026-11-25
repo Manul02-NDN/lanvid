@@ -13,6 +13,7 @@ import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.util.Range
 import android.util.Size
 import android.view.Surface
@@ -32,6 +33,7 @@ import kotlin.math.abs
  */
 class Camera2Streamer(private val context: Context) {
     private val cameraLock = Any()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val sessionGen = AtomicLong(0L)
     private val isClosing = AtomicBoolean(false)
 
@@ -139,80 +141,91 @@ class Camera2Streamer(private val context: Context) {
         isClosing.set(false)
         streamFramesEnabled = streamEnabled
 
+        val reportError: (String) -> Unit = { msg ->
+            mainHandler.post {
+                if (gen == sessionGen.get() && !isClosing.get()) onError(msg)
+            }
+        }
+
         val handler: Handler = synchronized(cameraLock) {
-            closeResourcesLocked()
             ensureBackgroundHandlerLocked()
         }
 
-        val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        val targetFacing = if (frontFacing) {
-            CameraCharacteristics.LENS_FACING_FRONT
-        } else {
-            CameraCharacteristics.LENS_FACING_BACK
-        }
-        val camId = try {
-            mgr.cameraIdList.firstOrNull { id ->
-                mgr.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == targetFacing
-            } ?: mgr.cameraIdList.firstOrNull()
-        } catch (e: Exception) {
-            onError("Немає доступу до списку камер: ${e.message}")
-            return
-        }
-
-        if (camId == null) {
-            onError("Камеру не знайдено")
-            return
-        }
-
-        val chars = try {
-            mgr.getCameraCharacteristics(camId)
-        } catch (e: Exception) {
-            onError("Не вдалося прочитати параметри камери: ${e.message}")
-            return
-        }
-
-        val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: if (frontFacing) 270 else 90
-        val displayDeg = when (displayRotation) {
-            Surface.ROTATION_90 -> 90
-            Surface.ROTATION_180 -> 180
-            Surface.ROTATION_270 -> 270
-            else -> 0
-        }
-        val relRot = if (frontFacing) {
-            (sensorOrientation + displayDeg) % 360
-        } else {
-            (sensorOrientation - displayDeg + 360) % 360
-        }
-
-        val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-        val yuvSizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888)
-        val previewSizes = streamMap?.getOutputSizes(SurfaceTexture::class.java)
-        val chosenSize = pickStrictAspectSize(yuvSizes, previewSizes, width, height)
-
-        val swapped = (relRot == 90 || relRot == 270)
-        val orientedW = if (swapped) chosenSize.height else chosenSize.width
-        val orientedH = if (swapped) chosenSize.width else chosenSize.height
-
-        sensorBufferWidth = chosenSize.width
-        sensorBufferHeight = chosenSize.height
-        outputWidth = orientedW
-        outputHeight = orientedH
-        streamRotationDeg = relRot
-
-        onPreviewConfigured?.invoke(chosenSize.width, chosenSize.height, orientedW, orientedH, relRot)
-
-        val fpsRange = pickBestFpsRange(chars)
-
-        // Run openCamera sequentially on CameraBackground to serialize against close/re-open.
+        // Perform all CameraManager queries, teardown, and openCamera on CameraBackground (ZERO Main-thread blocking!)
         handler.post {
+            if (gen != sessionGen.get() || isClosing.get()) return@post
+            synchronized(cameraLock) {
+                closeResourcesLocked()
+            }
+
+            val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val targetFacing = if (frontFacing) {
+                CameraCharacteristics.LENS_FACING_FRONT
+            } else {
+                CameraCharacteristics.LENS_FACING_BACK
+            }
+            val camId = try {
+                mgr.cameraIdList.firstOrNull { id ->
+                    mgr.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == targetFacing
+                } ?: mgr.cameraIdList.firstOrNull()
+            } catch (e: Exception) {
+                reportError("Немає доступу до списку камер: ${e.message}")
+                return@post
+            }
+
+            if (camId == null) {
+                reportError("Камеру не знайдено")
+                return@post
+            }
+
+            val chars = try {
+                mgr.getCameraCharacteristics(camId)
+            } catch (e: Exception) {
+                reportError("Не вдалося прочитати параметри камери: ${e.message}")
+                return@post
+            }
+
+            val sensorOrientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: if (frontFacing) 270 else 90
+            val displayDeg = when (displayRotation) {
+                Surface.ROTATION_90 -> 90
+                Surface.ROTATION_180 -> 180
+                Surface.ROTATION_270 -> 270
+                else -> 0
+            }
+            val relRot = if (frontFacing) {
+                (sensorOrientation + displayDeg) % 360
+            } else {
+                (sensorOrientation - displayDeg + 360) % 360
+            }
+
+            val streamMap = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val yuvSizes = streamMap?.getOutputSizes(ImageFormat.YUV_420_888)
+            val previewSizes = streamMap?.getOutputSizes(SurfaceTexture::class.java)
+            val chosenSize = pickStrictAspectSize(yuvSizes, previewSizes, width, height)
+
+            val swapped = (relRot == 90 || relRot == 270)
+            val orientedW = if (swapped) chosenSize.height else chosenSize.width
+            val orientedH = if (swapped) chosenSize.width else chosenSize.height
+
+            sensorBufferWidth = chosenSize.width
+            sensorBufferHeight = chosenSize.height
+            outputWidth = orientedW
+            outputHeight = orientedH
+            streamRotationDeg = relRot
+
+            mainHandler.post {
+                if (gen == sessionGen.get() && !isClosing.get()) {
+                    onPreviewConfigured?.invoke(chosenSize.width, chosenSize.height, orientedW, orientedH, relRot)
+                }
+            }
+
+            val fpsRange = pickBestFpsRange(chars)
             if (gen != sessionGen.get() || isClosing.get()) return@post
 
             val imgReader = try {
                 ImageReader.newInstance(chosenSize.width, chosenSize.height, ImageFormat.YUV_420_888, 3)
             } catch (e: Exception) {
-                if (gen == sessionGen.get() && !isClosing.get()) {
-                    onError("Помилка ImageReader: ${e.message}")
-                }
+                reportError("Помилка ImageReader: ${e.message}")
                 return@post
             }
 
@@ -286,12 +299,9 @@ class Camera2Streamer(private val context: Context) {
                                 )
                             }
                         } catch (_: IllegalStateException) {
-                            // CameraDevice closed mid-switch; ignore silently if stale.
                             return
                         } catch (e: CameraAccessException) {
-                            if (gen == sessionGen.get() && !isClosing.get()) {
-                                onError("Помилка запиту камери: ${e.message}")
-                            }
+                            reportError("Помилка запиту камери: ${e.message}")
                             return
                         }
 
@@ -315,22 +325,16 @@ class Camera2Streamer(private val context: Context) {
                                         try {
                                             s.setRepeatingRequest(reqBuilder.build(), null, handler)
                                         } catch (_: IllegalStateException) {
-                                            // Session/device closed during rapid switch or pause — never surface as error.
+                                            // Session/device closed during rapid switch or pause — ignore silently.
                                         } catch (e: CameraAccessException) {
-                                            if (gen == sessionGen.get() && !isClosing.get()) {
-                                                onError("Помилка запуску камери: ${e.message}")
-                                            }
+                                            reportError("Помилка запуску камери: ${e.message}")
                                         } catch (e: Exception) {
-                                            if (gen == sessionGen.get() && !isClosing.get()) {
-                                                onError("Помилка запуску камери: ${e.message}")
-                                            }
+                                            reportError("Помилка запуску камери: ${e.message}")
                                         }
                                     }
 
                                     override fun onConfigureFailed(s: CameraCaptureSession) {
-                                        if (gen == sessionGen.get() && !isClosing.get()) {
-                                            onError("Не вдалося налаштувати Camera2 сесію")
-                                        }
+                                        reportError("Не вдалося налаштувати Camera2 сесію")
                                     }
                                 },
                                 handler
@@ -338,9 +342,7 @@ class Camera2Streamer(private val context: Context) {
                         } catch (_: IllegalStateException) {
                             // Stale CameraDevice closed while creating session; ignore cleanly.
                         } catch (e: CameraAccessException) {
-                            if (gen == sessionGen.get() && !isClosing.get()) {
-                                onError("Не вдалося створити сесію камери: ${e.message}")
-                            }
+                            reportError("Не вдалося створити сесію камери: ${e.message}")
                         }
                     }
 
@@ -356,17 +358,13 @@ class Camera2Streamer(private val context: Context) {
                             if (cameraDevice === cam) cameraDevice = null
                         }
                         try { cam.close() } catch (_: Exception) {}
-                        if (gen == sessionGen.get() && !isClosing.get()) {
-                            onError("Camera2 error=$error")
-                        }
+                        reportError("Camera2 error=$error")
                     }
                 }, handler)
             } catch (_: IllegalStateException) {
                 // Ignored if superseded by newer start()/stop().
             } catch (e: Exception) {
-                if (gen == sessionGen.get() && !isClosing.get()) {
-                    onError("Немає доступу до камери: ${e.message}")
-                }
+                reportError("Немає доступу до камери: ${e.message}")
                 stop()
             }
         }
@@ -382,20 +380,34 @@ class Camera2Streamer(private val context: Context) {
         return direct
     }
 
+    /** Non-blocking stop: never stalls Android Main UI thread (teardown executes on CameraBackground). */
     fun stop() {
         isClosing.set(true)
         sessionGen.incrementAndGet()
-        synchronized(cameraLock) {
-            closeResourcesLocked()
+        val h = synchronized(cameraLock) { bgHandler }
+        if (h != null && bgThread?.isAlive == true) {
+            h.post {
+                synchronized(cameraLock) {
+                    closeResourcesLocked()
+                }
+            }
+        } else {
+            synchronized(cameraLock) {
+                closeResourcesLocked()
+            }
         }
     }
 
     fun release() {
-        stop()
+        isClosing.set(true)
+        sessionGen.incrementAndGet()
+        val t: HandlerThread?
         synchronized(cameraLock) {
-            bgThread?.quitSafely()
+            closeResourcesLocked()
+            t = bgThread
             bgThread = null
             bgHandler = null
         }
+        t?.quitSafely()
     }
 }

@@ -55,10 +55,16 @@ class ScreenCaptureService : Service() {
             return START_NOT_STICKY
         }
 
+        val audioMode = intent?.getIntExtra(EXTRA_AUDIO_MODE, 0) ?: 0
         val notif = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            val hasMic = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            val fgsType = if (audioMode == 2 && hasMic) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
             startForeground(NOTIF_ID, notif, fgsType)
         } else {
             startForeground(NOTIF_ID, notif)
@@ -70,7 +76,6 @@ class ScreenCaptureService : Service() {
         val width = (intent?.getIntExtra(EXTRA_WIDTH, 1280) ?: 1280) and 0x7FFE
         val height = (intent?.getIntExtra(EXTRA_HEIGHT, 720) ?: 720) and 0x7FFE
         val dpi = intent?.getIntExtra(EXTRA_DPI, 320) ?: 320
-        val audioMode = intent?.getIntExtra(EXTRA_AUDIO_MODE, 0) ?: 0
 
         if (data == null) {
             stopSelf()
@@ -87,6 +92,14 @@ class ScreenCaptureService : Service() {
         val ht = HandlerThread("LanVidScreenCap").apply { start() }
         handlerThread = ht
         val handler = Handler(ht.looper)
+
+        // Android 14+ (API 34+) requires registering a MediaProjection.Callback BEFORE createVirtualDisplay()
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                stopCapture()
+                stopSelf()
+            }
+        }, handler)
 
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         reader.setOnImageAvailableListener({ r ->

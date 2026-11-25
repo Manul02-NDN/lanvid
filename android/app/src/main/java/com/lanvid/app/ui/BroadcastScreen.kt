@@ -36,11 +36,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.lanvid.app.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -82,7 +85,7 @@ private data class TrafficState(
 
 private fun getDisplayRotation(context: Context): Int {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-        context.display?.rotation ?: Surface.ROTATION_0
+        runCatching { context.display.rotation }.getOrDefault(Surface.ROTATION_0)
     } else {
         @Suppress("DEPRECATION")
         (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)?.defaultDisplay?.rotation
@@ -150,15 +153,37 @@ fun BroadcastScreen(
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val appVersion = remember { LanVidNative.nativeGetVersion() }
     val simdInfo = remember { LanVidNative.nativeGetSimdInfo() }
 
+    var isAppResumed by remember { mutableStateOf(true) }
+    var isTogglingLive by remember { mutableStateOf(false) }
+
     val prefs = remember { context.getSharedPreferences("lanvid_camera", Context.MODE_PRIVATE) }
     val discovery = remember { LanPeerDiscovery(context) }
-    DisposableEffect(Unit) {
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    isAppResumed = true
+                    discovery.start()
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    isAppResumed = false
+                    discovery.stop()
+                    cameraStreamer.stop()
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
         discovery.start()
-        onDispose { discovery.stop() }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(obs)
+            discovery.stop()
+        }
     }
 
     var ui by remember {
@@ -247,41 +272,53 @@ fun BroadcastScreen(
         )
     }
 
-    // Studio Tally & Duplex Intercom connection + 10 Hz status poll
+    // Studio Tally & Duplex Intercom connection + 10 Hz status poll (ALL native I/O off Main UI thread!)
     LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
         if (ui.mode == BroadcastMode.SENDER && ui.senderActive && ui.destIp.isNotBlank()) {
-            LanVidNative.nativeTallyConnect(ui.destIp, 5022, 1, proState.cameraLabel)
-            LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
-            while (true) {
-                delay(100)
-                val raw = LanVidNative.nativeTallyPollJson(battery.coerceAtLeast(0), 34)
-                if (raw.isNotEmpty()) {
-                    runCatching {
-                        val obj = JSONObject(raw)
-                        val tVal = obj.optInt("tally", 0)
-                        val tState = when (tVal) {
-                            2 -> TallyStatus.PROGRAM
-                            1 -> TallyStatus.PREVIEW
-                            else -> TallyStatus.STANDBY
+            val destIp = ui.destIp
+            val label = proState.cameraLabel
+            withContext(Dispatchers.IO) {
+                LanVidNative.nativeTallyConnect(destIp, 5022, 1, label)
+                LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+            }
+            try {
+                while (true) {
+                    delay(100)
+                    val bat = battery.coerceAtLeast(0)
+                    val raw = withContext(Dispatchers.IO) {
+                        LanVidNative.nativeTallyPollJson(bat, 34)
+                    }
+                    if (raw.isNotEmpty()) {
+                        runCatching {
+                            val obj = JSONObject(raw)
+                            val tVal = obj.optInt("tally", obj.optInt("state", 0))
+                            val tState = when (tVal) {
+                                2 -> TallyStatus.PROGRAM
+                                1 -> TallyStatus.PREVIEW
+                                else -> TallyStatus.STANDBY
+                            }
+                            proState = proState.copy(
+                                tally = tState,
+                                remoteRec = obj.optBoolean("remoteRec", obj.optInt("rec", 0) != 0),
+                                directorSpeaking = obj.optBoolean("directorSpeaking", obj.optInt("director_speaking", 0) != 0),
+                                duckingGain = obj.optDouble("ducking", obj.optDouble("duck", 1.0)).toFloat(),
+                                cameraLabel = obj.optString("label", proState.cameraLabel).ifBlank { proState.cameraLabel }
+                            )
                         }
-                        proState = proState.copy(
-                            tally = tState,
-                            remoteRec = obj.optBoolean("remoteRec", false),
-                            directorSpeaking = obj.optBoolean("directorSpeaking", false),
-                            duckingGain = obj.optDouble("ducking", 1.0).toFloat(),
-                            cameraLabel = obj.optString("label", proState.cameraLabel).ifBlank { proState.cameraLabel }
-                        )
                     }
                 }
+            } finally {
+                withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
             }
         } else {
-            LanVidNative.nativeTallyDisconnect()
+            withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
             proState = proState.copy(tally = TallyStatus.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
         }
     }
 
-    // Restart live Camera2 viewfinder whenever lens, resolution, surface, orientation, or mode changes
+    // Restart live Camera2 viewfinder whenever lens, resolution, surface, orientation, resume state, or mode changes
     LaunchedEffect(
+        isAppResumed,
         hasCameraPermission,
         ui.mode,
         ui.source,
@@ -290,7 +327,8 @@ fun BroadcastScreen(
         cameraPreviewSurface
     ) {
         val surface = cameraPreviewSurface
-        if (ui.mode == BroadcastMode.SENDER &&
+        if (isAppResumed &&
+            ui.mode == BroadcastMode.SENDER &&
             ui.source != CaptureSource.SCREEN &&
             hasCameraPermission &&
             surface != null &&
@@ -388,8 +426,11 @@ fun BroadcastScreen(
         var wasLive = false
         while (true) {
             delay(500)
-            txStats = LanVidNative.senderStats()
-            rxStats = LanVidNative.receiverStats()
+            val (txS, rxS) = withContext(Dispatchers.IO) {
+                LanVidNative.senderStats() to LanVidNative.receiverStats()
+            }
+            txStats = txS
+            rxStats = rxS
             val liveNow = ui.isLive
             if (liveNow && !wasLive) {
                 liveStartMs = System.currentTimeMillis()
@@ -415,21 +456,24 @@ fun BroadcastScreen(
 
     fun stopAll() {
         cameraStreamer.setStreamingEnabled(false)
-        micStreamer.stop()
-        if (ScreenCaptureService.isRunning) {
-            context.startService(
-                Intent(context, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_STOP
-                }
-            )
-        }
-        LanVidNative.nativeStopSender()
-        LanVidNative.nativeStopReceiver()
-        LanVidNative.nativeTallyDisconnect()
         ui = ui.copy(senderActive = false, receiverActive = false)
+        scope.launch(Dispatchers.IO) {
+            micStreamer.stop()
+            if (ScreenCaptureService.isRunning) {
+                context.startService(
+                    Intent(context, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_STOP
+                    }
+                )
+            }
+            LanVidNative.nativeStopSender()
+            LanVidNative.nativeStopReceiver()
+            LanVidNative.nativeTallyDisconnect()
+        }
     }
 
     fun toggleLive(overridePeer: LanPeer? = null) {
+        if (isTogglingLive) return
         if (ui.mode == BroadcastMode.SENDER) {
             if (!ui.senderActive) {
                 // Auto-resolve best discovered PC if none selected yet
@@ -459,31 +503,39 @@ fun BroadcastScreen(
                     val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                     projectionLauncher.launch(mpm.createScreenCaptureIntent())
                 } else {
-                    // Pass true display-oriented rotated dimensions (e.g. 720x1280 in portrait, 1280x720 in landscape)
+                    isTogglingLive = true
                     val encW = cameraStreamer.outputWidth.takeIf { it > 0 } ?: ui.resolution.width
                     val encH = cameraStreamer.outputHeight.takeIf { it > 0 } ?: ui.resolution.height
-                    val ok = LanVidNative.nativeStartSender(
-                        targetIp,
-                        targetPort,
-                        encW,
-                        encH,
-                        60,
-                        ui.quality,
-                        ui.fecGroup,
-                        ui.adaptive,
-                        ui.codec.id,
-                        (ui.bitrateMbps * 1000).toInt()
-                    )
-                    if (ok) {
-                        cameraStreamer.setStreamingEnabled(true)
-                        if (ui.audioSource == AudioSourceOption.MIC) micStreamer.start(null)
-                        val lbl = if (targetName.isNotBlank()) "$targetName ($targetIp:$targetPort)" else "$targetIp:$targetPort"
-                        ui = ui.copy(
-                            senderActive = true,
-                            statusMessage = "LIVE -> $lbl · ${encW}×${encH}"
-                        )
-                    } else {
-                        ui = ui.copy(statusMessage = "Failed to start LanVid sender")
+                    val snap = ui
+                    scope.launch {
+                        val ok = withContext(Dispatchers.IO) {
+                            LanVidNative.nativeStartSender(
+                                targetIp,
+                                targetPort,
+                                encW,
+                                encH,
+                                60,
+                                snap.quality,
+                                snap.fecGroup,
+                                snap.adaptive,
+                                snap.codec.id,
+                                (snap.bitrateMbps * 1000).toInt()
+                            )
+                        }
+                        if (ok) {
+                            cameraStreamer.setStreamingEnabled(true)
+                            if (snap.audioSource == AudioSourceOption.MIC) {
+                                withContext(Dispatchers.IO) { micStreamer.start(null) }
+                            }
+                            val lbl = if (targetName.isNotBlank()) "$targetName ($targetIp:$targetPort)" else "$targetIp:$targetPort"
+                            ui = ui.copy(
+                                senderActive = true,
+                                statusMessage = "LIVE -> $lbl · ${encW}×${encH}"
+                            )
+                        } else {
+                            ui = ui.copy(statusMessage = "Не вдалося запустити передачу на $targetIp:$targetPort")
+                        }
+                        isTogglingLive = false
                     }
                 }
             } else {
@@ -492,15 +544,26 @@ fun BroadcastScreen(
             }
         } else {
             if (!ui.receiverActive) {
-                if (LanVidNative.nativeStartReceiver(ui.listenPort, ui.audioLatencyMs.toDouble(), Build.MODEL)) {
-                    LanVidNative.nativeSetVolume(ui.volume)
-                    LanVidNative.nativeSetAudioLatencyMs(ui.audioLatencyMs)
-                    ui = ui.copy(
-                        receiverActive = true,
-                        statusMessage = "Listening on UDP :${ui.listenPort} (AAudio + Discovery)"
-                    )
-                } else {
-                    ui = ui.copy(statusMessage = "Failed to bind UDP :${ui.listenPort}")
+                isTogglingLive = true
+                val snap = ui
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        val started = LanVidNative.nativeStartReceiver(snap.listenPort, snap.audioLatencyMs.toDouble(), Build.MODEL)
+                        if (started) {
+                            LanVidNative.nativeSetVolume(snap.volume)
+                            LanVidNative.nativeSetAudioLatencyMs(snap.audioLatencyMs)
+                        }
+                        started
+                    }
+                    ui = if (ok) {
+                        ui.copy(
+                            receiverActive = true,
+                            statusMessage = "Listening on UDP :${snap.listenPort} (AAudio + Discovery)"
+                        )
+                    } else {
+                        ui.copy(statusMessage = "Failed to bind UDP :${snap.listenPort}")
+                    }
+                    isTogglingLive = false
                 }
             } else {
                 stopAll()
@@ -817,7 +880,9 @@ fun BroadcastScreen(
                             state = proState,
                             onStateChange = { proState = it },
                             onIntercomChanged = { talk, listenMuted, rxGain ->
-                                LanVidNative.nativeIntercomSetState(talk, listenMuted, rxGain, 0f)
+                                scope.launch(Dispatchers.IO) {
+                                    LanVidNative.nativeIntercomSetState(talk, listenMuted, rxGain, 0f)
+                                }
                             }
                         )
                     }
