@@ -74,9 +74,11 @@ TEST(installer_windows_ecosystem_validation) {
         "[Setup]", "[Types]", "[Components]", "[Tasks]", "[Files]", "[Icons]", "[Run]", "[UninstallRun]",
         "Name: \"auto\"", "Name: \"custom\"", "Flags: iscustom",
         "Types: auto custom", "Types: auto",
-        "Name: \"core\"", "Name: \"dsp_server\"", "Name: \"virtual_audio\"",
+        "Name: \"core\"", "Name: \"audio_studio\"", "Name: \"video_studio\"",
+        "Name: \"dsp_server\"", "Name: \"virtual_audio\"",
         "Name: \"grid_l2_npcap\"", "Name: \"obs_plugin\"",
-        "lanvid_app.exe", "lanvid_core.dll", "lanvid_dsp_server.exe",
+        "lanvid_app.exe", "lanvid_audio_studio.exe", "lanvid_video_studio.exe",
+        "lanvid_core.dll", "lanvid_dsp_server.exe",
         "LanVidASIO.dll", "regserver 64bit", "obs-lanvid.dll", "en-US.ini", "uk-UA.ini",
         "-ConfigureFirewall", "-ConfigureQoS", "-TuneNetwork", "-EnableHighPerfPower",
         "-InstallDspService", "-InstallNpcap", "-InstallObsPlugin",
@@ -97,13 +99,15 @@ TEST(installer_windows_ecosystem_validation) {
 
     // 3. Packaging script & standalone Win32 setup wizard (Auto + Custom pages + /S + /COMPONENTS=)
     check_all_tokens("build_windows_setup.ps1", build_ps1, {
-        "lanvid_app.exe", "lanvid_core.dll", "lanvid_dsp_server.exe", "LanVidASIO.dll",
+        "lanvid_app.exe", "lanvid_audio_studio.exe", "lanvid_video_studio.exe",
+        "lanvid_core.dll", "lanvid_dsp_server.exe", "LanVidASIO.dll",
         "preflight.ps1", "obs-lanvid.dll", "npcap-*.exe", "lanvid.iss", "/COMPONENTS="
     });
     check_all_tokens("setup_wizard.cpp", wizard, {
         "PAGE_MODE", "PAGE_CUSTOM", "PAGE_PROGRESS",
-        "IDC_RAD_AUTO", "IDC_RAD_CUSTOM", "IDC_CHK_CORE", "IDC_CHK_ASIO",
+        "IDC_RAD_AUTO", "IDC_RAD_CUSTOM", "IDC_CHK_CORE", "IDC_CHK_AUDIO_STUDIO", "IDC_CHK_VIDEO_STUDIO", "IDC_CHK_ASIO",
         "BS_AUTORADIOBUTTON", "/components=", "/s", "--auto", "--custom", "--check-only",
+        "lanvid_audio_studio.exe", "lanvid_video_studio.exe",
         "lanvid_dsp_server.exe", "LanVidASIO.dll", "preflight.ps1",
         "-ConfigureFirewall", "-ConfigureQoS", "-InstallDspService",
         "-InstallNpcap", "-InstallObsPlugin", "-Uninstall"
@@ -126,9 +130,11 @@ TEST(installer_macos_ecosystem_validation) {
     check_unix_shell_script("sdk/apple/installer/scripts/postinstall", postinst);
 
     check_all_tokens("sdk/apple/build_macos_pkg.sh", sdk_pkg, {
-        "LanVid Studio.app", "/usr/local/bin/lanvid_dsp_server", "/usr/local/lib/liblanvid_core.dylib",
+        "LanVid Studio.app", "LanVid Audio.app", "LanVid Video.app",
+        "/usr/local/bin/lanvid_dsp_server", "/usr/local/lib/liblanvid_core.dylib",
         "LanVidAudio.driver",
-        "com.lanvid.pkg.studio", "com.lanvid.pkg.dspserver", "com.lanvid.pkg.chmodbpf", "com.lanvid.pkg.obsplugin",
+        "com.lanvid.pkg.studio", "com.lanvid.pkg.audiostudio", "com.lanvid.pkg.videostudio",
+        "com.lanvid.pkg.dspserver", "com.lanvid.pkg.chmodbpf", "com.lanvid.pkg.obsplugin",
         "com.lanvid.dspserver.plist", "<key>KeepAlive</key>", "<key>RunAtLoad</key>",
         "com.lanvid.chmod-bpf.plist", "access_bpf", "/dev/bpf*", "dseditgroup",
         "obs-lanvid.plugin", "Library/Application Support/obs-studio",
@@ -147,6 +153,8 @@ TEST(installer_macos_ecosystem_validation) {
     check_all_tokens("sdk/apple/installer/distribution.xml", dist_xml, {
         "<installer-gui-script", "</installer-gui-script>", "customize=\"allow\"",
         "choice_studio", "enabled=\"false\"", "com.lanvid.pkg.studio", "lanvid-studio.pkg",
+        "choice_audiostudio", "com.lanvid.pkg.audiostudio", "lanvid-audiostudio.pkg",
+        "choice_videostudio", "com.lanvid.pkg.videostudio", "lanvid-videostudio.pkg",
         "choice_dspserver", "com.lanvid.pkg.dspserver", "lanvid-dspserver.pkg",
         "choice_chmodbpf", "com.lanvid.pkg.chmodbpf", "lanvid-chmodbpf.pkg",
         "choice_obsplugin", "com.lanvid.pkg.obsplugin", "lanvid-obsplugin.pkg",
@@ -175,9 +183,12 @@ TEST(installer_linux_and_release_ci_validation) {
     check_unix_shell_script("installer/linux/install_lanvid.sh", install_linux);
 
     check_all_tokens("installer/linux/build_linux_packages.sh", build_linux, {
-        "lanvid_studio", "lanvid_dsp_server", "liblanvid_core.so", "ldconfig",
+        "lanvid_studio", "lanvid_audio_studio", "lanvid_video_studio", "lanvid_dsp_server", "liblanvid_core.so", "ldconfig",
         "setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_studio",
+        "setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_audio_studio",
+        "setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_video_studio",
         "setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_dsp_server",
+        "lanvid-audio.desktop", "lanvid-video.desktop",
         "/etc/systemd/system/lanvid-dsp.service",
         "systemctl daemon-reload", "systemctl enable --now lanvid-dsp.service",
         "/usr/lib/x86_64-linux-gnu/obs-plugins/obs-lanvid.so",
@@ -188,8 +199,9 @@ TEST(installer_linux_and_release_ci_validation) {
     check_all_tokens("installer/linux/install_lanvid.sh", install_linux, {
         "--auto", "--custom", "--check-only", "ask_yn",
         "[1]", "[2]", "INSTALL_MODE=\"auto\"", "INSTALL_MODE=\"custom\"",
+        "INSTALL_AUDIO_STUDIO", "INSTALL_VIDEO_STUDIO",
         "INSTALL_DSP", "INSTALL_SETCAP", "INSTALL_OBS", "INSTALL_FIREWALL",
-        "lanvid_studio", "lanvid_dsp_server", "liblanvid_core.so", "ldconfig",
+        "lanvid_studio", "lanvid_audio_studio", "lanvid_video_studio", "lanvid_dsp_server", "liblanvid_core.so", "ldconfig",
         "setcap cap_net_raw,cap_net_admin=eip",
         "/etc/systemd/system/lanvid-dsp.service",
         "systemctl daemon-reload", "systemctl enable --now lanvid-dsp.service",

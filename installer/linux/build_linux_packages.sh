@@ -57,6 +57,8 @@ install -d "$DEB_ROOT/DEBIAN" \
 
 install -m 0755 "$BUILD/lanvid_app"          "$DEB_ROOT/usr/local/bin/lanvid_app"
 install -m 0755 "$BUILD/lanvid_app"          "$DEB_ROOT/usr/local/bin/lanvid_studio"
+[ -f "$BUILD/lanvid_audio_studio" ] && install -m 0755 "$BUILD/lanvid_audio_studio" "$DEB_ROOT/usr/local/bin/lanvid_audio_studio"
+[ -f "$BUILD/lanvid_video_studio" ] && install -m 0755 "$BUILD/lanvid_video_studio" "$DEB_ROOT/usr/local/bin/lanvid_video_studio"
 install -m 0755 "$BUILD/lanvid_dsp_server"   "$DEB_ROOT/usr/local/bin/lanvid_dsp_server"
 install -m 0755 "$BUILD/sender"              "$DEB_ROOT/usr/local/bin/sender"
 install -m 0755 "$BUILD/receiver"            "$DEB_ROOT/usr/local/bin/receiver"
@@ -64,6 +66,8 @@ install -m 0755 "$BUILD/lanvid-audio-bridge" "$DEB_ROOT/usr/local/bin/lanvid-aud
 install -m 0755 "$BUILD/liblanvid_core.so"   "$DEB_ROOT/usr/local/lib/liblanvid_core.so"
 install -m 0644 "$DSP_UNIT_TMP"              "$DEB_ROOT/etc/systemd/system/lanvid-dsp.service"
 install -m 0644 "$OUT/lanvid.desktop"        "$DEB_ROOT/usr/share/applications/lanvid.desktop"
+[ -f "$OUT/lanvid-audio.desktop" ] && install -m 0644 "$OUT/lanvid-audio.desktop" "$DEB_ROOT/usr/share/applications/lanvid-audio.desktop"
+[ -f "$OUT/lanvid-video.desktop" ] && install -m 0644 "$OUT/lanvid-video.desktop" "$DEB_ROOT/usr/share/applications/lanvid-video.desktop"
 install -m 0644 "$OUT/lanvid.svg"            "$DEB_ROOT/usr/share/icons/hicolor/scalable/apps/lanvid.svg"
 
 if [ -d "$ROOT/plugins/obs-lanvid/data/locale" ]; then
@@ -99,6 +103,8 @@ ldconfig || true
 if command -v setcap >/dev/null 2>&1; then
   setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_studio || true
   setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_app || true
+  [ -x /usr/local/bin/lanvid_audio_studio ] && setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_audio_studio || true
+  [ -x /usr/local/bin/lanvid_video_studio ] && setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_video_studio || true
   setcap cap_net_raw,cap_net_admin=eip /usr/local/bin/lanvid_dsp_server || true
 fi
 

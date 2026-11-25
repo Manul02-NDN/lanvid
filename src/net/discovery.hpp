@@ -13,6 +13,12 @@
 namespace lv {
 
 constexpr uint16_t kDiscoveryPort = 5099;
+constexpr uint16_t kAudioStreamPort = 5004;
+constexpr uint16_t kAudioMonitorPort = 5020;
+constexpr uint16_t kAudioDiscoveryPort = 5021;
+constexpr uint16_t kVideoStreamPort = 5006;
+constexpr uint16_t kVideoTallyPort = 5022;
+constexpr uint16_t kVideoDiscoveryPort = 5023;
 
 struct NetInterfaceInfo {
     std::string name;
@@ -37,6 +43,8 @@ struct DiscoveredReceiver {
     uint16_t aoip_rx_port = 0;       // where this node RECEIVES the bus
     uint16_t aoip_tx_port = 0;       // peer port this node SENDS to (duplex)
     bool duplex = false;
+    // Studio role advertised by split apps ("audio" on :5021, "video" on :5023, "" for legacy :5099)
+    std::string role;
 };
 
 // What an AoIP node advertises in its discovery reply (evaluated per probe, so it is always live).
@@ -85,12 +93,15 @@ public:
 
     // Optional live AoIP announcement (call before or after start; thread-safe).
     void set_aoip_provider(std::function<AoipAnnounce()> provider);
+    // Optional studio role tag ("audio", "video", or "") advertised in discovery responses.
+    void set_role(const std::string& role);
     // Optional Primary / Secondary NIC IPv4 binding for discovery replies (empty = all interfaces).
     void set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip = "");
 
 private:
     std::mutex aoip_mu_;
     std::function<AoipAnnounce()> aoip_provider_;
+    std::string role_;
     std::string primary_nic_ip_;
     std::string secondary_nic_ip_;
     std::thread thread_;
@@ -107,5 +118,14 @@ std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms = 350,
                                                uint16_t discovery_port = kDiscoveryPort,
                                                const std::string& primary_ip = "",
                                                const std::string& secondary_ip = "");
+
+// Scans split studio discovery ports (:5021 Audio, :5023 Video) and/or legacy :5099,
+// returning deduplicated receivers with `role` populated ("audio" / "video" / "").
+std::vector<DiscoveredReceiver> discovery_scan_roles(int timeout_ms = 350,
+                                                     bool scan_audio = true,
+                                                     bool scan_video = true,
+                                                     bool scan_legacy = true,
+                                                     const std::string& primary_ip = "",
+                                                     const std::string& secondary_ip = "");
 
 }  // namespace lv

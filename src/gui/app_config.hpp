@@ -91,15 +91,27 @@ struct AppConfig {
     std::vector<MatrixCrosspoint> matrix_crosspoints;
     std::vector<MidiSlotConfig> midi_slots;
     std::vector<MidiCrosspoint> midi_crosspoints;
+
+    // Video Studio specific preferences (LanVid Video)
+    int video_lip_sync_ms = 0;            // -200..+200 ms A/V lip-sync correction
+    bool video_obs_output_enabled = true; // Forward active camera / PGM to obs-lanvid
+    float intercom_ducking_db = -12.0f;   // Program audio ducking when director speaks
+    bool video_dscp_af41 = true;          // DSCP AF41 (34) for video streams
+    bool tally_dscp_ef = true;            // DSCP EF/CS7 (46) for Tally & Intercom
 };
 
-// Returns platform config file path (%APPDATA%\LanVid\config.json or ~/.config/lanvid/config.json).
+// Returns platform config file path (%APPDATA%\LanVid\<filename> or ~/.config/lanvid/<filename>).
+std::string config_file_path_for(const std::string& filename);
+
+// Returns default legacy config file path (config.json).
 std::string config_file_path();
 
 // Loads existing config if present (preserving defaults for missing fields).
 bool load_app_config(AppConfig& cfg);
+bool load_app_config(AppConfig& cfg, const std::string& custom_path);
 
 // Saves config atomically (creating parent directories if needed).
 bool save_app_config(const AppConfig& cfg);
+bool save_app_config(const AppConfig& cfg, const std::string& custom_path);
 
 }  // namespace lv::gui

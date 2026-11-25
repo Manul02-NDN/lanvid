@@ -18,9 +18,11 @@ $outExe = Join-Path $winDir "LanVid_Setup.exe"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-# 1. Stage Core Studio + Grid L2 DSP Server + Virtual ASIO + Preflight Configurator
+# 1. Stage Core Studio + Split LanVid Audio / LanVid Video + Grid L2 DSP Server + Virtual ASIO + Preflight
 $files = @(
     (Join-Path $buildDir "lanvid_app.exe"),
+    (Join-Path $buildDir "lanvid_audio_studio.exe"),
+    (Join-Path $buildDir "lanvid_video_studio.exe"),
     (Join-Path $buildDir "lanvid_core.dll"),
     (Join-Path $buildDir "sender.exe"),
     (Join-Path $buildDir "receiver.exe"),

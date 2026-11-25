@@ -199,6 +199,10 @@ if [ -x "$FW" ]; then
   FW_TARGETS=(
     "/Applications/LanVid Studio.app"
     "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio"
+    "/Applications/LanVid Audio.app"
+    "/Applications/LanVid Audio.app/Contents/MacOS/LanVid Audio"
+    "/Applications/LanVid Video.app"
+    "/Applications/LanVid Video.app/Contents/MacOS/LanVid Video"
     "$SDK_ROOT/lib/liblanvid_core.dylib"
     "/usr/local/lib/liblanvid_core.dylib"
     "/usr/local/bin/lanvid-sdk-info"

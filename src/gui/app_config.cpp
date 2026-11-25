@@ -220,12 +220,13 @@ void deserialize_midi_crosspoints(const std::string& raw, std::vector<MidiCrossp
 
 }  // namespace
 
-std::string config_file_path() {
+std::string config_file_path_for(const std::string& filename) {
     namespace fs = std::filesystem;
+    const std::string name = filename.empty() ? "config.json" : filename;
 #if defined(_WIN32)
     const char* appdata = std::getenv("APPDATA");
     fs::path base = appdata && *appdata ? fs::path(appdata) : fs::current_path();
-    return (base / "LanVid" / "config.json").string();
+    return (base / "LanVid" / name).string();
 #else
     const char* xdg = std::getenv("XDG_CONFIG_HOME");
     fs::path base;
@@ -235,12 +236,20 @@ std::string config_file_path() {
         const char* home = std::getenv("HOME");
         base = home && *home ? (fs::path(home) / ".config") : fs::current_path();
     }
-    return (base / "lanvid" / "config.json").string();
+    return (base / "lanvid" / name).string();
 #endif
 }
 
+std::string config_file_path() {
+    return config_file_path_for("config.json");
+}
+
 bool load_app_config(AppConfig& cfg) {
-    std::ifstream in(config_file_path(), std::ios::binary);
+    return load_app_config(cfg, config_file_path());
+}
+
+bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
+    std::ifstream in(custom_path.empty() ? config_file_path() : custom_path, std::ios::binary);
     if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
@@ -349,12 +358,23 @@ bool load_app_config(AppConfig& cfg) {
     cfg.active_tab = std::clamp(cfg.active_tab, 0, 3);
     cfg.connect_role = std::clamp(cfg.connect_role, 0, 2);
     cfg.matrix_buffer_size = (cfg.matrix_buffer_size <= 128) ? 128 : (cfg.matrix_buffer_size <= 256 ? 256 : 512);
+    read_int(j, "video_lip_sync_ms", cfg.video_lip_sync_ms);
+    cfg.video_lip_sync_ms = std::clamp(cfg.video_lip_sync_ms, -200, 200);
+    read_bool(j, "video_obs_output_enabled", cfg.video_obs_output_enabled);
+    read_flt(j, "intercom_ducking_db", cfg.intercom_ducking_db);
+    cfg.intercom_ducking_db = std::clamp(cfg.intercom_ducking_db, -36.0f, 0.0f);
+    read_bool(j, "video_dscp_af41", cfg.video_dscp_af41);
+    read_bool(j, "tally_dscp_ef", cfg.tally_dscp_ef);
     return true;
 }
 
 bool save_app_config(const AppConfig& cfg) {
+    return save_app_config(cfg, config_file_path());
+}
+
+bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
     namespace fs = std::filesystem;
-    const fs::path p(config_file_path());
+    const fs::path p(custom_path.empty() ? config_file_path() : custom_path);
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
 
@@ -426,7 +446,12 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"matrix_slots\": \"" << json_esc(serialize_matrix_slots(cfg.matrix_slots)) << "\",\n"
         << "  \"matrix_crosspoints\": \"" << json_esc(serialize_matrix_crosspoints(cfg.matrix_crosspoints)) << "\",\n"
         << "  \"midi_slots\": \"" << json_esc(serialize_midi_slots(cfg.midi_slots)) << "\",\n"
-        << "  \"midi_crosspoints\": \"" << json_esc(serialize_midi_crosspoints(cfg.midi_crosspoints)) << "\"\n"
+        << "  \"midi_crosspoints\": \"" << json_esc(serialize_midi_crosspoints(cfg.midi_crosspoints)) << "\",\n"
+        << "  \"video_lip_sync_ms\": " << cfg.video_lip_sync_ms << ",\n"
+        << "  \"video_obs_output_enabled\": " << (cfg.video_obs_output_enabled ? "true" : "false") << ",\n"
+        << "  \"intercom_ducking_db\": " << cfg.intercom_ducking_db << ",\n"
+        << "  \"video_dscp_af41\": " << (cfg.video_dscp_af41 ? "true" : "false") << ",\n"
+        << "  \"tally_dscp_ef\": " << (cfg.tally_dscp_ef ? "true" : "false") << "\n"
         << "}\n";
     return out.good();
 }

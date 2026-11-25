@@ -361,6 +361,38 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
     target_include_directories(lanvid_app PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
     target_link_libraries(lanvid_app PRIVATE lanvid_core dwmapi)
     lanvid_set_flags(lanvid_app)
+
+    # Split Desktop App 1: LanVid Audio (AoIP, Patchbay/64x64 Matrix, Personal Monitor, Grid L2 256ch)
+    add_executable(lanvid_audio_studio WIN32
+      src/app/audio_studio_main.cpp
+      src/gui/app_config.cpp
+      src/gui/studio_common.cpp
+      src/gui/studio_host_win32.cpp
+      src/gui/audio_studio_ui.cpp
+      ${LV_IMGUI_CORE}
+      ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
+      ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
+    )
+    target_compile_definitions(lanvid_audio_studio PRIVATE LANVID_GUI_WINMAIN=1)
+    target_include_directories(lanvid_audio_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
+    target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core dwmapi)
+    lanvid_set_flags(lanvid_audio_studio)
+
+    # Split Desktop App 2: LanVid Video (Cameras & Tally, Intercom/IFB, OBS Outputs)
+    add_executable(lanvid_video_studio WIN32
+      src/app/video_studio_main.cpp
+      src/gui/app_config.cpp
+      src/gui/studio_common.cpp
+      src/gui/studio_host_win32.cpp
+      src/gui/video_studio_ui.cpp
+      ${LV_IMGUI_CORE}
+      ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
+      ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
+    )
+    target_compile_definitions(lanvid_video_studio PRIVATE LANVID_GUI_WINMAIN=1)
+    target_include_directories(lanvid_video_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
+    target_link_libraries(lanvid_video_studio PRIVATE lanvid_core dwmapi)
+    lanvid_set_flags(lanvid_video_studio)
   elseif(LV_HAVE_SDL2)
     find_package(OpenGL QUIET)
     if(OpenGL_FOUND)
@@ -373,15 +405,58 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
       target_include_directories(lanvid_app PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
       target_link_libraries(lanvid_app PRIVATE lanvid_core OpenGL::GL)
       lanvid_set_flags(lanvid_app)
+
+      # Split Desktop App 1: LanVid Audio (macOS: LanVid Audio.app)
+      add_executable(lanvid_audio_studio
+        src/app/audio_studio_main.cpp
+        src/gui/app_config.cpp
+        src/gui/studio_common.cpp
+        src/gui/studio_host_sdl2.cpp
+        src/gui/audio_studio_ui.cpp
+        ${LV_IMGUI_CORE}
+        ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+      )
+      target_include_directories(lanvid_audio_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
+      target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core OpenGL::GL)
+      lanvid_set_flags(lanvid_audio_studio)
+
+      # Split Desktop App 2: LanVid Video (macOS: LanVid Video.app)
+      add_executable(lanvid_video_studio
+        src/app/video_studio_main.cpp
+        src/gui/app_config.cpp
+        src/gui/studio_common.cpp
+        src/gui/studio_host_sdl2.cpp
+        src/gui/video_studio_ui.cpp
+        ${LV_IMGUI_CORE}
+        ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+      )
+      target_include_directories(lanvid_video_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
+      target_link_libraries(lanvid_video_studio PRIVATE lanvid_core OpenGL::GL)
+      lanvid_set_flags(lanvid_video_studio)
+
       if(APPLE)
-        # macOS: "LanVid Studio.app" (Retina, microphone permission prompt for CoreAudio inputs).
+        # macOS: "LanVid Studio.app", "LanVid Audio.app", "LanVid Video.app"
         set_target_properties(lanvid_app PROPERTIES
           MACOSX_BUNDLE TRUE
           OUTPUT_NAME "LanVid Studio"
           MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
         target_compile_definitions(lanvid_app PRIVATE GL_SILENCE_DEPRECATION=1)
-        # CGPreflightScreenCaptureAccess: tell the user about the Screen Recording permission (TCC).
         target_link_libraries(lanvid_app PRIVATE "-framework CoreGraphics")
+
+        set_target_properties(lanvid_audio_studio PROPERTIES
+          MACOSX_BUNDLE TRUE
+          OUTPUT_NAME "LanVid Audio"
+          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
+        target_compile_definitions(lanvid_audio_studio PRIVATE GL_SILENCE_DEPRECATION=1)
+
+        set_target_properties(lanvid_video_studio PROPERTIES
+          MACOSX_BUNDLE TRUE
+          OUTPUT_NAME "LanVid Video"
+          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
+        target_compile_definitions(lanvid_video_studio PRIVATE GL_SILENCE_DEPRECATION=1)
+        target_link_libraries(lanvid_video_studio PRIVATE "-framework CoreGraphics")
       endif()
     endif()
   endif()
@@ -481,8 +556,17 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_lanvid_grid_l2.cpp
     tests/test_installer_packaging.cpp
     tests/test_network_interfaces.cpp
+    tests/test_studio_split.cpp
     src/gui/app_config.cpp
+    src/gui/studio_common.cpp
+    src/gui/audio_studio_ui.cpp
+    src/gui/video_studio_ui.cpp
+    ${LV_IMGUI_DIR}/imgui.cpp
+    ${LV_IMGUI_DIR}/imgui_draw.cpp
+    ${LV_IMGUI_DIR}/imgui_tables.cpp
+    ${LV_IMGUI_DIR}/imgui_widgets.cpp
   )
+  target_include_directories(lanvid_tests PRIVATE ${LV_IMGUI_DIR})
   target_compile_definitions(lanvid_tests PRIVATE LV_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
   if(TARGET obs_lanvid_core)

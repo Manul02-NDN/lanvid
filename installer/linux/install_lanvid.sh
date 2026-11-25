@@ -21,6 +21,8 @@ CHECK_ONLY=0
 NO_LAUNCH=0
 
 # Component selection flags (all enabled by default in --auto mode)
+INSTALL_AUDIO_STUDIO=1
+INSTALL_VIDEO_STUDIO=1
 INSTALL_DSP=1
 INSTALL_SETCAP=1
 INSTALL_OBS=1
@@ -128,7 +130,17 @@ fi
 
 if [ "$INSTALL_MODE" = "custom" ]; then
   log "Обрано режим: Ручний вибір (Вибіркове встановлення)."
-  echo "  • LanVid Studio + liblanvid_core.so — обов'язковий модуль (буде встановлено)."
+  echo "  • Ядро liblanvid_core.so — обов'язковий модуль (буде встановлено)."
+  if ask_yn "Встановити LanVid Audio (/usr/local/bin/lanvid_audio_studio — AoIP, Patchbay 64x64, Monitor, Grid L2)?" "Y"; then
+    INSTALL_AUDIO_STUDIO=1
+  else
+    INSTALL_AUDIO_STUDIO=0
+  fi
+  if ask_yn "Встановити LanVid Video (/usr/local/bin/lanvid_video_studio — Камери, Tally, Інтерком/IFB, OBS)?" "Y"; then
+    INSTALL_VIDEO_STUDIO=1
+  else
+    INSTALL_VIDEO_STUDIO=0
+  fi
   if ask_yn "Встановити LanVid Grid DSP Server + фонову службу systemd (lanvid-dsp.service)?" "Y"; then
     INSTALL_DSP=1
   else
@@ -234,7 +246,7 @@ if [ "$NEED_BUILD" -eq 1 ]; then
         -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_GUI=ON -DLANVID_BUILD_CLI=ON -DLANVID_BUILD_SHARED=ON
   cmake --build "$BUILD_TMP" --parallel "$(nproc)"
   mkdir -p "$BIN_SRC" "$LIB_SRC"
-  for b in lanvid_app lanvid_dsp_server sender receiver lanvid-audio-bridge; do
+  for b in lanvid_app lanvid_audio_studio lanvid_video_studio lanvid_dsp_server sender receiver lanvid-audio-bridge; do
     [ -f "$BUILD_TMP/$b" ] && cp "$BUILD_TMP/$b" "$BIN_SRC/$b"
   done
   [ -f "$BUILD_TMP/lanvid_app" ] && cp "$BUILD_TMP/lanvid_app" "$BIN_SRC/lanvid_studio"
@@ -282,6 +294,14 @@ for b in lanvid_studio lanvid_app sender receiver lanvid-audio-bridge; do
     $SUDO install -m 0755 "$BIN_SRC/$b" "$PREFIX/bin/$b"
   fi
 done
+if [ "$INSTALL_AUDIO_STUDIO" -eq 1 ] && [ -f "$BIN_SRC/lanvid_audio_studio" ]; then
+  $SUDO install -m 0755 "$BIN_SRC/lanvid_audio_studio" "$PREFIX/bin/lanvid_audio_studio"
+  [ -f "$SCRIPT_DIR/lanvid-audio.desktop" ] && $SUDO install -m 0644 "$SCRIPT_DIR/lanvid-audio.desktop" /usr/share/applications/lanvid-audio.desktop
+fi
+if [ "$INSTALL_VIDEO_STUDIO" -eq 1 ] && [ -f "$BIN_SRC/lanvid_video_studio" ]; then
+  $SUDO install -m 0755 "$BIN_SRC/lanvid_video_studio" "$PREFIX/bin/lanvid_video_studio"
+  [ -f "$SCRIPT_DIR/lanvid-video.desktop" ] && $SUDO install -m 0644 "$SCRIPT_DIR/lanvid-video.desktop" /usr/share/applications/lanvid-video.desktop
+fi
 if [ ! -f "$PREFIX/bin/lanvid_studio" ] && [ -f "$PREFIX/bin/lanvid_app" ]; then
   $SUDO install -m 0755 "$PREFIX/bin/lanvid_app" "$PREFIX/bin/lanvid_studio"
 fi
@@ -304,9 +324,11 @@ ok "Ярлик «$APP_NAME» додано до меню програм."
 if [ "$INSTALL_SETCAP" -eq 1 ]; then
   if command -v setcap >/dev/null 2>&1; then
     log "Надання прав Layer 2 Raw Sockets (cap_net_raw,cap_net_admin=eip)..."
-    [ -x "$PREFIX/bin/lanvid_studio" ]     && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_studio" || true
-    [ -x "$PREFIX/bin/lanvid_app" ]        && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_app" || true
-    [ -x "$PREFIX/bin/lanvid_dsp_server" ] && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_dsp_server" || true
+    [ -x "$PREFIX/bin/lanvid_studio" ]       && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_studio" || true
+    [ -x "$PREFIX/bin/lanvid_app" ]          && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_app" || true
+    [ -x "$PREFIX/bin/lanvid_audio_studio" ] && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_audio_studio" || true
+    [ -x "$PREFIX/bin/lanvid_video_studio" ] && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_video_studio" || true
+    [ -x "$PREFIX/bin/lanvid_dsp_server" ]   && $SUDO setcap cap_net_raw,cap_net_admin=eip "$PREFIX/bin/lanvid_dsp_server" || true
     ok "Права Layer 2 (AF_PACKET + QoS) налаштовано без потреби запускати від root."
   else
     warn "Утиліта setcap не знайдена; встановіть libcap2-bin для роботи LanVid Grid L2 без root."

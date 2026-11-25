@@ -85,7 +85,7 @@ if ($Uninstall) {
     } catch {}
 
     # 2. Terminate any running LanVid binaries
-    foreach ($name in @("lanvid_app", "lanvid_dsp_server", "sender", "receiver")) {
+    foreach ($name in @("lanvid_app", "lanvid_audio_studio", "lanvid_video_studio", "lanvid_dsp_server", "sender", "receiver")) {
         Stop-Process -Name $name -Force -ErrorAction SilentlyContinue
     }
 

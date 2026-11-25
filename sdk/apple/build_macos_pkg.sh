@@ -142,6 +142,28 @@ if [ -n "$STUDIO_APP_SRC" ]; then
   echo "[OK] Staged LanVid Studio.app -> /Applications/ from $STUDIO_APP_SRC"
 fi
 
+# Component 1b (optional): com.lanvid.pkg.audiostudio -> /Applications/LanVid Audio.app
+ROOT_AUDIO_APP="$BUILD_DIR/pkgroot-audiostudio"
+mkdir -p "$ROOT_AUDIO_APP/Applications"
+for cand in "$ROOT/build-macos-app/LanVid Audio.app" "$ROOT/build-studio-pkg/cmake/LanVid Audio.app" "$ROOT/build/LanVid Audio.app"; do
+  if [ -d "$cand" ]; then
+    cp -R "$cand" "$ROOT_AUDIO_APP/Applications/"
+    echo "[OK] Staged LanVid Audio.app -> /Applications/ from $cand"
+    break
+  fi
+done
+
+# Component 1c (optional): com.lanvid.pkg.videostudio -> /Applications/LanVid Video.app
+ROOT_VIDEO_APP="$BUILD_DIR/pkgroot-videostudio"
+mkdir -p "$ROOT_VIDEO_APP/Applications"
+for cand in "$ROOT/build-macos-app/LanVid Video.app" "$ROOT/build-studio-pkg/cmake/LanVid Video.app" "$ROOT/build/LanVid Video.app"; do
+  if [ -d "$cand" ]; then
+    cp -R "$cand" "$ROOT_VIDEO_APP/Applications/"
+    echo "[OK] Staged LanVid Video.app -> /Applications/ from $cand"
+    break
+  fi
+done
+
 # Component 2 (optional): com.lanvid.pkg.dspserver -> /usr/local/bin/lanvid_dsp_server + LaunchDaemon
 ROOT_DSP="$BUILD_DIR/pkgroot-dspserver"
 mkdir -p "$ROOT_DSP/usr/local/bin" "$ROOT_DSP/Library/LaunchDaemons"
@@ -349,6 +371,12 @@ mkdir -p "$COMP_DIR"
 
 pkgbuild --root "$ROOT_STUDIO" --identifier "com.lanvid.pkg.studio" --version "$SDK_VERSION" \
   --scripts "$SCRIPTS_STAGE" --install-location "/" "$COMP_DIR/lanvid-studio.pkg"
+
+pkgbuild --root "$ROOT_AUDIO_APP" --identifier "com.lanvid.pkg.audiostudio" --version "$SDK_VERSION" \
+  --install-location "/" "$COMP_DIR/lanvid-audiostudio.pkg"
+
+pkgbuild --root "$ROOT_VIDEO_APP" --identifier "com.lanvid.pkg.videostudio" --version "$SDK_VERSION" \
+  --install-location "/" "$COMP_DIR/lanvid-videostudio.pkg"
 
 pkgbuild --root "$ROOT_DSP" --identifier "com.lanvid.pkg.dspserver" --version "$SDK_VERSION" \
   --scripts "$SCRIPTS_DSP" --install-location "/" "$COMP_DIR/lanvid-dspserver.pkg"

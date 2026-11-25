@@ -17,6 +17,8 @@
 
     <choices-outline>
         <line choice="choice_studio" />
+        <line choice="choice_audiostudio" />
+        <line choice="choice_videostudio" />
         <line choice="choice_dspserver" />
         <line choice="choice_chmodbpf" />
         <line choice="choice_obsplugin" />
@@ -26,11 +28,27 @@
     </choices-outline>
 
     <choice id="choice_studio"
-            title="LanVid Studio &amp; Core SDK (Обов'язково)"
-            description="LanVid Studio.app (/Applications), Universal liblanvid_core.dylib (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages, and macOS Application Firewall exemptions."
+            title="LanVid Core SDK &amp; Studio (Обов'язково)"
+            description="Universal liblanvid_core.dylib (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages, and macOS Application Firewall exemptions."
             start_selected="true"
             enabled="false">
         <pkg-ref id="com.lanvid.pkg.studio" />
+    </choice>
+
+    <choice id="choice_audiostudio"
+            title="LanVid Audio (LanVid Audio.app — AoIP, Patchbay 64x64, Monitor &amp; Grid L2)"
+            description="Installs /Applications/LanVid Audio.app for 64ch/256ch AoIP routing, Personal Monitor (UDP :5020), and LanVid Grid Layer 2."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.pkg.audiostudio" />
+    </choice>
+
+    <choice id="choice_videostudio"
+            title="LanVid Video (LanVid Video.app — Cameras, Tally, Intercom/IFB &amp; OBS)"
+            description="Installs /Applications/LanVid Video.app for multi-camera preview, Tally (STBY/PVW/PGM), Director Intercom/IFB (UDP :5022), and OBS output."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.pkg.videostudio" />
     </choice>
 
     <choice id="choice_dspserver"
@@ -82,6 +100,8 @@
     </choice>
 
     <pkg-ref id="com.lanvid.pkg.studio" version="2.6.0" onConclusion="none">lanvid-studio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.audiostudio" version="2.6.0" onConclusion="none">lanvid-audiostudio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.videostudio" version="2.6.0" onConclusion="none">lanvid-videostudio.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.pkg.dspserver" version="2.6.0" onConclusion="none">lanvid-dspserver.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.pkg.chmodbpf" version="2.6.0" onConclusion="none">lanvid-chmodbpf.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.pkg.obsplugin" version="2.6.0" onConclusion="none">lanvid-obsplugin.pkg</pkg-ref>

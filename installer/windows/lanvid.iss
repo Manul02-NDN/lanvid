@@ -42,7 +42,9 @@ Name: "auto"; Description: "Автоматичне встановлення (Р�
 Name: "custom"; Description: "Ручний вибір (Вибіркове встановлення компонентів і налаштувань)"; Flags: iscustom
 
 [Components]
-Name: "core"; Description: "LanVid Studio, ядро (lanvid_core.dll) та утиліти діагностики (обов'язково)"; Types: auto custom; Flags: fixed
+Name: "core"; Description: "Ядро LanVid (lanvid_core.dll) та утиліти діагностики (обов'язково)"; Types: auto custom; Flags: fixed
+Name: "audio_studio"; Description: "LanVid Audio (AoIP, Patchbay/64x64 Матриця, Personal Monitor, Grid L2 256ch)"; Types: auto custom
+Name: "video_studio"; Description: "LanVid Video (Камери та Tally, Режисерський Інтерком/IFB, OBS Вивід)"; Types: auto custom
 Name: "dsp_server"; Description: "LanVid Grid DSP Server (фонова служба LanVidGridDSP 256ch + Failover)"; Types: auto custom
 Name: "virtual_audio"; Description: "Віртуальний аудіодрайвер LanVid Virtual ASIO (64 In / 64 Out)"; Types: auto custom
 Name: "grid_l2_npcap"; Description: "LanVid Grid Layer 2 (перевірка та встановлення Npcap для прямого Ethernet)"; Types: auto custom
@@ -58,6 +60,8 @@ Name: "high_perf_power"; Description: "Увімкнути профіль жив�
 [Files]
 ; Core (Studio GUI, shared core DLL, CLI tools, preflight configurator & docs)
 Source: "..\..\build\lanvid_app.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: core
+Source: "..\..\build\lanvid_audio_studio.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: audio_studio
+Source: "..\..\build\lanvid_video_studio.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: video_studio
 Source: "..\..\build\lanvid_core.dll"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\..\build\sender.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "..\..\build\receiver.exe"; DestDir: "{app}"; Flags: ignoreversion; Components: core
@@ -79,9 +83,13 @@ Source: "..\..\plugins\obs-lanvid\data\locale\en-US.ini"; DestDir: "{app}\obs-la
 Source: "..\..\plugins\obs-lanvid\data\locale\uk-UA.ini"; DestDir: "{app}\obs-lanvid\data\obs-plugins\obs-lanvid\locale"; Flags: ignoreversion skipifsourcedoesntexist; Components: obs_plugin
 
 [Icons]
+Name: "{group}\LanVid Audio"; Filename: "{app}\lanvid_audio_studio.exe"; Components: audio_studio
+Name: "{group}\LanVid Video"; Filename: "{app}\lanvid_video_studio.exe"; Components: video_studio
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\LanVid Grid DSP Server (консоль)"; Filename: "{app}\lanvid_dsp_server.exe"; Components: dsp_server
 Name: "{group}\Видалити {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\LanVid Audio"; Filename: "{app}\lanvid_audio_studio.exe"; Tasks: desktopicon; Components: audio_studio
+Name: "{autodesktop}\LanVid Video"; Filename: "{app}\lanvid_video_studio.exe"; Tasks: desktopicon; Components: video_studio
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]

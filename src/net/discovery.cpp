@@ -231,6 +231,11 @@ void DiscoveryResponder::set_aoip_provider(std::function<AoipAnnounce()> provide
     aoip_provider_ = std::move(provider);
 }
 
+void DiscoveryResponder::set_role(const std::string& role) {
+    std::lock_guard<std::mutex> lk(aoip_mu_);
+    role_ = sanitize_field(role);
+}
+
 void DiscoveryResponder::set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip) {
     std::lock_guard<std::mutex> lk(aoip_mu_);
     primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
@@ -301,6 +306,9 @@ bool DiscoveryResponder::start(uint16_t stream_port, const std::string& custom_n
                 if (aoip_provider_) {
                     const AoipAnnounce a = aoip_provider_();
                     if (a.enabled) reply += "|" + encode_aoip_field(a);
+                }
+                if (!role_.empty()) {
+                    reply += "|ROLE=" + role_;
                 }
             }
             reply += "|" + sanitize_field(nonce);
@@ -433,13 +441,48 @@ std::vector<DiscoveredReceiver> discovery_scan(int timeout_ms, uint16_t discover
         r.device_name = parts[3];
         r.rtt_ms = uint32_t((now_us() - t_start) / 1000ull);
         for (size_t k = 4; k + 1 < parts.size(); ++k) {  // optional fields sit between name and nonce
-            if (decode_aoip_field(parts[k], r)) break;
+            if (parts[k].rfind("ROLE=", 0) == 0) {
+                r.role = parts[k].substr(5);
+            } else {
+                decode_aoip_field(parts[k], r);
+            }
+        }
+        if (r.role.empty()) {
+            if (discovery_port == kAudioDiscoveryPort) r.role = "audio";
+            else if (discovery_port == kVideoDiscoveryPort) r.role = "video";
         }
         out.push_back(std::move(r));
     }
 
     close_raw_sock(s);
     return out;
+}
+
+std::vector<DiscoveredReceiver> discovery_scan_roles(int timeout_ms,
+                                                     bool scan_audio,
+                                                     bool scan_video,
+                                                     bool scan_legacy,
+                                                     const std::string& primary_ip,
+                                                     const std::string& secondary_ip) {
+    std::vector<uint16_t> ports;
+    if (scan_audio) ports.push_back(kAudioDiscoveryPort);
+    if (scan_video) ports.push_back(kVideoDiscoveryPort);
+    if (scan_legacy) ports.push_back(kDiscoveryPort);
+    if (ports.empty()) return {};
+
+    const int per_port_ms = std::max(60, timeout_ms / int(ports.size()));
+    std::vector<DiscoveredReceiver> merged;
+    std::set<std::string> seen;
+    for (uint16_t p : ports) {
+        auto found = discovery_scan(per_port_ms, p, primary_ip, secondary_ip);
+        for (auto& r : found) {
+            const std::string key = r.ip + ":" + std::to_string(r.stream_port) + ":" + r.role;
+            if (seen.insert(key).second) {
+                merged.push_back(std::move(r));
+            }
+        }
+    }
+    return merged;
 }
 
 }  // namespace lv

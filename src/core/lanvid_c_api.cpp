@@ -2374,13 +2374,28 @@ char* lv_discovery_scan_port(int timeout_ms, uint16_t discovery_port) {
         os << "{\"ip\":\"" << json_escape(found[i].ip) << "\",\"port\":" << found[i].stream_port
            << ",\"name\":\"" << json_escape(found[i].device_name) << "\",\"os\":\""
            << json_escape(found[i].os) << "\",\"simd\":\"" << json_escape(found[i].simd)
+           << "\",\"role\":\"" << json_escape(found[i].role)
            << "\",\"rtt_ms\":" << found[i].rtt_ms << "}";
     }
     os << "]";
     return dup_cstr(os.str());
 }
 
-char* lv_discovery_scan(int timeout_ms) { return lv_discovery_scan_port(timeout_ms, lv::kDiscoveryPort); }
+char* lv_discovery_scan(int timeout_ms) {
+    const auto found = lv::discovery_scan_roles(timeout_ms, true, true, true);
+    std::ostringstream os;
+    os << "[";
+    for (size_t i = 0; i < found.size(); ++i) {
+        if (i) os << ",";
+        os << "{\"ip\":\"" << json_escape(found[i].ip) << "\",\"port\":" << found[i].stream_port
+           << ",\"name\":\"" << json_escape(found[i].device_name) << "\",\"os\":\""
+           << json_escape(found[i].os) << "\",\"simd\":\"" << json_escape(found[i].simd)
+           << "\",\"role\":\"" << json_escape(found[i].role)
+           << "\",\"rtt_ms\":" << found[i].rtt_ms << "}";
+    }
+    os << "]";
+    return dup_cstr(os.str());
+}
 
 /* ---- Legacy / Desktop Studio Compatibility Wrappers (excluded in LANVID_SDK_CORE_ONLY) ---- */
 #ifndef LANVID_SDK_CORE_ONLY

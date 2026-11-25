@@ -85,6 +85,8 @@ constexpr int IDC_DESC_CUSTOM = 1013;
 constexpr int IDC_PREFLIGHT_SUMMARY = 1014;
 // Page 1: Custom components
 constexpr int IDC_CHK_CORE = 1020;
+constexpr int IDC_CHK_AUDIO_STUDIO = 1028;
+constexpr int IDC_CHK_VIDEO_STUDIO = 1029;
 constexpr int IDC_CHK_DSP_SVC = 1021;
 constexpr int IDC_CHK_ASIO = 1022;
 constexpr int IDC_CHK_NPCAP = 1023;
@@ -116,6 +118,8 @@ struct PreflightReport {
 struct InstallOptions {
     bool auto_mode = true;
     bool core = true;              // always required
+    bool audio_studio = true;      // LanVid Audio (lanvid_audio_studio.exe)
+    bool video_studio = true;      // LanVid Video (lanvid_video_studio.exe)
     bool dsp_service = true;
     bool virtual_audio = true;
     bool grid_npcap = true;
@@ -137,6 +141,8 @@ HWND g_desc_custom = nullptr;
 HWND g_preflight_box = nullptr;
 // Page 1 controls
 HWND g_chk_core = nullptr;
+HWND g_chk_audio_studio = nullptr;
+HWND g_chk_video_studio = nullptr;
 HWND g_chk_dsp = nullptr;
 HWND g_chk_asio = nullptr;
 HWND g_chk_npcap = nullptr;
@@ -182,6 +188,8 @@ bool parse_cli_components(const std::wstring& cmd_line, InstallOptions& opt) {
 
     opt.auto_mode = false;
     opt.core = true;  // mandatory
+    opt.audio_studio = false;
+    opt.video_studio = false;
     opt.dsp_service = false;
     opt.virtual_audio = false;
     opt.grid_npcap = false;
@@ -193,6 +201,8 @@ bool parse_cli_components(const std::wstring& cmd_line, InstallOptions& opt) {
     std::wstring item;
     while (std::getline(ss, item, L',')) {
         if (item == L"core" || item == L"studio") opt.core = true;
+        else if (item == L"audio_studio" || item == L"audio") opt.audio_studio = true;
+        else if (item == L"video_studio" || item == L"video") opt.video_studio = true;
         else if (item == L"dsp_server" || item == L"dsp") opt.dsp_service = true;
         else if (item == L"virtual_audio" || item == L"asio") opt.virtual_audio = true;
         else if (item == L"grid_l2_npcap" || item == L"npcap" || item == L"grid_l2") opt.grid_npcap = true;
@@ -543,6 +553,12 @@ bool execute_install(const InstallOptions& opt) {
 
     // Remove unselected optional binaries/staging if user explicitly unchecked them in custom mode
     std::error_code rem_ec;
+    if (!opt.audio_studio) {
+        fs::remove(g_rep.install_dir / L"lanvid_audio_studio.exe", rem_ec);
+    }
+    if (!opt.video_studio) {
+        fs::remove(g_rep.install_dir / L"lanvid_video_studio.exe", rem_ec);
+    }
     if (!opt.dsp_service) {
         fs::remove(g_rep.install_dir / L"lanvid_dsp_server.exe", rem_ec);
     }
@@ -605,9 +621,19 @@ bool execute_install(const InstallOptions& opt) {
     set_prog(94);
     log_msg(L"[7/7] Створення ярликів (Меню Пуск" + std::wstring(opt.desktop ? L" + Робочий стіл" : L"") + L")...");
     const fs::path app_exe = g_rep.install_dir / L"lanvid_app.exe";
+    const fs::path audio_exe = g_rep.install_dir / L"lanvid_audio_studio.exe";
+    const fs::path video_exe = g_rep.install_dir / L"lanvid_video_studio.exe";
     const fs::path dsp_exe = g_rep.install_dir / L"lanvid_dsp_server.exe";
     wchar_t* sm_dir = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &sm_dir))) {
+        if (opt.audio_studio && fs::exists(audio_exe)) {
+            create_shortcut(fs::path(sm_dir) / L"LanVid Studio" / L"LanVid Audio.lnk", audio_exe,
+                            g_rep.install_dir, L"LanVid Audio — AoIP, Patchbay 64x64, Personal Monitor & Grid L2");
+        }
+        if (opt.video_studio && fs::exists(video_exe)) {
+            create_shortcut(fs::path(sm_dir) / L"LanVid Studio" / L"LanVid Video.lnk", video_exe,
+                            g_rep.install_dir, L"LanVid Video — Cameras, Tally, Director Intercom/IFB & OBS");
+        }
         create_shortcut(fs::path(sm_dir) / L"LanVid Studio" / L"LanVid Studio.lnk", app_exe,
                         g_rep.install_dir, L"LanVid Studio + Grid L2 — Ultra-Low Latency LAN Video & Audio");
         if (opt.dsp_service && fs::exists(dsp_exe)) {
@@ -619,6 +645,14 @@ bool execute_install(const InstallOptions& opt) {
     if (opt.desktop) {
         wchar_t* desk_dir = nullptr;
         if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk_dir))) {
+            if (opt.audio_studio && fs::exists(audio_exe)) {
+                create_shortcut(fs::path(desk_dir) / L"LanVid Audio.lnk", audio_exe, g_rep.install_dir,
+                                L"LanVid Audio — AoIP, Patchbay 64x64, Personal Monitor & Grid L2");
+            }
+            if (opt.video_studio && fs::exists(video_exe)) {
+                create_shortcut(fs::path(desk_dir) / L"LanVid Video.lnk", video_exe, g_rep.install_dir,
+                                L"LanVid Video — Cameras, Tally, Director Intercom/IFB & OBS");
+            }
             create_shortcut(fs::path(desk_dir) / L"LanVid Studio.lnk", app_exe, g_rep.install_dir,
                             L"LanVid Studio + Grid L2 — Ultra-Low Latency LAN Video & Audio");
             CoTaskMemFree(desk_dir);
@@ -649,6 +683,8 @@ void show_page(WizardPage p) {
     set_vis(g_preflight_box, p0);
 
     set_vis(g_chk_core, p1);
+    set_vis(g_chk_audio_studio, p1);
+    set_vis(g_chk_video_studio, p1);
     set_vis(g_chk_dsp, p1);
     set_vis(g_chk_asio, p1);
     set_vis(g_chk_npcap, p1);
@@ -686,6 +722,8 @@ InstallOptions read_custom_checkboxes() {
     InstallOptions opt{};
     opt.auto_mode = false;
     opt.core = true;
+    opt.audio_studio = SendMessageW(g_chk_audio_studio, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.video_studio = SendMessageW(g_chk_video_studio, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.dsp_service = SendMessageW(g_chk_dsp, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.virtual_audio = SendMessageW(g_chk_asio, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.grid_npcap = SendMessageW(g_chk_npcap, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -780,14 +818,16 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return h;
             };
 
-            g_chk_core = make_chk(L"LanVid Studio (обов'язково — основний застосунок і ядро lanvid_core.dll)", 82, IDC_CHK_CORE, true, false);
-            g_chk_dsp = make_chk(L"LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP", 112, IDC_CHK_DSP_SVC, g_cli_opt.dsp_service);
-            g_chk_asio = make_chk(L"LanVid Virtual ASIO Driver (64ch In / 64ch Out)", 142, IDC_CHK_ASIO, g_cli_opt.virtual_audio);
-            g_chk_npcap = make_chk(L"Npcap Driver (Layer 2 Grid 256ch Ethernet)", 172, IDC_CHK_NPCAP, g_cli_opt.grid_npcap);
-            g_chk_obs = make_chk(L"OBS Studio Plugin (obs-lanvid.dll + локалізації)", 202, IDC_CHK_OBS, g_cli_opt.obs_plugin);
-            g_chk_fw = make_chk(L"Правила Windows Firewall та QoS DSCP=46 (EF) + оптимізація сокетів", 232, IDC_CHK_FIREWALL, g_cli_opt.firewall_qos);
-            g_chk_highperf = make_chk(L"Профіль живлення High Performance (максимальна стабільність аудіо)", 262, IDC_CHK_HIGH_PERF, g_cli_opt.high_perf_power);
-            g_chk_desktop = make_chk(L"Створити ярлик «LanVid Studio» на Робочому столі", 298, IDC_CHK_DESKTOP, g_cli_opt.desktop);
+            g_chk_core = make_chk(L"Ядро LanVid (lanvid_core.dll) та базові утиліти (обов'язково)", 72, IDC_CHK_CORE, true, false);
+            g_chk_audio_studio = make_chk(L"LanVid Audio (AoIP, Patchbay 64x64, Personal Monitor, Grid L2)", 98, IDC_CHK_AUDIO_STUDIO, g_cli_opt.audio_studio);
+            g_chk_video_studio = make_chk(L"LanVid Video (Камери та Tally, Інтерком/IFB, OBS Вивід)", 124, IDC_CHK_VIDEO_STUDIO, g_cli_opt.video_studio);
+            g_chk_dsp = make_chk(L"LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP", 150, IDC_CHK_DSP_SVC, g_cli_opt.dsp_service);
+            g_chk_asio = make_chk(L"LanVid Virtual ASIO Driver (64ch In / 64ch Out)", 176, IDC_CHK_ASIO, g_cli_opt.virtual_audio);
+            g_chk_npcap = make_chk(L"Npcap Driver (Layer 2 Grid 256ch Ethernet)", 202, IDC_CHK_NPCAP, g_cli_opt.grid_npcap);
+            g_chk_obs = make_chk(L"OBS Studio Plugin (obs-lanvid.dll + локалізації)", 228, IDC_CHK_OBS, g_cli_opt.obs_plugin);
+            g_chk_fw = make_chk(L"Правила Windows Firewall та QoS DSCP=46 (EF) + оптимізація сокетів", 254, IDC_CHK_FIREWALL, g_cli_opt.firewall_qos);
+            g_chk_highperf = make_chk(L"Профіль живлення High Performance (максимальна стабільність аудіо)", 280, IDC_CHK_HIGH_PERF, g_cli_opt.high_perf_power);
+            g_chk_desktop = make_chk(L"Створити ярлики «LanVid Audio» і «LanVid Video» на Робочому столі", 306, IDC_CHK_DESKTOP, g_cli_opt.desktop);
 
             // ---- PAGE 2: Progress ----
             g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
