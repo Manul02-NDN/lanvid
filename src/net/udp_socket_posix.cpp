@@ -68,6 +68,7 @@ bool UdpSocket::open() {
     const int s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s < 0) return false;
     fd_ = s;
+    cached_tos_.store(-1, std::memory_order_relaxed);
     return true;
 }
 
@@ -75,6 +76,7 @@ void UdpSocket::close() {
     if (!is_open()) return;
     ::close(fd_);
     fd_ = -1;
+    cached_tos_.store(-1, std::memory_order_relaxed);
 }
 
 bool UdpSocket::bind(const std::string& ip, uint16_t port) {
@@ -106,19 +108,57 @@ void UdpSocket::set_buffer_sizes(int send_bytes, int recv_bytes) {
     set_sockbuf_best_effort(fd_, SO_RCVBUF, recv_bytes);
 }
 
-bool UdpSocket::set_low_latency_qos() {
+bool UdpSocket::set_tos(int tos_value) const {
     if (!is_open()) return false;
-    int tos = kDscpEfTos;
+    if (cached_tos_.load(std::memory_order_relaxed) == tos_value) return true;
+    int tos = tos_value;
     const bool ok = ::setsockopt(fd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == 0;
 #if defined(IPV6_TCLASS)
-    int tclass = kDscpEfTos;  // only effective on IPv6 sockets (ours are AF_INET); harmless otherwise
+    int tclass = tos_value;  // effective on IPv6 sockets; harmless on AF_INET
     (void)::setsockopt(fd_, IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
 #endif
-#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
-    int svc = NET_SERVICE_TYPE_VO;  // Apple maps this to the Wi-Fi voice access category (AC_VO)
-    (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
-#endif
+    if (ok) cached_tos_.store(tos_value, std::memory_order_relaxed);
     return ok;
+}
+
+bool UdpSocket::set_qos_class(QosTrafficClass cls) const {
+    bool ok = false;
+    switch (cls) {
+        case QosTrafficClass::kSyncControl:
+            ok = set_tos(kDscpCs7Tos) || set_tos(kDscpCs6Tos) || set_tos(kDscpEfTos);
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+            {
+                int svc = NET_SERVICE_TYPE_VO;
+                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
+            }
+#endif
+            return ok;
+        case QosTrafficClass::kAudio:
+            ok = set_tos(kDscpEfTos);
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+            {
+                int svc = NET_SERVICE_TYPE_VO;
+                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
+            }
+#endif
+            return ok;
+        case QosTrafficClass::kVideo:
+            ok = set_tos(kDscpAf41Tos);
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+            {
+                int svc = NET_SERVICE_TYPE_VI;
+                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
+            }
+#endif
+            return ok;
+        case QosTrafficClass::kBestEffort:
+        default:
+            return set_tos(0);
+    }
+}
+
+bool UdpSocket::set_low_latency_qos() {
+    return set_qos_class(QosTrafficClass::kAudio);
 }
 
 int UdpSocket::tos() const {
@@ -163,6 +203,16 @@ int UdpSocket::send_to(const uint8_t* data, size_t len, const Endpoint& dst) con
     sa.sin_addr.s_addr = dst.ipv4_be;
     sa.sin_port = htons(dst.port);
     return int(::sendto(fd_, data, len, 0, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)));
+}
+
+int UdpSocket::send_to_qos(const uint8_t* data, size_t len, const Endpoint& dst, QosTrafficClass cls) const {
+    (void)set_qos_class(cls);
+    return send_to(data, len, dst);
+}
+
+int UdpSocket::send_batch_qos(const DatagramView* msgs, int count, const Endpoint& dst, QosTrafficClass cls) const {
+    (void)set_qos_class(cls);
+    return send_batch(msgs, count, dst);
 }
 
 int UdpSocket::recv_from(uint8_t* buf, size_t cap, Endpoint& src) const {

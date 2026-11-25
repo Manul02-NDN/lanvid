@@ -114,6 +114,12 @@ public:
 
     uint64_t intercom_tx_packets() const { return tx_pkts_.load(std::memory_order_relaxed); }
     uint64_t intercom_rx_packets() const { return rx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t intercom_duplicates_dropped() const { return dup_drops_.load(std::memory_order_relaxed); }
+
+    // Wi-Fi Redundant Flow (1+1 Duplicate): queues an identical +1.5 ms staggered backup datagram
+    // for every kTallyState and kIntercomAudio packet; receiver deduplicates instantly by `seq`.
+    void set_wifi_redundancy(bool enabled, uint32_t stagger_us = 1500);
+    bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
 
 private:
     struct Impl;
@@ -128,6 +134,9 @@ private:
     std::atomic<float> tx_peak_dbfs_{-120.0f};
     std::atomic<uint64_t> tx_pkts_{0};
     std::atomic<uint64_t> rx_pkts_{0};
+    std::atomic<uint64_t> dup_drops_{0};
+    std::atomic<bool> wifi_redundancy_{false};
+    std::atomic<uint32_t> dup_stagger_us_{1500};
 };
 
 }  // namespace lv

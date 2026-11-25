@@ -95,6 +95,11 @@ public:
     }
     // Drift-correction range of the micro-resampler (default 500 ppm; monitor phones use 2000 = +/-0.2 %).
     void set_max_resample_ppm(double ppm) { ratio_limit_.store(std::clamp(ppm, 50.0, 5000.0) * 1e-6, std::memory_order_relaxed); }
+    // Dante-inspired Deterministic Timestamp-Driven Playout: locks the playout horizon strictly to
+    // target_latency_ms (e.g. 5..10 ms) without expanding buffer/cushion on small network jitter;
+    // absorbs clock & arrival phase drift smoothly via +/-0.1% (+/-1000 ppm) micro-rate resampling.
+    void set_deterministic_playout(bool enabled, double max_trim_ppm = 1000.0);
+    bool deterministic_playout() const { return deterministic_playout_.load(std::memory_order_acquire); }
     uint64_t prefill_events() const { return prefill_events_.load(std::memory_order_relaxed); }
     double fixed_cushion_ms() const { return cushion_pub_ms_.load(std::memory_order_relaxed); }
     // Total underrun events (start of a gap) over all channels.
@@ -183,6 +188,7 @@ private:
     std::atomic<double> eff_ms_pub_{50.0};          // consumer's steering target (fractional ms)
     std::atomic<double> actual_latency_ms_{0.0};
     std::atomic<bool> atomic_frame_lock_{false};
+    std::atomic<bool> deterministic_playout_{false};
     std::atomic<bool> epoch_reset_req_{false};
     std::atomic<uint64_t> epoch_resets_{0};
 

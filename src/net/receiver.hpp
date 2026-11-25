@@ -91,6 +91,12 @@ public:
         midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
     }
     bool audio_adaptive_jitter() const { return arx_.adaptive_jitter_enabled(); }
+    // Dante-inspired Deterministic Timestamp-Driven Playout: locks latency strictly to target (5..10 ms)
+    // with +/-0.1% (+/-1000 ppm) micro-rate trim and zero cushion expansion on small jitter.
+    void set_deterministic_playout(bool enabled, double max_trim_ppm = 1000.0) {
+        matrix_.set_deterministic_playout(enabled, max_trim_ppm);
+    }
+    bool deterministic_playout() const { return matrix_.deterministic_playout(); }
     // Measured playout delay of the 64-channel jitter buffer (ms) and the delay it currently steers to.
     double audio_effective_latency_ms() const { return arx_.current_effective_latency_ms(); }
     uint32_t audio_effective_target_ms() const { return matrix_.effective_latency_ms(); }

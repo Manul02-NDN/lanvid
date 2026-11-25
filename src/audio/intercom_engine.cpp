@@ -40,10 +40,21 @@ struct TallyIntercomEngine::Impl {
         uint64_t tally_tx = 0;
         uint64_t ic_rx = 0;
         uint64_t ic_tx = 0;
+        std::array<uint32_t, 256> seen_seq{};
+        std::array<uint8_t, 256> seen_valid{};
+    };
+
+    struct PendingDup {
+        uint64_t due_us = 0;
+        Endpoint dst{};
+        std::vector<uint8_t> dgram;
     };
 
     UdpSocket sock;
     mutable std::mutex mu;
+    std::deque<PendingDup> pending_dups;
+    std::array<uint32_t, 256> cam_seen_seq{};
+    std::array<uint8_t, 256> cam_seen_valid{};
 
     // Studio state
     std::array<CamSlot, kMaxStudioCameras> cams{};
@@ -127,7 +138,35 @@ struct TallyIntercomEngine::Impl {
         return -1;
     }
 
-    void send_tally_dgram_locked(const TallyStatePayload& tp, const Endpoint& dst, int repeats) {
+    static bool check_and_mark_seq(std::array<uint32_t, 256>& ring_seq, std::array<uint8_t, 256>& ring_valid,
+                                   uint32_t seq) {
+        const size_t slot = seq & 255u;
+        if (ring_valid[slot] && ring_seq[slot] == seq) return true;  // duplicate!
+        ring_seq[slot] = seq;
+        ring_valid[slot] = 1;
+        return false;
+    }
+
+    void queue_dup_locked(const uint8_t* dgram, size_t dlen, const Endpoint& dst, uint32_t stagger_us) {
+        if (!dgram || dlen == 0 || !dst.valid()) return;
+        if (pending_dups.size() >= 256) pending_dups.pop_front();
+        PendingDup pd;
+        pd.due_us = now_us() + uint64_t(stagger_us);
+        pd.dst = dst;
+        pd.dgram.assign(dgram, dgram + dlen);
+        pending_dups.push_back(std::move(pd));
+    }
+
+    void flush_dups_locked(uint64_t now) {
+        while (!pending_dups.empty() && now >= pending_dups.front().due_us) {
+            const auto& pd = pending_dups.front();
+            sock.send_to_qos(pd.dgram.data(), pd.dgram.size(), pd.dst, QosTrafficClass::kSyncControl);
+            pending_dups.pop_front();
+        }
+    }
+
+    void send_tally_dgram_locked(const TallyStatePayload& tp, const Endpoint& dst, int repeats,
+                                 bool redundant = false, uint32_t stagger_us = 1500) {
         if (!dst.valid() || !sock.is_open()) return;
         uint8_t body[kTallyStateSize];
         write_tally_state(body, tp);
@@ -140,12 +179,14 @@ struct TallyIntercomEngine::Impl {
         const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
         if (dlen == 0) return;
         for (int r = 0; r < repeats; ++r) {
-            sock.send_to(dgram, dlen, dst);
+            sock.send_to_qos(dgram, dlen, dst, QosTrafficClass::kSyncControl);
         }
+        if (redundant) queue_dup_locked(dgram, dlen, dst, stagger_us);
     }
 
     void encode_and_send_voice_locked(const float* pcm, int n, bool is_studio, bool all_call_flag,
-                                      std::atomic<uint64_t>& tx_counter) {
+                                      std::atomic<uint64_t>& tx_counter,
+                                      bool redundant = false, uint32_t stagger_us = 1500) {
         uint8_t payload[kIntercomHeaderSize + 1024];
         IntercomAudioHeader ih{};
         ih.seq = tx_seq++;
@@ -196,16 +237,18 @@ struct TallyIntercomEngine::Impl {
                 ih.camera_id = all_call_flag ? 0u : c.camera_id;
                 write_intercom_header(payload, ih);
                 const size_t dlen = write_packet(dgram, sizeof(dgram), ph, payload, kIntercomHeaderSize + enc_len);
-                if (dlen > 0 && sock.send_to(dgram, dlen, c.ep) == int(dlen)) {
+                if (dlen > 0 && sock.send_to_qos(dgram, dlen, c.ep, QosTrafficClass::kSyncControl) == int(dlen)) {
                     ++c.ic_tx;
                     tx_counter.fetch_add(1, std::memory_order_relaxed);
+                    if (redundant) queue_dup_locked(dgram, dlen, c.ep, stagger_us);
                 }
             }
         } else if (studio_ep.valid()) {
             write_intercom_header(payload, ih);
             const size_t dlen = write_packet(dgram, sizeof(dgram), ph, payload, kIntercomHeaderSize + enc_len);
-            if (dlen > 0 && sock.send_to(dgram, dlen, studio_ep) == int(dlen)) {
+            if (dlen > 0 && sock.send_to_qos(dgram, dlen, studio_ep, QosTrafficClass::kSyncControl) == int(dlen)) {
                 tx_counter.fetch_add(1, std::memory_order_relaxed);
+                if (redundant) queue_dup_locked(dgram, dlen, studio_ep, stagger_us);
             }
         }
     }
@@ -240,7 +283,7 @@ bool TallyIntercomEngine::start_studio(uint16_t bind_port, const std::string& bi
         impl_->sock.close();
         return false;
     }
-    impl_->sock.set_low_latency_qos();
+    impl_->sock.set_qos_class(QosTrafficClass::kSyncControl);  // DSCP CS7/CS6 for Tally & Intercom
     impl_->sock.set_nonblocking(true);
     impl_->init_codec();
     bound_port_ = impl_->sock.local_port();
@@ -259,7 +302,7 @@ bool TallyIntercomEngine::start_camera(const std::string& studio_ip, uint16_t st
         impl_->sock.close();
         return false;
     }
-    impl_->sock.set_low_latency_qos();
+    impl_->sock.set_qos_class(QosTrafficClass::kSyncControl);  // DSCP CS7/CS6 for Tally & Intercom
     impl_->sock.set_nonblocking(true);
     impl_->init_codec();
     impl_->my_camera_id = camera_id ? camera_id : 1u;
@@ -286,8 +329,15 @@ void TallyIntercomEngine::stop() {
     impl_->sock.close();
     impl_->tx_stage.clear();
     impl_->rx_fifo.clear();
+    impl_->pending_dups.clear();
+    impl_->cam_seen_valid.fill(0);
     for (auto& c : impl_->cams) c = Impl::CamSlot{};
     bound_port_ = 0;
+}
+
+void TallyIntercomEngine::set_wifi_redundancy(bool enabled, uint32_t stagger_us) {
+    dup_stagger_us_.store(std::clamp<uint32_t>(stagger_us, 0, 10000), std::memory_order_relaxed);
+    wifi_redundancy_.store(enabled, std::memory_order_release);
 }
 
 bool TallyIntercomEngine::studio_set_camera_tally(uint32_t camera_id, uint8_t tally_state,
@@ -310,7 +360,9 @@ bool TallyIntercomEngine::studio_set_camera_tally(uint32_t camera_id, uint8_t ta
 
     // 3x redundant immediate UDP transmission for instant Wi-Fi tally switching
     if (c.ep.valid()) {
-        impl_->send_tally_dgram_locked(tp, c.ep, 3);
+        const bool red = wifi_redundancy_.load(std::memory_order_acquire);
+        const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
+        impl_->send_tally_dgram_locked(tp, c.ep, 3, red, stag);
         c.tally_tx += 3;
     }
     return true;
@@ -378,10 +430,12 @@ void TallyIntercomEngine::push_mic_pcm(const float* samples, int frames) {
         return;
     }
 
+    const bool red = wifi_redundancy_.load(std::memory_order_acquire);
+    const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
     impl_->tx_stage.insert(impl_->tx_stage.end(), samples, samples + frames);
     while (int(impl_->tx_stage.size()) >= kIntercomFrameSamples) {
         impl_->encode_and_send_voice_locked(impl_->tx_stage.data(), kIntercomFrameSamples,
-                                            is_studio, all_call_flag, tx_pkts_);
+                                            is_studio, all_call_flag, tx_pkts_, red, stag);
         impl_->tx_stage.erase(impl_->tx_stage.begin(), impl_->tx_stage.begin() + kIntercomFrameSamples);
     }
 }
@@ -468,12 +522,20 @@ void TallyIntercomEngine::poll() {
                     auto& c = impl_->cams[idx];
                     c.ep = src;
                     c.last_seen_us = now;
+                    if (Impl::check_and_mark_seq(c.seen_seq, c.seen_valid, ih.seq)) {
+                        dup_drops_.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
                     c.last_voice_us = now;
                     ++c.ic_rx;
                     if (!c.listen_from_cam) continue;
                 }
             } else {
                 if (ih.camera_id != 0 && ih.camera_id != impl_->my_camera_id) continue;
+                if (Impl::check_and_mark_seq(impl_->cam_seen_seq, impl_->cam_seen_valid, ih.seq)) {
+                    dup_drops_.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
                 impl_->last_director_voice_us = now;
             }
 
@@ -504,8 +566,9 @@ void TallyIntercomEngine::poll() {
         ducking_gain_.store(cur + (target - cur) * (speaking ? 0.35f : 0.12f), std::memory_order_relaxed);
     }
 
-    // 250 ms periodic Tally heartbeat (Studio -> Cameras & Camera -> Studio telemetry)
+    // Flush staggered +1.5 ms Wi-Fi redundant duplicates & run 250 ms Tally heartbeat
     std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->flush_dups_locked(now);
     if (now - impl_->last_hb_us >= 250'000ull) {
         impl_->last_hb_us = now;
         if (is_studio) {

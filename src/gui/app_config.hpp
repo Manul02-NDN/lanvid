@@ -65,6 +65,7 @@ struct AppConfig {
     bool matrix_stereo_pairs = true;  // true=Stereo pairs (1-2, 3-4...), false=Per-channel
     bool sync_settings = true;        // real-time bidirectional settings sync across connected peers
     bool sync_matrix_routing = false; // also sync matrix routing presets across peers
+    bool wifi_redundancy = false;     // Glitch-Free Wi-Fi Redundancy (1+1 Duplicate +1.5 ms stagger)
 
     // Dual-Engine Architecture: 0 = Classic (UDP/IP Layer 3, default), 1 = Grid (Layer 2 Ethernet 256ch),
     // 2 = Hybrid (Grid L2 studio backbone + Classic L3 Wi-Fi/Mobile bridge)

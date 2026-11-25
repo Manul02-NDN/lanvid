@@ -347,6 +347,7 @@ void write_monitor_control(uint8_t* out, const MonitorControlPayload& mc) {
     store_le16(out + 10, mc.target_latency_ms);
     if (mc.op == MonitorControlOp::kHello) {
         std::memcpy(out + 12, mc.client_name, 16);
+        store_le64(out + 28, mc.active_channel_mask);
     } else if (mc.op == MonitorControlOp::kSetChannelMix) {
         store_f32_le(out + 12, mc.gain_db);
         store_f32_le(out + 16, mc.pan);
@@ -378,6 +379,8 @@ bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload&
     if (mc.op == MonitorControlOp::kHello) {
         std::memcpy(mc.client_name, in + 12, 16);
         mc.client_name[15] = '\0';
+        // Backward compatibility: older clients leave bytes 28..35 as 0 without kMonitorCapRxSubMask.
+        mc.active_channel_mask = (mc.reserved & kMonitorCapRxSubMask) ? load_le64(in + 28) : ~0ull;
     } else if (mc.op == MonitorControlOp::kSetChannelMix) {
         mc.gain_db = load_f32_le(in + 12);
         mc.pan = load_f32_le(in + 16);
@@ -393,6 +396,119 @@ bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload&
         mc.comp_release_ms = load_f32_le(in + 44);
         mc.comp_makeup_db = load_f32_le(in + 48);
         mc.master_volume_db = load_f32_le(in + 52);
+    }
+    return true;
+}
+
+size_t write_monitor_keepalive(uint8_t* out, size_t cap, const MonitorKeepAlivePayload& ka) {
+    if (!out || cap < kMonitorKeepAliveSize) return 0;
+    out[0] = 'L';
+    out[1] = 'V';
+    out[2] = 'K';
+    out[3] = 'A';
+    store_le32(out + 4, ka.client_id);
+    store_le64(out + 8, ka.active_channel_mask);
+    return kMonitorKeepAliveSize;
+}
+
+bool parse_monitor_keepalive(const uint8_t* in, size_t len, MonitorKeepAlivePayload& ka) {
+    if (!in || len < 4 || in[0] != 'L' || in[1] != 'V' || in[2] != 'K' || in[3] != 'A') return false;
+    if (len >= kMonitorKeepAliveSize) {
+        ka.client_id = load_le32(in + 4);
+        ka.active_channel_mask = load_le64(in + 8);
+    } else {
+        ka.client_id = 0;
+        ka.active_channel_mask = ~0ull;
+    }
+    return true;
+}
+
+size_t write_monitor_audio_flow(uint8_t* out, size_t cap, const MonitorAudioFlowHeader& fh,
+                                const uint8_t* const* ch_payloads, const uint16_t* ch_lengths) {
+    if (!out || !ch_payloads || !ch_lengths) return 0;
+    if (fh.channel_count == 0 || fh.channel_count > kMaxMonitorFlowChannels) return 0;
+    if (fh.num_samples == 0 || fh.sample_rate == 0) return 0;
+
+    const bool var_len = (fh.sample_format == AudioFormat2::kOpus) || ((fh.flags & kMonitorFlowFlagVarLen) != 0);
+    const size_t table_bytes = var_len ? (size_t(fh.channel_count) * 2u) : 0u;
+    size_t body_bytes = 0;
+    for (uint8_t i = 0; i < fh.channel_count; ++i) {
+        if (!ch_payloads[i] || ch_lengths[i] == 0) return 0;
+        body_bytes += ch_lengths[i];
+    }
+    const size_t total = kMonitorAudioFlowHeaderSize + table_bytes + body_bytes;
+    if (cap < total) return 0;
+
+    const uint8_t wire_flags = uint8_t(fh.flags | (var_len ? kMonitorFlowFlagVarLen : 0u));
+    store_le32(out + 0, fh.flow_seq);
+    store_le64(out + 4, fh.media_timestamp_samples);
+    store_le32(out + 12, fh.sample_rate);
+    store_le16(out + 16, fh.num_samples);
+    store_le16(out + 18, fh.channel_mask);
+    out[20] = uint8_t(fh.sample_format);
+    out[21] = wire_flags;
+    out[22] = fh.channel_count;
+    out[23] = fh.reserved;
+
+    size_t off = kMonitorAudioFlowHeaderSize;
+    if (var_len) {
+        for (uint8_t i = 0; i < fh.channel_count; ++i) {
+            store_le16(out + off, ch_lengths[i]);
+            off += 2;
+        }
+    }
+    for (uint8_t i = 0; i < fh.channel_count; ++i) {
+        std::memcpy(out + off, ch_payloads[i], ch_lengths[i]);
+        off += ch_lengths[i];
+    }
+    return total;
+}
+
+bool parse_monitor_audio_flow(const uint8_t* in, size_t len, MonitorAudioFlowHeader& fh,
+                              const uint8_t* out_ch_payloads[kMaxMonitorFlowChannels],
+                              uint16_t out_ch_lengths[kMaxMonitorFlowChannels]) {
+    if (!in || len < kMonitorAudioFlowHeaderSize) return false;
+    fh = MonitorAudioFlowHeader{};
+    fh.flow_seq = load_le32(in + 0);
+    fh.media_timestamp_samples = load_le64(in + 4);
+    fh.sample_rate = load_le32(in + 12);
+    fh.num_samples = load_le16(in + 16);
+    fh.channel_mask = load_le16(in + 18);
+    fh.sample_format = AudioFormat2(in[20]);
+    fh.flags = in[21];
+    fh.channel_count = in[22];
+    fh.reserved = in[23];
+
+    if (fh.channel_count == 0 || fh.channel_count > kMaxMonitorFlowChannels) return false;
+    if (fh.num_samples == 0 || fh.sample_rate == 0) return false;
+    if (uint8_t(fh.sample_format) < 1 || uint8_t(fh.sample_format) > 9) return false;
+
+    // Verify popcount(channel_mask) == channel_count
+    uint8_t pop = 0;
+    for (uint8_t b = 0; b < kMaxMonitorFlowChannels; ++b) {
+        if ((fh.channel_mask >> b) & 1u) ++pop;
+    }
+    if (pop != fh.channel_count) return false;
+
+    const bool var_len = (fh.flags & kMonitorFlowFlagVarLen) != 0;
+    size_t off = kMonitorAudioFlowHeaderSize;
+    if (var_len) {
+        if (len < off + size_t(fh.channel_count) * 2u) return false;
+        for (uint8_t i = 0; i < fh.channel_count; ++i) {
+            out_ch_lengths[i] = load_le16(in + off);
+            if (out_ch_lengths[i] == 0) return false;
+            off += 2;
+        }
+    } else {
+        const size_t fixed = audio2_payload_bytes(fh.sample_format, fh.num_samples);
+        if (fixed == 0 || fixed > 65535u) return false;
+        for (uint8_t i = 0; i < fh.channel_count; ++i) out_ch_lengths[i] = uint16_t(fixed);
+    }
+
+    for (uint8_t i = 0; i < fh.channel_count; ++i) {
+        if (off + out_ch_lengths[i] > len) return false;
+        out_ch_payloads[i] = in + off;
+        off += out_ch_lengths[i];
     }
     return true;
 }

@@ -17,7 +17,7 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms),
       matrix_(cfg.audio_sample_rate),
       arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
-          return has_sender_ && sock_.send_to(d, n, sender_ep_) == int(n);
+          return has_sender_ && sock_.send_to_qos(d, n, sender_ep_, QosTrafficClass::kSyncControl) == int(n);
       }),
       midi_dejitter_(cfg.audio_sample_rate) {
     arx_.set_latency_ms(cfg.audio_latency_ms);
@@ -73,7 +73,7 @@ void UdpReceiver::maybe_send_ping(uint64_t now) {
     h.timestamp_us = pp.t1_client_send_us;
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, pp_bytes, sizeof(pp_bytes));
-    if (n) sock_.send_to(dgram, n, sender_ep_);
+    if (n) sock_.send_to_qos(dgram, n, sender_ep_, QosTrafficClass::kSyncControl);
 }
 
 void UdpReceiver::maybe_send_feedback(uint64_t now) {

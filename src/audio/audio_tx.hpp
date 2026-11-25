@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -72,6 +73,17 @@ public:
     bool wire_pcm24() const { return codec_profile() == AudioCodecProfile::kPcm24; }
     AudioReliabilityProfile profile(AudioFormat2 fmt) const;
 
+    // Glitch-Free Wi-Fi Redundancy (1+1 Duplicate, Dante-inspired):
+    // Proactively sends an identical backup packet staggered by `stagger_us` (default 1.5 ms)
+    // — or onto an optional secondary subnet/interface (`set_secondary_send`) — eliminating NACK RTT
+    // stalls on isolated Wi-Fi packet drops. Receiver deduplicates instantly by `seq`.
+    void set_wifi_redundancy(bool enabled, uint32_t stagger_us = 1500);
+    bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
+    uint32_t wifi_redundancy_stagger_us() const { return dup_stagger_us_.load(std::memory_order_relaxed); }
+    void set_secondary_send(SendFn secondary_send);
+    // Flushes any queued 1+1 staggered duplicates whose due timestamp <= `now_wallclock_us`.
+    void service_redundancy(uint32_t now_wallclock_us);
+
     // Pushes samples of ONE channel (contiguous in `fmt`). `media_ts` is the master-clock position of
     // the first sample. Thread-safe per channel. Returns 0 or a negative LV_ErrorCode-style value.
     int push_channel(uint16_t channel, const void* samples, uint32_t num_samples, AudioFormat2 fmt,
@@ -87,12 +99,18 @@ public:
 
 private:
     struct Stream;
+    struct PendingDup {
+        uint32_t due_wc_us = 0;
+        std::vector<uint8_t> dgram;
+    };
     void emit_data(Stream& s, uint16_t ch, const uint8_t* samples, uint32_t n, AudioFormat2 fmt,
                    uint64_t ts, uint32_t wallclock_us, const AudioReliabilityProfile& prof);
     void emit_parity(Stream& s, uint16_t ch, uint32_t col, AudioFormat2 fmt, uint32_t n,
                      uint32_t wallclock_us);
     void send_payload(uint32_t seq, uint16_t stream, uint32_t wallclock_us, const uint8_t* payload,
                       size_t len);
+    void queue_staggered_duplicate(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
+                                   const uint8_t* payload, size_t len);
     void flush_stream(Stream& s, uint16_t ch, uint32_t wallclock_us);
     void reconfigure(Stream& s, const AudioReliabilityProfile& prof);
     void update_loss_estimate();
@@ -100,6 +118,11 @@ private:
     uint32_t rate_;
     size_t mtu_;
     SendFn send_;
+    mutable std::mutex dup_mu_;
+    SendFn secondary_send_;
+    std::deque<PendingDup> pending_dups_;
+    std::atomic<bool> wifi_redundancy_{false};
+    std::atomic<uint32_t> dup_stagger_us_{1500};  // 1.5 ms default time diversity
     std::atomic<uint32_t> latency_ms_{20};
     std::atomic<uint16_t> epoch_{0};
     std::atomic<uint8_t> codec_profile_{uint8_t(AudioCodecProfile::kPcm32F)};

@@ -69,6 +69,7 @@ bool UdpSocket::open() {
     WSAIoctl(s, kSioUdpConnreset, &new_behavior, sizeof(new_behavior), nullptr, 0, &bytes_returned,
              nullptr, nullptr);
     fd_ = uintptr_t(s);
+    cached_tos_.store(-1, std::memory_order_relaxed);
     return true;
 }
 
@@ -76,6 +77,7 @@ void UdpSocket::close() {
     if (!is_open()) return;
     ::closesocket(SOCKET(fd_));
     fd_ = INVALID_SOCKET;
+    cached_tos_.store(-1, std::memory_order_relaxed);
 }
 
 bool UdpSocket::bind(const std::string& ip, uint16_t port) {
@@ -108,12 +110,37 @@ void UdpSocket::set_buffer_sizes(int send_bytes, int recv_bytes) {
                      sizeof(recv_bytes));
 }
 
-bool UdpSocket::set_low_latency_qos() {
+bool UdpSocket::set_tos(int tos_value) const {
     if (!is_open()) return false;
-    // Windows ignores IP_TOS unless the "DisableUserTOSSetting" policy is off; it is still the
-    // portable way to request DSCP EF (qWAVE / Group Policy QoS can enforce it system-wide).
-    int tos = kDscpEfTos;
-    return ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_TOS, reinterpret_cast<const char*>(&tos), sizeof(tos)) == 0;
+    if (cached_tos_.load(std::memory_order_relaxed) == tos_value) return true;
+    int tos = tos_value;
+    const bool ok =
+        ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_TOS, reinterpret_cast<const char*>(&tos), sizeof(tos)) == 0;
+#if defined(IPV6_TCLASS)
+    int tclass = tos_value;
+    (void)::setsockopt(SOCKET(fd_), IPPROTO_IPV6, IPV6_TCLASS, reinterpret_cast<const char*>(&tclass), sizeof(tclass));
+#endif
+    if (ok) cached_tos_.store(tos_value, std::memory_order_relaxed);
+    return ok;
+}
+
+bool UdpSocket::set_qos_class(QosTrafficClass cls) const {
+    switch (cls) {
+        case QosTrafficClass::kSyncControl:
+            // Priority hierarchy: CS7 (0xE0) -> CS6 (0xC0) -> EF (0xB8, highest unprivileged WMM AC_VO on Windows).
+            return set_tos(kDscpCs7Tos) || set_tos(kDscpCs6Tos) || set_tos(kDscpEfTos);
+        case QosTrafficClass::kAudio:
+            return set_tos(kDscpEfTos);
+        case QosTrafficClass::kVideo:
+            return set_tos(kDscpAf41Tos);
+        case QosTrafficClass::kBestEffort:
+        default:
+            return set_tos(0);
+    }
+}
+
+bool UdpSocket::set_low_latency_qos() {
+    return set_qos_class(QosTrafficClass::kAudio);
 }
 
 int UdpSocket::tos() const {
@@ -157,6 +184,16 @@ int UdpSocket::send_to(const uint8_t* data, size_t len, const Endpoint& dst) con
     const int n = ::sendto(SOCKET(fd_), reinterpret_cast<const char*>(data), int(len), 0,
                            reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
     return n == SOCKET_ERROR ? -1 : n;
+}
+
+int UdpSocket::send_to_qos(const uint8_t* data, size_t len, const Endpoint& dst, QosTrafficClass cls) const {
+    (void)set_qos_class(cls);
+    return send_to(data, len, dst);
+}
+
+int UdpSocket::send_batch_qos(const DatagramView* msgs, int count, const Endpoint& dst, QosTrafficClass cls) const {
+    (void)set_qos_class(cls);
+    return send_batch(msgs, count, dst);
 }
 
 int UdpSocket::recv_from(uint8_t* buf, size_t cap, Endpoint& src) const {

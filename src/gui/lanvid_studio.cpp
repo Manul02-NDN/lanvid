@@ -610,6 +610,8 @@ void LanVidStudioApp::init() {
     // so smartphones running LanVid Monitor discover and connect immediately on launch.
     const std::string studio_label = "LanVid Studio (" + local_host_name() + ")";
     monitor_server_.set_studio_name(studio_label);
+    monitor_server_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+    tally_intercom_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
     bool mon_ok = monitor_server_.start(kDefaultMonitorPort, "0.0.0.0", kDefaultMonitorDiscoveryPort);
     if (!mon_ok) {
         for (uint16_t p = 5023; p <= 5030 && !mon_ok; ++p) {
@@ -921,6 +923,7 @@ void LanVidStudioApp::start_sender() {
     if (lv_sender_start(sender_, &sc)) {
         sender_running_ = true;
         lv_sender_set_midi_only(sender_, cfg_.midi_only ? 1 : 0);
+        lv_sender_set_wifi_redundancy(sender_, cfg_.wifi_redundancy ? 1 : 0, 1500);
         if (!cfg_.midi_only && cfg_.aoip_tone && cfg_.aoip_source == 0) start_tone();
         if (!cfg_.midi_only && cfg_.aoip_source == 1) start_vdev_tx();
         broadcast_control_sync();  // Automatic handshake on start
@@ -1114,6 +1117,7 @@ void LanVidStudioApp::start_duplex() {
     duplex_running_ = rc == LV_OK;
     if (duplex_running_) {
         if (cfg_.audio_bitrate_kbps > 0) lv_duplex_set_audio_bitrate(duplex_, cfg_.audio_bitrate_kbps);
+        lv_duplex_set_wifi_redundancy(duplex_, cfg_.wifi_redundancy ? 1 : 0, 1500);
         lv_audio_set_tx_routing(duplex_, route_[0]);
         lv_audio_set_rx_routing(duplex_, route_[1]);
         broadcast_control_sync();  // Automatic handshake on start
@@ -1851,6 +1855,26 @@ void LanVidStudioApp::draw_mobile_monitor_section() {
                             unsigned(monitor_server_.discovery_port()),
                             static_cast<unsigned long long>(monitor_server_.total_control_rx()),
                             static_cast<unsigned long long>(monitor_server_.discovery_replies()));
+        if (studio_toggle("##MonWifiRedund", &cfg_.wifi_redundancy, kColAccentInd)) {
+            monitor_server_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+            tally_intercom_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+            if (sender_) lv_sender_set_wifi_redundancy(sender_, cfg_.wifi_redundancy ? 1 : 0, 1500);
+            if (duplex_running_) lv_duplex_set_wifi_redundancy(duplex_, cfg_.wifi_redundancy ? 1 : 0, 1500);
+            config_dirty_ = true;
+            toast_msg_ = cfg_.wifi_redundancy
+                             ? "Wi-Fi Redundancy (1+1 Duplicate · +1.5 мс) увімкнено"
+                             : "Wi-Fi Redundancy (1+1 Duplicate) вимкнено";
+            toast_until_us_ = now_us() + 2600000ull;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(cfg_.wifi_redundancy ? kColAccentInd : kColTextMain,
+                           "Wi-Fi Redundancy (1+1 Duplicate)");
+        if (monitor_server_.flow_packets_tx() > 0 || monitor_server_.dup_packets_tx() > 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("Flow: %llu · Dup: %llu",
+                                static_cast<unsigned long long>(monitor_server_.flow_packets_tx()),
+                                static_cast<unsigned long long>(monitor_server_.dup_packets_tx()));
+        }
         if (phones.empty()) {
             ImGui::TextDisabled("  Очікування підключення смартфонів (%s:%u)...",
                                 local_lan_ip_.c_str(), unsigned(monitor_server_.bound_port()));
@@ -4495,6 +4519,22 @@ void LanVidStudioApp::draw_settings_tab() {
     ImGui::Spacing();
     draw_stream_mode_selector("SetStreamMode");
     ImGui::TextDisabled("«Тільки MIDI» вимикає аудіо/відео трафік і вмикає ультранизьку затримку ~1.5 мс");
+
+    ImGui::Spacing();
+    if (studio_toggle("##SetWifiRedund", &cfg_.wifi_redundancy, kColAccentInd)) {
+        monitor_server_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+        tally_intercom_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+        if (sender_) lv_sender_set_wifi_redundancy(sender_, cfg_.wifi_redundancy ? 1 : 0, 1500);
+        if (duplex_running_) lv_duplex_set_wifi_redundancy(duplex_, cfg_.wifi_redundancy ? 1 : 0, 1500);
+        config_dirty_ = true;
+        toast_msg_ = cfg_.wifi_redundancy
+                         ? "Wi-Fi Redundancy (1+1 Duplicate · +1.5 мс) увімкнено — 0 NACK-пауз при втратах Wi-Fi"
+                         : "Wi-Fi Redundancy (1+1 Duplicate) вимкнено";
+        toast_until_us_ = now_us() + 2800000ull;
+    }
+    ImGui::SameLine();
+    ImGui::TextColored(kColTextMain, "Wi-Fi Redundancy (1+1 Duplicate · +1.5 мс)");
+    ImGui::TextDisabled("Проактивно дублює аудіо, Tally та Intercom пакети (+1.5 мс, DSCP CS7/EF) — без пауз NACK");
 
     ImGui::Spacing();
     if (studio_toggle("##SetFbGuard", &cfg_.matrix_feedback_guard, kColAccentPurp)) {

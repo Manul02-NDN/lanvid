@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -160,6 +161,8 @@ struct MonitorClientInfo {
     bool connected = false;
     uint64_t packets_tx = 0;
     uint64_t control_rx = 0;
+    uint64_t active_channel_mask = ~0ull;  // Receiver-Driven Subscription bitmask
+    bool flow_enabled = false;
 };
 
 constexpr uint16_t kDefaultMonitorDiscoveryPort = 5021;
@@ -215,11 +218,32 @@ public:
     // Pacer (dedicated real-time send thread) statistics, for tests / diagnostics.
     uint64_t paced_chunks() const { return paced_chunks_.load(std::memory_order_relaxed); }
     uint64_t ring_overflows() const { return ring_overflows_.load(std::memory_order_relaxed); }
-    static constexpr uint32_t kPaceTickUs = 2500;   // pacer period
+
+    // Dante-inspired Wi-Fi Redundancy (1+1 Duplicate with +1.5 ms time stagger, zero NACK wait)
+    void set_wifi_redundancy(bool enabled, uint32_t stagger_us = 1500);
+    bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
+
+    // Dante-style Multi-Channel Monitor Flows (kMonitorAudioFlow: pack 2..16 active subscribed channels
+    // into ONE compact UDP datagram) + Receiver-Driven Subscriptions (active_channel_mask).
+    void set_multichannel_flow(bool enabled, uint8_t flow_channels = 2);
+    bool multichannel_flow() const { return multichannel_flow_.load(std::memory_order_acquire); }
+    uint8_t multichannel_flow_channels() const { return flow_channels_.load(std::memory_order_relaxed); }
+
+    uint64_t flow_packets_tx() const { return flow_tx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t dup_packets_tx() const { return dup_tx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t muted_packets_suppressed() const { return muted_suppressed_.load(std::memory_order_relaxed); }
+
+    static constexpr uint32_t kPaceTickUs = 2500;   // pacer period (drops to 1000 us when 1+1 redundancy active)
     static constexpr uint32_t kPaceChunk = 120;     // frames per pacer step (2.5 ms @ 48 kHz)
     static constexpr uint32_t kPaceRingFrames = 16384;
 
 private:
+    struct PendingFlowDup {
+        uint64_t due_us = 0;
+        int slot_idx = -1;
+        Endpoint dst{};
+        std::vector<uint8_t> dgram;
+    };
     struct ClientSlot {
         bool active = false;
         uint32_t client_id = 0;
@@ -228,6 +252,9 @@ private:
         uint16_t bitrate_kbps = 256;
         uint16_t latency_ms = 20;
         bool server_muted = false;
+        bool client_supports_flow = false;
+        uint64_t active_channel_mask = ~0ull;  // Receiver-Driven Subscription bitmask
+        uint32_t flow_seq = 0;
         uint64_t last_seen_us = 0;
         uint64_t packets_tx = 0;
         uint64_t control_rx = 0;
@@ -238,13 +265,25 @@ private:
         // Paced send ring: the mixer writes processed stereo blocks (any size, e.g. 1024 frames), the
         // pacer thread drains them in 2.5 ms pieces on a steady clock -> one packet every 5 ms, no bursts.
         std::vector<float> ring_l, ring_r;
+        // Optional multi-channel direct flow rings (up to 16 channels when flow_channels > 2)
+        std::array<std::vector<float>, kMaxMonitorFlowChannels> flow_rings;
+        // Opaque per-channel Opus encoders for compact kMonitorAudioFlow encoding (destroyed in stop/reset)
+        std::array<void*, kMaxMonitorFlowChannels> flow_opus{};
+        int flow_opus_bps = 0;
         uint64_t ring_wr = 0;  // frames written (== media timestamp of the next written frame)
-        uint64_t ring_rd = 0;  // frames handed to the AudioTxEngine
+        uint64_t ring_rd = 0;  // frames handed to the AudioTxEngine / Flow emitter
         double credit = 0.0;   // frames the pacer may send now
         bool primed = false;   // one mixer block queued before the first send
+        uint64_t flow_stage_ts = 0;
+        uint32_t flow_stage_n = 0;
+        std::array<std::vector<float>, kMaxMonitorFlowChannels> flow_stage;
     };
     void pacer_loop();
     void pace_tick_locked(double dt_us);
+    void flush_flow_dups_locked(uint64_t now);
+    void emit_monitor_flow_locked(ClientSlot& s, int slot_idx, uint8_t flow_ch, uint32_t samples,
+                                  uint64_t media_ts, uint64_t now);
+    void destroy_slot_flow_codecs_locked(ClientSlot& s);
     void apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps);
 
     int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep);
@@ -257,12 +296,20 @@ private:
     uint16_t disc_port_ = 0;
     std::string studio_name_ = "LanVid Studio";
     std::atomic<bool> running_{false};
+    std::atomic<bool> wifi_redundancy_{false};
+    std::atomic<uint32_t> dup_stagger_us_{1500};
+    std::atomic<bool> multichannel_flow_{true};
+    std::atomic<uint8_t> flow_channels_{2};
     std::atomic<uint64_t> total_control_rx_{0};
     std::atomic<uint64_t> discovery_replies_{0};
+    std::atomic<uint64_t> flow_tx_pkts_{0};
+    std::atomic<uint64_t> dup_tx_pkts_{0};
+    std::atomic<uint64_t> muted_suppressed_{0};
     UdpSocket sock_;
     UdpSocket disc_sock_;
     mutable std::mutex mu_;
     std::array<ClientSlot, kMaxMonitorClients> slots_{};
+    std::deque<PendingFlowDup> flow_dups_;
     std::array<std::string, kMonitorMaxInputChannels> ch_names_{};
     std::array<int8_t, kMonitorMaxInputChannels> ch_peaks_dbfs_{};
     uint8_t active_in_channels_ = 0;
@@ -301,10 +348,20 @@ public:
 
     // Pops decoded stereo interleaved float32 audio (2 channels, `frames` stereo frames).
     void pop_stereo(float* out_interleaved, uint32_t frames);
+    // Pops decoded multi-channel planar float32 audio (up to 16 flow channels).
+    void pop_multichannel(float* const* out_planes, uint32_t num_channels, uint32_t frames);
+
+    // Receiver-Driven Subscriptions: explicit bitmask or automatically derived from set_channel_mix Mute/Solo.
+    void set_active_channel_mask(uint64_t mask);
+    uint64_t active_channel_mask() const { return active_channel_mask_.load(std::memory_order_acquire); }
+    uint16_t last_rx_channel_mask() const { return last_rx_flow_mask_.load(std::memory_order_relaxed); }
 
     std::vector<MonitorMetaChannel> last_meta() const;
     MonitorBusTelemetry last_bus_telemetry() const;
     uint64_t audio_packets_rx() const { return audio_rx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t flow_packets_rx() const { return flow_rx_pkts_.load(std::memory_order_relaxed); }
+    uint64_t flow_duplicates_dropped() const { return flow_dup_drops_.load(std::memory_order_relaxed); }
+    uint64_t nacks_sent() const { return arx_.total_nacks_sent(); }
     uint64_t meta_packets_rx() const { return meta_rx_pkts_.load(std::memory_order_relaxed); }
     // Real playout delay of the jitter buffer (one-way-clock position minus playout cursor): steady at the
     // chosen buffer (+ any learned cushion), not the burst-to-burst arrival difference.
@@ -312,14 +369,38 @@ public:
     uint64_t underruns() const { return matrix_.total_underruns(); }
     uint64_t prefill_events() const { return matrix_.prefill_events(); }
     uint64_t wake_pings_sent() const { return pings_.load(std::memory_order_relaxed); }
-    // Interval of the tiny keep-awake datagram sent while connected (stops Wi-Fi power save from batching
-    // incoming audio for 20-100 ms). Default 15 ms; 0 disables.
+    // Interval of the compact keep-alive + Rx Subscription datagram sent while connected (15 ms).
     static constexpr uint64_t kWakePingUs = 15'000;
 
 private:
     bool send_control(const MonitorControlPayload& mc);
+    bool send_keepalive_ping(uint64_t now);
+    void recompute_active_channel_mask();
+    void handle_flow_packet(const PacketHeader& h, const uint8_t* payload, size_t len, uint64_t now);
+    void flow_one_way_observe(double media_end_us, uint64_t now);
+    void destroy_flow_decoders();
     std::atomic<uint64_t> last_tx_us_{0};
     std::atomic<uint64_t> pings_{0};
+    std::atomic<uint64_t> active_channel_mask_{~0ull};
+    std::atomic<uint16_t> last_rx_flow_mask_{0};
+    std::atomic<uint64_t> flow_rx_pkts_{0};
+    std::atomic<uint64_t> flow_dup_drops_{0};
+    bool mask_override_ = false;
+    std::array<PersonalMonitorChannelMix, kMonitorMaxInputChannels> local_mix_{};
+    // Instant seq deduplication ring for kMonitorAudioFlow (4096-bit window)
+    static constexpr uint32_t kFlowDupWindow = 4096;
+    bool flow_seen_ = false;
+    uint32_t flow_highest_ = 0;
+    std::array<uint64_t, kFlowDupWindow / 64> flow_recv_bits_{};
+    // One-way clock observer for kMonitorAudioFlow packets
+    bool flow_ow_have_ = false;
+    double flow_ow_applied_ = 0.0;
+    double flow_ow_win_[4] = {0, 0, 0, 0};
+    double flow_ow_cur_ = -1e300;
+    uint64_t flow_ow_win_start_ = 0;
+    int flow_ow_win_n_ = 0;
+    std::array<void*, kMaxMonitorFlowChannels> flow_opus_dec_{};
+    std::vector<float> flow_dec_scratch_;
 
     uint32_t sample_rate_ = 48000;
     uint32_t client_id_ = 0;

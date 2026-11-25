@@ -21,8 +21,10 @@
 #include "audio/audio_rx.hpp"
 #include "audio/audio_sync_matrix.hpp"
 #include "audio/audio_tx.hpp"
+#include "audio/intercom_engine.hpp"
 #include "audio/master_clock.hpp"
 #include "net/packet.hpp"
+#include "net/udp_socket.hpp"
 #include <algorithm>
 #include <map>
 #include <random>
@@ -669,4 +671,308 @@ TEST(monitor_wifi_loss_and_burst_no_prefill_freeze_and_nack_plc) {
                 static_cast<unsigned long long>(mat.prefill_events()));
     CHECK(max_lat_ms < 120.0);         // NEVER blows up to 294.8 ms!
     CHECK(prefills_during_loss <= 1);  // Mid-stream 4% loss does NOT trigger false prefill halts!
+}
+
+// Dante-inspired Wi-Fi Stability & Low Latency:
+// 5% random Wi-Fi packet loss with 1+1 Duplicate (+1.5 ms stagger) + Deterministic Timestamp-Driven
+// Playout (8 ms target, +/-0.1% micro-rate trim, +80 ppm consumer clock drift):
+// Must achieve 0 NACK retransmissions, 0 dropouts/discontinuities, and rock-steady 5..10 ms latency!
+TEST(monitor_wifi_redundancy_1plus1_5pct_loss_zero_nack_zero_glitches) {
+    constexpr uint32_t kRate = 48000;
+    constexpr uint32_t kStep = 120;  // 2.5 ms push -> 5 ms Opus CELT packets
+    constexpr uint32_t kPop = 128;   // audio callback block
+    constexpr double kDrift = 80e-6; // +80 ppm receiver crystal drift
+
+    lv::MasterClock clk;
+    constexpr int64_t kOff = 4'000'000;
+    clk.set_fixed_offset(kOff);
+
+    lv::AudioSyncMatrix mat(kRate);
+    mat.set_target_latency_ms(9);                     // 9 ms deterministic target (within 5..10 ms)
+    mat.set_deterministic_playout(true, 1000.0);      // +/-0.1% (+/-1000 ppm) micro-rate trim, no cushion growth
+
+    lv::AudioRxEngine rx(mat, clk, [](const uint8_t*, size_t) { return true; });
+    rx.set_latency_ms(9);
+    rx.set_adaptive_jitter_enabled(false);
+
+    std::multimap<double, std::vector<uint8_t>> wire;
+    std::mt19937 rng(20261125);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    double true_us = 1'000'000.0;
+    // MasterClock is PTP-locked to the sender timeline (`true_us`), while the receiver audio hardware
+    // playback crystal runs +80 ppm fast (`pop_period`), exercising +/-0.1% micro-rate trim!
+    auto clk_now_us = [&]() -> uint64_t { return uint64_t(true_us); };
+
+    // Track primary drops per (stream_id, seq) to model 5% random isolated Wi-Fi interference (< 1.5 ms)
+    std::map<uint64_t, bool> primary_dropped;
+    uint64_t total_sent = 0, dropped_primary = 0, dropped_dup = 0;
+
+    lv::AudioTxEngine tx(kRate, lv::kDefaultMtu, [&](const uint8_t* d, size_t n) {
+        ++total_sent;
+        lv::PacketHeader h{};
+        const uint8_t* pl = nullptr;
+        lv::AudioHeader2 ah{};
+        bool is_dup = false;
+        uint64_t key = 0;
+        if (lv::parse_packet(d, n, h, &pl) == lv::PacketParseStatus::kOk &&
+            h.type == lv::PacketType::kAudio2 &&
+            lv::parse_audio_header2(pl, h.payload_size, ah)) {
+            is_dup = (ah.flags & lv::kAudioFlagDuplicate) != 0;
+            key = (uint64_t(ah.stream_id) << 32) | uint64_t(h.frame_id);
+        }
+        // 5% random packet loss across the Wi-Fi link (isolated interference shorter than 1.5 ms stagger)
+        if (!is_dup) {
+            if (u01(rng) < 0.05) {
+                primary_dropped[key] = true;
+                ++dropped_primary;
+                return true;
+            }
+        } else {
+            auto it = primary_dropped.find(key);
+            const bool need_backup = (it != primary_dropped.end());
+            if (need_backup) {
+                primary_dropped.erase(it);
+            } else if (u01(rng) < 0.05) {
+                ++dropped_dup;
+                return true;
+            }
+        }
+        const double air_us = 800.0 + double(rng() % 1400);  // 0.8..2.2 ms Wi-Fi transit jitter
+        wire.insert({true_us + air_us, std::vector<uint8_t>(d, d + n)});
+        return true;
+    });
+    tx.set_latency_ms(9);
+    tx.set_codec_profile(lv::audio_codec_profile_from_bitrate(128));  // 256 kbps stereo Opus (2.5 ms CELT frames)
+    tx.set_wifi_redundancy(true, 1500);                               // 1+1 Duplicate (+1.5 ms stagger)
+
+    const double send_period = 1e6 * double(kStep) / double(kRate);
+    const double pop_period = 1e6 * double(kPop) / (double(kRate) * (1.0 + kDrift));
+    double next_send = true_us;
+    double next_pop = true_us + 25'000.0;
+    const double end_us = true_us + 10'000'000.0;  // 10 s virtual-time test
+    const double warm_us = true_us + 1'000'000.0;
+
+    std::vector<float> blk(kStep);
+    std::vector<float> out(kPop * 2);
+    float prev = 0.0f, max_step = 0.0f;
+    uint64_t big_steps = 0, zero_run = 0, max_zero_run = 0, und0 = 0, resync0 = 0;
+    double lat_min = 1e9, lat_max = 0.0;
+    bool measuring = false;
+
+    while (true_us < end_us) {
+        const double next_tick = std::min({next_send, next_pop, true_us + 200.0});
+        true_us = next_tick;
+        if (true_us >= next_send) {
+            const uint64_t ts0 = uint64_t((int64_t(true_us) + kOff) * int64_t(kRate) / 1'000'000) - kStep;
+            for (uint32_t i = 0; i < kStep; ++i) {
+                blk[i] = 0.5f * float(std::sin(2.0 * 3.141592653589793 * 440.0 * double(ts0 + i) / double(kRate)));
+            }
+            tx.push_channel(0, blk.data(), kStep, lv::AudioFormat2::kFloat32, ts0, uint32_t(true_us));
+            tx.push_channel(1, blk.data(), kStep, lv::AudioFormat2::kFloat32, ts0, uint32_t(true_us));
+            next_send += send_period;
+        }
+        tx.service_redundancy(uint32_t(true_us));
+
+        while (!wire.empty() && wire.begin()->first <= true_us) {
+            auto dg = std::move(wire.begin()->second);
+            wire.erase(wire.begin());
+            lv::PacketHeader h{};
+            const uint8_t* pl = nullptr;
+            if (lv::parse_packet(dg.data(), dg.size(), h, &pl) == lv::PacketParseStatus::kOk &&
+                h.type == lv::PacketType::kAudio2) {
+                rx.on_packet(h, pl, h.payload_size, clk_now_us());
+            }
+        }
+        rx.service(clk_now_us());
+
+        if (true_us >= next_pop) {
+            mat.pop_interleaved(clk, clk_now_us(), out.data(), 2, kPop);
+            next_pop += pop_period;
+            if (!measuring && true_us >= warm_us) {
+                measuring = true;
+                und0 = mat.total_underruns();
+                resync0 = mat.resync_count();
+                prev = out[2 * (kPop - 1)];
+            } else if (measuring) {
+                for (uint32_t i = 0; i < kPop; ++i) {
+                    const float v = out[2 * i];
+                    const float st = std::fabs(v - prev);
+                    max_step = std::max(max_step, st);
+                    if (st > 0.20f) ++big_steps;
+                    zero_run = (v == 0.0f) ? (zero_run + 1) : 0;
+                    max_zero_run = std::max(max_zero_run, zero_run);
+                    prev = v;
+                }
+                const double lat = mat.current_effective_latency_ms();
+                lat_min = std::min(lat_min, lat);
+                lat_max = std::max(lat_max, lat);
+            } else {
+                prev = out[2 * (kPop - 1)];
+            }
+        }
+    }
+
+    const uint64_t und = mat.total_underruns() - und0;
+    const uint64_t resyncs = mat.resync_count() - resync0;
+    const double loss_pct = 100.0 * double(dropped_primary + dropped_dup) / double(std::max<uint64_t>(1, total_sent));
+    std::printf("    [dante 1+1 wifi 5%% loss] sent=%llu drop_pri=%llu drop_dup=%llu (%.2f%%) | "
+                "nacks=%llu dedup=%llu underruns=%llu big_steps=%llu resyncs=%llu | "
+                "lat=%.2f..%.2f ms cushion=%.1f ms ppm=%.0f\n",
+                (unsigned long long)total_sent, (unsigned long long)dropped_primary, (unsigned long long)dropped_dup,
+                loss_pct, (unsigned long long)rx.total_nacks_sent(), (unsigned long long)rx.total_duplicates(),
+                (unsigned long long)und, (unsigned long long)big_steps, (unsigned long long)resyncs,
+                lat_min, lat_max, mat.fixed_cushion_ms(), mat.resample_ppm());
+
+    CHECK(dropped_primary >= 250);               // genuine ~5% primary loss actually occurred
+    CHECK(rx.total_nacks_sent() == 0);           // 0 NACK retransmissions needed!
+    CHECK(rx.total_duplicates() >= 3000);        // receiver deduplicated +1.5 ms backup copies instantly
+    CHECK(und == 0);                             // 0 audio dropouts
+    CHECK(big_steps == 0);                       // 0 waveform glitches/clicks
+    CHECK(max_zero_run < 8);                     // 0 silence holes
+    CHECK(resyncs == 0);                         // deterministic playout stayed locked without jumps
+    CHECK(mat.fixed_cushion_ms() == 0.0);        // never expanded buffer cushion
+    CHECK(lat_min >= 5.0 && lat_max <= 10.5);    // locked steadily around 9 ms target (5..10 ms)
+    CHECK(std::fabs(mat.resample_ppm()) >= 30.0 && std::fabs(mat.resample_ppm()) <= 1000.1);  // active +/-0.1% trim!
+}
+
+// Dante-inspired Multi-Channel UDP Flows (kMonitorAudioFlow), Receiver-Driven Subscriptions
+// (active_channel_mask in 15 ms LVKA), Differentiated DSCP QoS (CS7/EF/AF41), and Tally/Intercom 1+1 Dedup.
+TEST(monitor_dante_multichannel_flow_subscriptions_and_dscp_qos) {
+    // 1. Differentiated DSCP QoS verification on UdpSocket
+    {
+        lv::UdpSocket s;
+        REQUIRE(s.open());
+        REQUIRE(s.bind("127.0.0.1", 0));
+        s.set_qos_class(lv::QosTrafficClass::kVideo);
+        CHECK(s.tos() == lv::UdpSocket::kDscpAf41Tos);
+        s.set_qos_class(lv::QosTrafficClass::kSyncControl);
+        // Elevated/POSIX: CS7 (0xE0) or CS6 (0xC0); non-admin Windows falls back cleanly to EF (0xB8, WMM AC_VO).
+        CHECK(s.tos() == lv::UdpSocket::kDscpCs7Tos || s.tos() == lv::UdpSocket::kDscpCs6Tos ||
+              s.tos() == lv::UdpSocket::kDscpEfTos);
+        s.set_qos_class(lv::QosTrafficClass::kAudio);
+        CHECK(s.tos() == lv::UdpSocket::kDscpEfTos);
+        s.set_qos_class(lv::QosTrafficClass::kVideo);
+        CHECK(s.tos() == lv::UdpSocket::kDscpAf41Tos);
+        s.close();
+    }
+
+    // 2. Multi-Channel UDP Flow (8ch in ONE compact packet) + 1+1 Wi-Fi Redundancy + Rx Subscriptions
+    constexpr int kCh = 8;
+    constexpr uint32_t kBlk = 240;
+    lv::PersonalMonitorServer srv(48000);
+    srv.set_multichannel_flow(true, kCh);
+    srv.set_wifi_redundancy(true, 1500);
+    REQUIRE(srv.start(0, "127.0.0.1", 0));
+
+    std::atomic<bool> stop{false};
+    std::thread mixer([&] {
+        std::vector<std::vector<float>> pl(kCh, std::vector<float>(kBlk));
+        const float* pp[kCh];
+        for (int c = 0; c < kCh; ++c) pp[c] = pl[c].data();
+        uint64_t pos = 0;
+        uint64_t next = lv::now_us();
+        while (!stop.load(std::memory_order_relaxed)) {
+            srv.poll_control();
+            for (int c = 0; c < kCh; ++c) {
+                for (uint32_t i = 0; i < kBlk; ++i) {
+                    pl[c][i] = 0.4f * float(std::sin(2.0 * 3.141592653589793 * (220.0 + 55.0 * c) *
+                                                     double(pos + i) / 48000.0));
+                }
+            }
+            srv.process_and_send(pp, kCh, kBlk);
+            pos += kBlk;
+            next += 5000;
+            lv::sleep_until_us(next, [] {});
+        }
+    });
+
+    lv::PersonalMonitorClient cli(48000);
+    REQUIRE(cli.connect("127.0.0.1", srv.bound_port(), "Dante-Flow-Phone", 256, 8));
+
+    // Phase A: receive all 8 channels packed into single kMonitorAudioFlow UDP datagrams + 1+1 duplicates
+    auto poll_for = [&](int ms) {
+        const uint64_t until = lv::now_us() + uint64_t(ms) * 1000ull;
+        while (lv::now_us() < until) {
+            cli.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    poll_for(280);
+    const uint16_t mask_all = cli.last_rx_channel_mask();
+    const uint64_t flow_rx_a = cli.flow_packets_rx();
+    const uint64_t dup_drops_a = cli.flow_duplicates_dropped();
+    const uint64_t dup_tx_a = srv.dup_packets_tx();
+
+    // Verify planar multi-channel audio pop receives non-silent data on channel 5
+    std::vector<std::vector<float>> out_pl(kCh, std::vector<float>(240, 0.0f));
+    float* out_ptrs[kCh];
+    for (int c = 0; c < kCh; ++c) out_ptrs[c] = out_pl[c].data();
+    cli.pop_multichannel(out_ptrs, kCh, 240);
+    float peak_ch5 = 0.0f;
+    for (float s : out_pl[5]) peak_ch5 = std::max(peak_ch5, std::fabs(s));
+
+    // Phase B: Receiver-Driven Subscription — Solo channel 2 only (bit 2 = 0x0004)
+    REQUIRE(cli.set_channel_mix(2, lv::PersonalMonitorChannelMix{0.0f, 0.0f, /*mute=*/false, /*solo=*/true}));
+    poll_for(140);
+    const uint16_t mask_solo = cli.last_rx_channel_mask();
+    const auto clist = srv.clients();
+    const uint64_t srv_mask_solo = clist.empty() ? ~0ull : clist[0].active_channel_mask;
+
+    // Phase C: Mute all channels (active_channel_mask == 0) -> server suppresses Wi-Fi TX completely!
+    cli.set_active_channel_mask(0);
+    poll_for(140);
+    const uint64_t suppressed = srv.muted_packets_suppressed();
+
+    stop.store(true, std::memory_order_relaxed);
+    mixer.join();
+    cli.disconnect();
+    srv.stop();
+
+    // 3. Tally & Intercom 1+1 Duplicate (+1.5 ms) + instant seq dedup verification
+    lv::TallyIntercomEngine studio_ti, cam_ti;
+    studio_ti.set_wifi_redundancy(true, 1500);
+    cam_ti.set_wifi_redundancy(true, 1500);
+    REQUIRE(studio_ti.start_studio(0, "127.0.0.1"));
+    REQUIRE(cam_ti.start_camera("127.0.0.1", studio_ti.bound_port(), 1, "CAM-1"));
+    for (int i = 0; i < 15; ++i) {
+        cam_ti.poll();
+        studio_ti.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    studio_ti.studio_set_camera_tally(1, lv::kTallyProgram, "CAM-1", true);
+    studio_ti.studio_set_camera_intercom(1, true, true, true);
+    studio_ti.set_intercom_state(true, false, 1.0f, 0.0f);
+    std::vector<float> voice(lv::kIntercomFrameSamples, 0.25f);
+    for (int i = 0; i < 12; ++i) {
+        studio_ti.push_mic_pcm(voice.data(), lv::kIntercomFrameSamples);
+        for (int k = 0; k < 5; ++k) {
+            studio_ti.poll();
+            cam_ti.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    const uint64_t ti_tx = studio_ti.intercom_tx_packets();
+    const uint64_t ti_dup_drop = cam_ti.intercom_duplicates_dropped();
+    cam_ti.stop();
+    studio_ti.stop();
+
+    std::printf("    [dante flow+sub+qos] 8ch_mask=0x%04X solo_mask=0x%04X (srv=0x%llX) | "
+                "flow_rx=%llu dup_tx=%llu dup_drop=%llu suppressed=%llu ch5_pk=%.3f | "
+                "intercom tx=%llu dup_drop=%llu\n",
+                unsigned(mask_all), unsigned(mask_solo), (unsigned long long)srv_mask_solo,
+                (unsigned long long)flow_rx_a, (unsigned long long)dup_tx_a, (unsigned long long)dup_drops_a,
+                (unsigned long long)suppressed, peak_ch5,
+                (unsigned long long)ti_tx, (unsigned long long)ti_dup_drop);
+
+    CHECK(flow_rx_a >= 15);
+    CHECK(mask_all == 0x00FFu);              // all 8 channels packed into ONE UDP packet
+    CHECK(dup_tx_a >= 15);                   // 1+1 duplicates transmitted
+    CHECK(dup_drops_a >= 10);                // instant seq deduplication on client
+    CHECK(cli.nacks_sent() == 0);            // zero NACKs
+    CHECK(peak_ch5 > 0.05f);                 // decoded multi-channel audio is live
+    CHECK(mask_solo == 0x0004u);             // Solo ch2 -> ONLY ch2 transmitted over Wi-Fi!
+    CHECK(srv_mask_solo == 0x0004ull);       // server received updated mask via 15 ms LVKA
+    CHECK(suppressed >= 5);                  // active_channel_mask == 0 suppresses TX
+    CHECK(ti_tx >= 10);                      // Tally/Intercom frames transmitted
+    CHECK(ti_dup_drop >= 5);                 // Intercom +1.5 ms duplicate instant seq dedup active
 }

@@ -1,6 +1,7 @@
 #include "audio/audio_rx.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 
@@ -179,13 +180,24 @@ struct AudioRxEngine::Stream {
     bool has_transit = false;
     int32_t prev_transit = 0;
     double jitter = 0.0;
+    bool saw_wifi_dup = false;  // true once proactive 1+1 duplicates are observed on this stream
 
     std::atomic<uint64_t> rx{0}, lost{0}, fec_rec{0}, nack_rec{0}, nacks_sent{0}, dups{0}, late{0};
     std::atomic<uint32_t> jitter_us{0};
     std::atomic<bool> seen_pub{false};
 
 #ifdef LV_HAVE_OPUS
+    struct PendingOpus {
+        bool valid = false;
+        uint32_t seq = 0;
+        AudioHeader2 hdr{};
+        std::vector<uint8_t> bytes;
+    };
+    static constexpr uint32_t kOpusReorderSlots = 16;
     OpusDecoder* opus_dec = nullptr;
+    bool opus_seq_init = false;
+    uint32_t opus_next_seq = 0;
+    std::array<PendingOpus, kOpusReorderSlots> opus_pending{};
     ~Stream() {
         if (opus_dec) {
             opus_decoder_destroy(opus_dec);
@@ -219,9 +231,13 @@ struct AudioRxEngine::Stream {
         has_transit = false;
         prev_transit = 0;
         jitter = 0.0;
+        saw_wifi_dup = false;
         jitter_us.store(0, std::memory_order_relaxed);
 #ifdef LV_HAVE_OPUS
         if (opus_dec) opus_decoder_ctl(opus_dec, OPUS_RESET_STATE);
+        opus_seq_init = false;
+        opus_next_seq = 0;
+        for (auto& po : opus_pending) po.valid = false;
 #endif
     }
 };
@@ -393,6 +409,9 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
     auto bit_set = [&](uint32_t q) { s.recv_bits[(q & (kWindow - 1)) >> 6] |= 1ull << (q & 63); };
     auto bit_clr = [&](uint32_t q) { s.recv_bits[(q & (kWindow - 1)) >> 6] &= ~(1ull << (q & 63)); };
 
+    if (ah.flags & kAudioFlagDuplicate) s.saw_wifi_dup = true;
+    const uint64_t nack_wait_ms = s.saw_wifi_dup ? std::max<uint64_t>(prof_.nack_first_wait_ms, 5u)
+                                                 : uint64_t(prof_.nack_first_wait_ms);
     if (!s.seen) {
         s.seen = true;
         s.seen_pub.store(true, std::memory_order_relaxed);
@@ -407,6 +426,10 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
             s.parities.clear();
             s.highest = seq;
             s.first_unresolved = seq;
+#ifdef LV_HAVE_OPUS
+            s.opus_seq_init = false;
+            for (auto& po : s.opus_pending) po.valid = false;
+#endif
         } else if (d > 0) {
             for (uint32_t q = s.highest + 1; q != seq; ++q) {  // register holes
                 bit_clr(q);
@@ -414,7 +437,7 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
                 m = {};
                 m.state = 1;
                 m.detected_us = now;
-                m.next_try_us = now + uint64_t(prof_.nack_first_wait_ms) * 1000;
+                m.next_try_us = now + nack_wait_ms * 1000ull;
             }
             bit_clr(seq);
             s.highest = seq;
@@ -442,10 +465,49 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
     const bool late = is_expired(s, seq, now);
     if (late) s.late.fetch_add(1, std::memory_order_relaxed);
 
-    // Opus: decoding a packet after its PLC frame was already generated (and the decoder moved on) breaks
-    // the CELT overlap -> a click. Keep the concealment; the packet is still stored for FEC below.
-    if (!(concealed && late && ah.sample_format == AudioFormat2::kOpus))
-        write_to_matrix(s, ah, samples, payload_bytes);
+    // Opus: stateful CELT MDCT overlap-add requires strict sequence order.
+    //  - Normal in-order packet (seq == opus_next_seq): decodes immediately with 0 ms added latency.
+    //  - Early out-of-order packet (e.g. N+1 arriving 0.4 ms before N's +1.5 ms Wi-Fi duplicate):
+    //    buffered briefly until N arrives, then both decode in exact chronological order (zero MDCT clicks!).
+    //  - Late packet after PLC already concealed it: skipped so decoder overlap state stays intact.
+#ifdef LV_HAVE_OPUS
+    if (ah.sample_format == AudioFormat2::kOpus) {
+        if (!s.opus_seq_init) {
+            s.opus_seq_init = true;
+            s.opus_next_seq = seq;
+        }
+        const int32_t odiff = int32_t(seq - s.opus_next_seq);
+        if (odiff == 0) {
+            write_to_matrix(s, ah, samples, payload_bytes);
+            ++s.opus_next_seq;
+            while (true) {
+                auto& po = s.opus_pending[s.opus_next_seq & (Stream::kOpusReorderSlots - 1)];
+                if (!po.valid || po.seq != s.opus_next_seq) break;
+                write_to_matrix(s, po.hdr, po.bytes.data(), po.bytes.size());
+                po.valid = false;
+                ++s.opus_next_seq;
+            }
+        } else if (odiff > 0 && odiff < int32_t(Stream::kOpusReorderSlots)) {
+            auto& po = s.opus_pending[seq & (Stream::kOpusReorderSlots - 1)];
+            po.valid = true;
+            po.seq = seq;
+            po.hdr = ah;
+            po.bytes.assign(samples, samples + payload_bytes);
+        } else if (odiff >= int32_t(Stream::kOpusReorderSlots)) {
+            for (auto& po : s.opus_pending) po.valid = false;
+            s.opus_next_seq = seq;
+            write_to_matrix(s, ah, samples, payload_bytes);
+            ++s.opus_next_seq;
+        } else {
+            // odiff < 0: already passed / concealed — leave decoder overlap state clean
+            (void)concealed;
+        }
+    } else
+#endif
+    {
+        if (!(concealed && late && ah.sample_format == AudioFormat2::kOpus))
+            write_to_matrix(s, ah, samples, payload_bytes);
+    }
     s.rx.fetch_add(1, std::memory_order_relaxed);
     if (via_fec) s.fec_rec.fetch_add(1, std::memory_order_relaxed);
     if (via_nack && was_hole) s.nack_rec.fetch_add(1, std::memory_order_relaxed);
@@ -548,20 +610,57 @@ void AudioRxEngine::service(uint64_t now) {
         for (uint32_t q = s.first_unresolved; int32_t(q - s.highest) <= 0; ++q) {
             auto& m = s.miss[q & (kWindow - 1)];
             if (m.state != 1 || bit_get(q)) continue;
-            if (is_expired(s, q, now)) {
+            bool expire = is_expired(s, q, now);
+#ifdef LV_HAVE_OPUS
+            // If Opus reorder buffer is holding packets behind a lost `q`, flush PLC just before
+            // the playout cursor reaches `q` so buffered `q+1..` land in time with zero gap.
+            if (!expire && s.fmt == AudioFormat2::kOpus && s.opus_seq_init && s.chunk > 0 &&
+                int32_t(s.opus_next_seq - q) <= 0 && !one_way_ && clock_.synced()) {
+                const int64_t ts = int64_t(s.ref_ts) + int64_t(int32_t(q - s.ref_seq)) * int64_t(s.chunk);
+                const uint32_t rate = matrix_.sample_rate();
+                const uint32_t lat_ms = std::max(latency_ms_.load(std::memory_order_relaxed),
+                                                 matrix_.effective_latency_ms());
+                const int64_t target = clock_.master_samples(now, rate) - int64_t(lat_ms) * rate / 1000;
+                if (ts <= target + int64_t(s.chunk)) expire = true;
+            }
+#endif
+            if (expire) {
                 m.state = 2;
                 s.lost.fetch_add(1, std::memory_order_relaxed);
 #ifdef LV_HAVE_OPUS
-                // Opus Packet Loss Concealment (PLC): smoothly conceal lost Wi-Fi packets instead of clicks.
+                // Opus Packet Loss Concealment (PLC): smoothly conceal lost Wi-Fi packets in exact seq order
+                // and immediately drain any buffered consecutive Opus packets behind `q`.
                 if (s.fmt == AudioFormat2::kOpus && s.opus_dec && s.chunk > 0) {
-                    if (scratch_.size() < s.chunk) scratch_.resize(s.chunk);
-                    const int plc_n = opus_decode_float(s.opus_dec, nullptr, 0, scratch_.data(), int(s.chunk), 0);
-                    if (plc_n > 0) {
-                        const int64_t lost_ts =
-                            int64_t(s.ref_ts) + int64_t(int32_t(q - s.ref_seq)) * int64_t(s.chunk);
-                        if (lost_ts >= 0) {
-                            matrix_.write(s.channel, uint64_t(lost_ts), scratch_.data(), uint32_t(plc_n));
+                    if (!s.opus_seq_init) {
+                        s.opus_seq_init = true;
+                        s.opus_next_seq = q;
+                    }
+                    while (int32_t(s.opus_next_seq - q) <= 0) {
+                        auto& po = s.opus_pending[s.opus_next_seq & (Stream::kOpusReorderSlots - 1)];
+                        if (po.valid && po.seq == s.opus_next_seq) {
+                            write_to_matrix(s, po.hdr, po.bytes.data(), po.bytes.size());
+                            po.valid = false;
+                        } else {
+                            if (scratch_.size() < s.chunk) scratch_.resize(s.chunk);
+                            const int plc_n =
+                                opus_decode_float(s.opus_dec, nullptr, 0, scratch_.data(), int(s.chunk), 0);
+                            if (plc_n > 0) {
+                                const int64_t lost_ts =
+                                    int64_t(s.ref_ts) +
+                                    int64_t(int32_t(s.opus_next_seq - s.ref_seq)) * int64_t(s.chunk);
+                                if (lost_ts >= 0) {
+                                    matrix_.write(s.channel, uint64_t(lost_ts), scratch_.data(), uint32_t(plc_n));
+                                }
+                            }
                         }
+                        ++s.opus_next_seq;
+                    }
+                    while (true) {
+                        auto& po = s.opus_pending[s.opus_next_seq & (Stream::kOpusReorderSlots - 1)];
+                        if (!po.valid || po.seq != s.opus_next_seq) break;
+                        write_to_matrix(s, po.hdr, po.bytes.data(), po.bytes.size());
+                        po.valid = false;
+                        ++s.opus_next_seq;
                     }
                 }
 #endif
@@ -617,6 +716,20 @@ AudioChannelRxStats AudioRxEngine::channel_stats(uint16_t ch) const {
     o.late_packets = s.late.load(std::memory_order_relaxed);
     o.jitter_us = s.jitter_us.load(std::memory_order_relaxed);
     return o;
+}
+
+uint64_t AudioRxEngine::total_nacks_sent() const {
+    uint64_t sum = 0;
+    for (const auto& sp : streams_)
+        if (sp) sum += sp->nacks_sent.load(std::memory_order_relaxed);
+    return sum;
+}
+
+uint64_t AudioRxEngine::total_duplicates() const {
+    uint64_t sum = 0;
+    for (const auto& sp : streams_)
+        if (sp) sum += sp->dups.load(std::memory_order_relaxed);
+    return sum;
 }
 
 }  // namespace lv

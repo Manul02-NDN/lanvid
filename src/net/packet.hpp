@@ -30,6 +30,7 @@ enum class PacketType : uint8_t {
     kMonitorControl = 0xA, // Personal smartphone monitor mixer remote control & channel metadata/VU sync
     kTallyState = 0xB,     // Studio <-> Camera Tally (Standby / Preview / Program ON AIR) + REC trigger
     kIntercomAudio = 0xC,  // Isolated full-duplex Director <-> Camera Operator voice talkback / IFB
+    kMonitorAudioFlow = 0xD, // Dante-style compact multi-channel monitor UDP flow (up to 16 ch in 1 packet)
 };
 
 enum class VideoCodecId : uint8_t {
@@ -349,12 +350,15 @@ enum class MonitorControlOp : uint8_t {
 constexpr size_t kMonitorControlSize = 64;
 // kHello.bitrate_kbps value requesting a lossless monitor stream (24-bit PCM, ~2.3 Mbps stereo).
 constexpr uint16_t kMonitorBitrateLossless = 0xFFFF;
+// Capability flags carried in MonitorControlPayload::reserved on kHello:
+constexpr uint8_t kMonitorCapFlowV1 = 0x01;       // Client supports compact kMonitorAudioFlow multi-channel frames
+constexpr uint8_t kMonitorCapRxSubMask = 0x02;    // Client sends active_channel_mask in kHello & 15 ms LVKA keep-alive
 
 struct MonitorControlPayload {
     MonitorControlOp op = MonitorControlOp::kHello;
     uint8_t channel_index = 0;       // 0..63 for kSetChannelMix
     uint8_t flags = 0;               // bit0=mute, bit1=solo, bit2=hpf_on, bit3=eq_on, bit4=comp_on, bit5=master_mute
-    uint8_t reserved = 0;
+    uint8_t reserved = 0;            // capability flags on kHello (kMonitorCapFlowV1 | kMonitorCapRxSubMask)
     uint32_t client_id = 0;          // unique smartphone session id
     uint16_t bitrate_kbps = 256;     // desired total stereo bitrate (e.g. 256 / 384 kbps)
     uint16_t target_latency_ms = 20; // desired monitor buffer (ms)
@@ -377,7 +381,42 @@ struct MonitorControlPayload {
     float master_volume_db = 0.0f;   // -60..+12 dB
 
     char client_name[16] = {};       // for kHello (null-terminated)
+    uint64_t active_channel_mask = ~0ull;  // Receiver-Driven Subscription bitmask (kHello bytes 28..35)
 };
+
+// 16-byte compact keep-alive + Rx Subscription datagram ("LVKA" + client_id u32 + active_channel_mask u64)
+constexpr size_t kMonitorKeepAliveSize = 16;
+struct MonitorKeepAlivePayload {
+    uint32_t client_id = 0;
+    uint64_t active_channel_mask = ~0ull;
+};
+size_t write_monitor_keepalive(uint8_t* out, size_t cap, const MonitorKeepAlivePayload& ka);
+bool parse_monitor_keepalive(const uint8_t* in, size_t len, MonitorKeepAlivePayload& ka);
+
+// Dante-style Multi-Channel Monitor Audio Flow (PacketType::kMonitorAudioFlow = 0xD):
+// Groups up to 16 active subscribed channels into ONE compact UDP datagram.
+constexpr size_t kMonitorAudioFlowHeaderSize = 24;
+constexpr uint8_t kMaxMonitorFlowChannels = 16;
+constexpr uint8_t kMonitorFlowFlagVarLen = 0x01;   // payload begins with channel_count x u16 per-channel byte lengths
+// kAudioFlagDuplicate (0x04) in flags marks a proactive 1+1 redundant duplicate packet.
+
+struct MonitorAudioFlowHeader {
+    uint32_t flow_seq = 0;
+    uint64_t media_timestamp_samples = 0;
+    uint32_t sample_rate = 48000;
+    uint16_t num_samples = 240;
+    uint16_t channel_mask = 0x0003;  // bit c set => channel c payload included (up to 16 channels)
+    AudioFormat2 sample_format = AudioFormat2::kPcm16;
+    uint8_t flags = 0;
+    uint8_t channel_count = 0;       // 1..16 (number of set bits in channel_mask)
+    uint8_t reserved = 0;
+};
+
+size_t write_monitor_audio_flow(uint8_t* out, size_t cap, const MonitorAudioFlowHeader& fh,
+                                const uint8_t* const* ch_payloads, const uint16_t* ch_lengths);
+bool parse_monitor_audio_flow(const uint8_t* in, size_t len, MonitorAudioFlowHeader& fh,
+                              const uint8_t* out_ch_payloads[kMaxMonitorFlowChannels],
+                              uint16_t out_ch_lengths[kMaxMonitorFlowChannels]);
 
 void write_monitor_control(uint8_t* out, const MonitorControlPayload& mc);
 bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload& mc);

@@ -98,9 +98,22 @@ void AudioSyncMatrix::set_adaptive_jitter(bool enabled, uint32_t min_ms, uint32_
     max_ms = std::clamp(max_ms, min_ms, kMaxLatencyMs);
     jitter_min_ms_.store(min_ms, std::memory_order_relaxed);
     jitter_max_ms_.store(max_ms, std::memory_order_relaxed);
+    if (enabled) deterministic_playout_.store(false, std::memory_order_release);
     adaptive_jitter_.store(enabled, std::memory_order_release);
     // Switching to Fixed is applied by the consumer on its next block: if the buffer had grown, it
     // re-anchors (crossfaded) to exactly target_latency_ms instead of drifting back for minutes.
+}
+
+void AudioSyncMatrix::set_deterministic_playout(bool enabled, double max_trim_ppm) {
+    deterministic_playout_.store(enabled, std::memory_order_release);
+    if (enabled) {
+        adaptive_jitter_.store(false, std::memory_order_release);
+        ratio_limit_.store(std::clamp(max_trim_ppm, 50.0, 5000.0) * 1e-6, std::memory_order_relaxed);
+        const uint32_t base = latency_ms_.load(std::memory_order_relaxed);
+        cushion_pub_ms_.store(0.0, std::memory_order_relaxed);
+        eff_ms_pub_.store(double(base), std::memory_order_release);
+        effective_latency_ms_.store(base, std::memory_order_release);
+    }
 }
 
 void AudioSyncMatrix::observe_network_jitter_us(uint32_t jitter_us) {
@@ -131,7 +144,15 @@ void AudioSyncMatrix::update_effective_latency(uint32_t frames, bool adaptive) {
     lag_env_samples_ = std::max(lag_peak, lag_env_samples_ * release);
     lag_env_pub_ms_.store(lag_env_samples_ * 1000.0 / double(rate_), std::memory_order_relaxed);
 
-    if (!adaptive) {
+    const bool det = deterministic_playout_.load(std::memory_order_acquire);
+    if (det) {
+        // Deterministic timestamp-driven playout: fixed latency horizon (5..10 ms), never expands cushion.
+        cushion_ms_ = 0.0;
+        cushion_hold_s_ = 0.0;
+        cushion_pub_ms_.store(0.0, std::memory_order_relaxed);
+        eff_ms_ = base;
+        hold_samples_ = 0;
+    } else if (!adaptive) {
         if (!prefill_enabled_.load(std::memory_order_relaxed)) {
             cushion_ms_ = 0.0;
         } else if (cushion_hold_s_ > 0.0) {
@@ -245,10 +266,12 @@ bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, float& v) const {
 }
 
 int64_t AudioSyncMatrix::desired_cursor(const MasterClock& clk, uint64_t local_now_us) const {
-    const double eff_ms = adaptive_jitter_.load(std::memory_order_acquire)
-                              ? eff_ms_pub_.load(std::memory_order_acquire)
-                              : double(latency_ms_.load(std::memory_order_relaxed)) +
-                                    cushion_pub_ms_.load(std::memory_order_relaxed);
+    const double eff_ms = deterministic_playout_.load(std::memory_order_acquire)
+                              ? double(latency_ms_.load(std::memory_order_relaxed))
+                              : (adaptive_jitter_.load(std::memory_order_acquire)
+                                     ? eff_ms_pub_.load(std::memory_order_acquire)
+                                     : double(latency_ms_.load(std::memory_order_relaxed)) +
+                                           cushion_pub_ms_.load(std::memory_order_relaxed));
     const int64_t lat = int64_t(std::llround(eff_ms * double(rate_) / 1000.0));
     int64_t master;
     if (clk.synced()) {
@@ -275,7 +298,8 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         actual_latency_ms_.store(0.0, std::memory_order_relaxed);
         return p;
     }
-    const bool adaptive = adaptive_jitter_.load(std::memory_order_acquire);
+    const bool det = deterministic_playout_.load(std::memory_order_acquire);
+    const bool adaptive = !det && adaptive_jitter_.load(std::memory_order_acquire);
     const double prev_eff = eff_ms_;
     update_effective_latency(frames, adaptive);
     // Adaptive -> Fixed while the buffer was grown: snap (crossfaded) to exactly the fixed target.
@@ -314,7 +338,7 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
             // was too short for this network. Learn the missing amount + one render block + 2 ms guard as
             // a cushion (Fixed mode) and realise it right now, inside the dropout, instead of trickling.
             const double deficit = cursor_ - double(newest_media_ts());
-            if (deficit > 0.0 && !adaptive && clk.synced()) {
+            if (deficit > 0.0 && !adaptive && !det && clk.synced()) {
                 const double now_ms = (master_now - cursor_) * 1000.0 / double(rate_);
                 const double want = now_ms - base + (deficit + double(frames)) * 1000.0 / double(rate_) +
                                     kJitterGuardMs;
@@ -380,15 +404,22 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         return p;
     }
 
-    // Low-pass the phase error (audio callbacks are bursty) with a ~0.5 s time constant.
-    const double alpha = std::min(1.0, double(frames) / (double(rate_) * 0.5));
+    // Low-pass the phase error (audio callbacks are bursty).
+    // Deterministic timestamp-driven mode uses a tighter 0.25 s filter and +/-0.1% (+/-1000 ppm) micro-rate trim
+    // so the playout cursor locks strictly onto T_master_now - target_latency_samples without expanding buffer.
+    const double filt_tau = det ? 0.25 : 0.5;
+    const double alpha = std::min(1.0, double(frames) / (double(rate_) * filt_tau));
     err_filt_ += (err - err_filt_) * alpha;
 
-    // Both modes track the consumer's clock (DAW / device crystal vs MasterClock, typically < 200 ppm)
-    // within +/-500 ppm; Adaptive reacts faster (1.5 s gain vs 4 s).
+    // Track consumer clock vs MasterClock smoothly via micro-resampling:
+    //  - Deterministic mode: tight 1.0 s gain, deadband 0.5 sample, clamped to +/-ratio_limit_ (default +/-0.1%).
+    //  - Adaptive mode: 1.5 s gain; Fixed mode: 4.0 s gain.
+    const double deadband = det ? 0.5 : kDeadbandSamples;
+    const double gain_sec = det ? 1.0 : (adaptive ? 1.5 : 4.0);
     double off = 0.0;
-    if (std::fabs(err_filt_) > kDeadbandSamples) {
-        off = std::clamp(err_filt_ / (double(rate_) * (adaptive ? 1.5 : 4.0)), -ratio_limit_.load(std::memory_order_relaxed), ratio_limit_.load(std::memory_order_relaxed));
+    if (std::fabs(err_filt_) > deadband) {
+        const double lim = ratio_limit_.load(std::memory_order_relaxed);
+        off = std::clamp(err_filt_ / (double(rate_) * gain_sec), -lim, lim);
     }
     p.cursor = cursor_;
     p.ratio = 1.0 + off;

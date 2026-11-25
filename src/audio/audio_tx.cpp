@@ -278,6 +278,82 @@ void AudioTxEngine::set_latency_ms(uint32_t ms) {
     latency_ms_.store(std::clamp<uint32_t>(ms, 2, 2000), std::memory_order_relaxed);
 }
 
+void AudioTxEngine::set_wifi_redundancy(bool enabled, uint32_t stagger_us) {
+    dup_stagger_us_.store(std::clamp<uint32_t>(stagger_us, 0, 10000), std::memory_order_relaxed);
+    wifi_redundancy_.store(enabled, std::memory_order_release);
+    if (!enabled) {
+        std::lock_guard<std::mutex> lk(dup_mu_);
+        pending_dups_.clear();
+    }
+}
+
+void AudioTxEngine::set_secondary_send(SendFn secondary_send) {
+    std::lock_guard<std::mutex> lk(dup_mu_);
+    secondary_send_ = std::move(secondary_send);
+}
+
+void AudioTxEngine::queue_staggered_duplicate(uint32_t seq, uint16_t stream, uint32_t wallclock_us,
+                                              const uint8_t* payload, size_t len) {
+    uint8_t buf[kMaxDatagram > 4096 ? 4096 : kMaxDatagram];
+    if (kPacketHeaderSize + len > sizeof(buf)) return;
+    PacketHeader h;
+    h.type = PacketType::kAudio2;
+    h.flags = kFlagHasCrc;
+    h.frame_id = seq;
+    h.timestamp_us = wallclock_us;
+    h.slice_id = stream;
+    h.total_slices = epoch_.load(std::memory_order_relaxed);
+    h.seq = uint16_t(seq);
+    const size_t n = write_packet(buf, sizeof(buf), h, payload, len);
+    if (!n) return;
+
+    const uint32_t stagger = dup_stagger_us_.load(std::memory_order_relaxed);
+    if (stagger == 0) {
+        SendFn fn;
+        {
+            std::lock_guard<std::mutex> lk(dup_mu_);
+            fn = secondary_send_ ? secondary_send_ : send_;
+        }
+        if (fn && fn(buf, n)) {
+            packets_sent_.fetch_add(1, std::memory_order_relaxed);
+            bytes_sent_.fetch_add(n, std::memory_order_relaxed);
+            duplicates_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(dup_mu_);
+    if (pending_dups_.size() >= 1024) pending_dups_.pop_front();
+    PendingDup item;
+    item.due_wc_us = uint32_t(wallclock_us + stagger);
+    item.dgram.assign(buf, buf + n);
+    pending_dups_.push_back(std::move(item));
+}
+
+void AudioTxEngine::service_redundancy(uint32_t now_wallclock_us) {
+    if (!wifi_redundancy_.load(std::memory_order_acquire)) return;
+    std::vector<std::vector<uint8_t>> due;
+    SendFn fn;
+    {
+        std::lock_guard<std::mutex> lk(dup_mu_);
+        if (pending_dups_.empty()) return;
+        fn = secondary_send_ ? secondary_send_ : send_;
+        while (!pending_dups_.empty() &&
+               int32_t(now_wallclock_us - pending_dups_.front().due_wc_us) >= 0) {
+            due.push_back(std::move(pending_dups_.front().dgram));
+            pending_dups_.pop_front();
+        }
+    }
+    if (!fn) return;
+    for (const auto& dg : due) {
+        if (fn(dg.data(), dg.size())) {
+            packets_sent_.fetch_add(1, std::memory_order_relaxed);
+            bytes_sent_.fetch_add(dg.size(), std::memory_order_relaxed);
+            duplicates_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
 AudioReliabilityProfile AudioTxEngine::profile(AudioFormat2 fmt) const {
     return audio_profile_for_latency(latency_ms_.load(std::memory_order_relaxed), rate_, mtu_, fmt);
 }
@@ -382,15 +458,18 @@ void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, ui
     s.hist_valid[slot] = 1;
 
     send_payload(seq, ch, wallclock_us, payload.data(), payload.size());
-    if (prof.allow_duplication && dup_active_.load(std::memory_order_relaxed)) {
+    if (wifi_redundancy_.load(std::memory_order_acquire)) {
+        payload[11] |= kAudioFlagDuplicate;
+        queue_staggered_duplicate(seq, ch, wallclock_us, payload.data(), payload.size());
+    } else if (prof.allow_duplication && dup_active_.load(std::memory_order_relaxed)) {
         payload[11] |= kAudioFlagDuplicate;
         send_payload(seq, ch, wallclock_us, payload.data(), payload.size());
         duplicates_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // ---- interleaved XOR FEC ----
+    // ---- interleaved XOR FEC (skipped when 1+1 Wi-Fi Redundancy already duplicates every packet) ----
     const uint32_t k = prof.fec_k, d = prof.fec_interleave;
-    if (k == 0) return;
+    if (k == 0 || wifi_redundancy_.load(std::memory_order_relaxed)) return;
     // Contiguity: members must be equal-sized (and same wire format), back to back in media time.
     if (s.block_count > 0 && (n != s.last_n || ts != s.last_ts + s.last_n ||
                               s.parity[0].size() != body)) {
@@ -494,9 +573,9 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
         const int target_bps = opus_bitrate_bps_for_profile(codec_profile());
         if (target_bps > 0) {
             // Opus CELT-only low-delay framing (<= 5 ms guarantees pure CELT Fullband 20 Hz-20 kHz, never SILK):
-            //   - 2.5 ms (120 samples) when latency budget <= 5 ms (ultra-low latency)
-            //   - 5.0 ms (240 samples) at standard 10..2000 ms latency (fullband even at 64 kbps, half Wi-Fi pkt rate)
-            target_chunk = (lat <= 5) ? 120u : 240u;
+            //   - 2.5 ms (120 samples) when latency budget <= 10 ms (ultra-low deterministic 5..10 ms mode)
+            //   - 5.0 ms (240 samples) at standard 11..2000 ms latency (fullband even at 64 kbps, half Wi-Fi pkt rate)
+            target_chunk = (lat <= 10) ? 120u : 240u;
         }
     }
 #endif
@@ -515,6 +594,7 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
         if (s.stage_samples >= target_chunk) flush_stream(s, channel, wallclock_us);
     }
     s.next_ts = ts;
+    service_redundancy(wallclock_us);
     return 0;
 }
 
@@ -525,6 +605,7 @@ void AudioTxEngine::flush(uint32_t wallclock_us) {
         std::lock_guard<std::mutex> lk(s->mu);
         flush_stream(*s, c, wallclock_us);
     }
+    service_redundancy(wallclock_us);
 }
 
 void AudioTxEngine::update_loss_estimate() {

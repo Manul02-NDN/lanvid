@@ -108,6 +108,11 @@ public:
     }
     void set_audio_latency_ms(uint32_t ms);
     uint32_t audio_latency_ms() const { return atx_ ? atx_->latency_ms() : cfg_.audio_latency_ms; }
+    void set_wifi_redundancy(bool enabled, uint32_t stagger_us = 1500) {
+        wifi_redundancy_.store(enabled, std::memory_order_release);
+        if (atx_) atx_->set_wifi_redundancy(enabled, stagger_us);
+    }
+    bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
     void set_audio_codec_profile(AudioCodecProfile p) {
         audio_codec_ = p;
         if (atx_) atx_->set_codec_profile(p);
@@ -238,6 +243,7 @@ private:
     std::atomic<uint64_t> feedbacks_received_{0};
     std::atomic<uint64_t> pli_received_{0};
     std::atomic<bool> midi_only_{false};
+    std::atomic<bool> wifi_redundancy_{false};
 };
 
 }  // namespace lv

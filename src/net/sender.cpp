@@ -38,13 +38,15 @@ bool UdpSender::init() {
     if (!Endpoint::parse(cfg_.dest_ip, cfg_.dest_port, dst_)) return false;
     if (!sock_.open()) return false;
     atx_ = std::make_unique<AudioTxEngine>(cfg_.audio_sample_rate, cfg_.mtu, [this](const uint8_t* d, size_t n) {
-        return sock_.send_to(d, n, dst_) == int(n);
+        return sock_.send_to_qos(d, n, dst_, QosTrafficClass::kAudio) == int(n);
     });
     atx_->set_latency_ms(cfg_.audio_latency_ms);
     atx_->set_codec_profile(audio_codec_);
     atx_->set_epoch(stream_epoch_);
+    atx_->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire));
     midi_tx_ = std::make_unique<MidiTxEngine>(
-        [this](const uint8_t* d, size_t n) { return sock_.send_to(d, n, dst_) == int(n); }, stream_epoch_);
+        [this](const uint8_t* d, size_t n) { return sock_.send_to_qos(d, n, dst_, QosTrafficClass::kSyncControl) == int(n); },
+        stream_epoch_);
     if (!sock_.bind("0.0.0.0", cfg_.bind_port)) return false;
     sock_.set_buffer_sizes(std::max(cfg_.socket_buf_bytes, UdpSocket::kMinSocketBuffer), UdpSocket::kMinSocketBuffer);
     sock_.set_low_latency_qos();  // DSCP EF (Wi-Fi WMM AC_VO) for audio / MIDI / clock sync
@@ -109,7 +111,8 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
 
         auto flush_batch = [&]() {
             if (count == 0) return;
-            const int sent = sock_.send_batch(views, count, dst_);
+            // Video traffic tagged DSCP AF41 (WMM AC_VI) so camera/screen bursts never delay EF/CS7 audio & sync!
+            const int sent = sock_.send_batch_qos(views, count, dst_, QosTrafficClass::kVideo);
             if (sent > 0) {
                 packets_sent_.fetch_add(uint64_t(sent), std::memory_order_relaxed);
                 size_t ok_bytes = 0;
@@ -142,7 +145,7 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
                                 return;
                             }
                             if (cfg_.pace_mbps > 0.0) pace_bytes(len, send_lk);
-                            const int sent = sock_.send_to(dgram, len, dst_);
+                            const int sent = sock_.send_to_qos(dgram, len, dst_, QosTrafficClass::kVideo);
                             if (sent == int(len)) {
                                 packets_sent_.fetch_add(1, std::memory_order_relaxed);
                                 bytes_sent_.fetch_add(uint64_t(len), std::memory_order_relaxed);
@@ -280,7 +283,7 @@ bool UdpSender::send_audio_raw(uint32_t audio_seq_id, uint32_t timestamp_us, con
     if (!n) return false;
 
     std::lock_guard<std::mutex> lk(pace_mu_);
-    const int sent = sock_.send_to(dgram, n, dst_);
+    const int sent = sock_.send_to_qos(dgram, n, dst_, QosTrafficClass::kAudio);
     if (sent == int(n)) {
         audio_packets_sent_.fetch_add(1, std::memory_order_relaxed);
         audio_bytes_sent_.fetch_add(uint64_t(n), std::memory_order_relaxed);
@@ -398,13 +401,14 @@ bool UdpSender::send_control_sync(const ControlSyncPayload& cs) {
     if (!n) return false;
     int ok = 0;
     for (int rep = 0; rep < 3; ++rep) {
-        if (sock_.send_to(out, n, dst_) == int(n)) ++ok;
+        if (sock_.send_to_qos(out, n, dst_, QosTrafficClass::kSyncControl) == int(n)) ++ok;
     }
     if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
     return ok > 0;
 }
 
 void UdpSender::service_control() {
+    if (atx_) atx_->service_redundancy(now_us32());
     // MIDI2 heartbeat: re-send recent events every 100 ms for 2 s after the last one (stuck-note guard).
     if (midi_tx_) {
         const uint64_t t = now_us();
@@ -445,7 +449,7 @@ void UdpSender::service_control() {
             write_pong_master_tail(pong_body + kPingPongSize, now - epoch_us_, now_us() - epoch_us_);
             uint8_t out[96];
             const size_t out_n = write_packet(out, sizeof(out), rh, pong_body, sizeof(pong_body));
-            if (out_n && sock_.send_to(out, out_n, peer) == int(out_n)) {
+            if (out_n && sock_.send_to_qos(out, out_n, peer, QosTrafficClass::kSyncControl) == int(out_n)) {
                 pongs_sent_.fetch_add(1, std::memory_order_relaxed);
             }
         } else if (h.type == PacketType::kAudioNack) {

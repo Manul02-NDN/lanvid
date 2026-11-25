@@ -1060,6 +1060,15 @@ int lv_sender_set_audio_bitrate(LvSenderHandle* handle, int kbps_per_ch) {
     return LV_OK;
 }
 
+int lv_sender_set_wifi_redundancy(LvSenderHandle* handle, int enabled, uint32_t stagger_us) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        handle->sender->set_wifi_redundancy(enabled != 0, stagger_us == 0 ? 1500u : stagger_us);
+    }
+    return LV_OK;
+}
+
 uint64_t lv_sender_get_master_clock_samples(LvSenderHandle* handle) {
     if (!handle) return 0;
     LV_LIVE_LOCK(handle);
@@ -2110,6 +2119,13 @@ int lv_duplex_set_audio_bitrate(LvDuplexHandle* h, int kbps_per_ch) {
     std::lock_guard<std::mutex> lk(h->api_mu);
     h->cfg.audio_codec = int(lv::audio_codec_profile_from_bitrate(kbps_per_ch));
     if (h->tx) lv_sender_set_audio_bitrate(h->tx, kbps_per_ch);
+    return LV_OK;
+}
+
+int lv_duplex_set_wifi_redundancy(LvDuplexHandle* h, int enabled, uint32_t stagger_us) {
+    if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
+    if (h->tx) lv_sender_set_wifi_redundancy(h->tx, enabled, stagger_us);
     return LV_OK;
 }
 

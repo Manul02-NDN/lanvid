@@ -298,6 +298,7 @@ bool load_app_config(AppConfig& cfg) {
     read_bool(j, "matrix_stereo_pairs", cfg.matrix_stereo_pairs);
     read_bool(j, "sync_settings", cfg.sync_settings);
     read_bool(j, "sync_matrix_routing", cfg.sync_matrix_routing);
+    read_bool(j, "wifi_redundancy", cfg.wifi_redundancy);
     read_int(j, "network_engine_mode", cfg.network_engine_mode);
     cfg.network_engine_mode = std::clamp(cfg.network_engine_mode, 0, 2);
     read_str(j, "grid_nic_name", cfg.grid_nic_name);
@@ -402,6 +403,7 @@ bool save_app_config(const AppConfig& cfg) {
         << "  \"matrix_stereo_pairs\": " << (cfg.matrix_stereo_pairs ? "true" : "false") << ",\n"
         << "  \"sync_settings\": " << (cfg.sync_settings ? "true" : "false") << ",\n"
         << "  \"sync_matrix_routing\": " << (cfg.sync_matrix_routing ? "true" : "false") << ",\n"
+        << "  \"wifi_redundancy\": " << (cfg.wifi_redundancy ? "true" : "false") << ",\n"
         << "  \"network_engine_mode\": " << cfg.network_engine_mode << ",\n"
         << "  \"grid_nic_name\": \"" << json_esc(cfg.grid_nic_name) << "\",\n"
         << "  \"grid_vlan_enabled\": " << (cfg.grid_vlan_enabled ? "true" : "false") << ",\n"
