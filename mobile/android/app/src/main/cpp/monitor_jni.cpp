@@ -128,6 +128,8 @@ bool start_audio(MonitorCtx* c) {
 }
 
 void io_loop(MonitorCtx* c) {
+    // Elevate network poll thread to Android audio priority (-16) so 10 ms Dante deadlines survive CPU load.
+    setpriority(PRIO_PROCESS, 0, -16);
     using clk = std::chrono::steady_clock;
     auto last_meta = clk::now(), last_keep = clk::now(), last_xrun = clk::now();
     std::vector<LV_MonitorMetaChannel> buf(64);

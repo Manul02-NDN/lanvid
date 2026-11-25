@@ -375,6 +375,7 @@ final class MonitorEngine: ObservableObject {
             state.markStopped(true)
         }
         t.qualityOfService = .userInteractive
+        t.threadPriority = 1.0
         t.name = "LanVidMonitor.io"
         ioThread = t
         t.start()
