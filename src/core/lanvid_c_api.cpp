@@ -1868,6 +1868,45 @@ int lv_monitor_client_keepalive(LvMonitorClientHandle* cli) {
     return cli->cli->keepalive() ? LV_OK : LV_ERR_NOT_RUNNING;
 }
 
+int lv_monitor_client_set_wifi_redundancy(LvMonitorClientHandle* cli, int enabled) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    cli->cli->set_wifi_redundancy(enabled != 0);
+    return LV_OK;
+}
+
+int lv_monitor_client_set_subscribed_mask(LvMonitorClientHandle* cli, uint64_t channel_mask) {
+    if (!cli || !cli->cli) return LV_ERR_INVALID_ARG;
+    cli->cli->set_active_channel_mask(channel_mask);
+    return LV_OK;
+}
+
+int lv_monitor_client_get_dante_telemetry(LvMonitorClientHandle* cli, LV_MonitorDanteTelemetry* out) {
+    if (!cli || !cli->cli || !out) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    const auto t = cli->cli->dante_telemetry();
+    out->clock_locked = t.clock_locked ? 1 : 0;
+    out->clock_offset_jitter_us = t.clock_offset_jitter_us;
+    out->duplicates_recovered = t.duplicates_recovered;
+    out->active_flow_channels = t.active_flow_channels;
+    out->effective_playout_ms = t.effective_playout_ms;
+    out->wifi_redundancy_enabled = t.wifi_redundancy_enabled ? 1 : 0;
+    out->flow_packets_rx = t.flow_packets_rx;
+    out->nacks_sent = t.nacks_sent;
+    return LV_OK;
+}
+
+int lv_monitor_server_set_wifi_redundancy(LvMonitorServerHandle* srv, int enabled, uint32_t stagger_us) {
+    if (!srv || !srv->srv) return LV_ERR_INVALID_ARG;
+    srv->srv->set_wifi_redundancy(enabled != 0, stagger_us == 0 ? 1500u : stagger_us);
+    return LV_OK;
+}
+
+int lv_monitor_server_set_multichannel_flow(LvMonitorServerHandle* srv, int enabled, uint8_t flow_channels) {
+    if (!srv || !srv->srv) return LV_ERR_INVALID_ARG;
+    srv->srv->set_multichannel_flow(enabled != 0, flow_channels < 2 ? uint8_t(2) : flow_channels);
+    return LV_OK;
+}
+
 void lv_monitor_client_pop_stereo(LvMonitorClientHandle* cli, float* out_interleaved, uint32_t frames) {
     if (cli && cli->cli) cli->cli->pop_stereo(out_interleaved, frames);
 }

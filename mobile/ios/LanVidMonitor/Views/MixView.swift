@@ -12,6 +12,17 @@ struct MixView: View {
                     Text(engine.quality.detail).font(.caption2).foregroundStyle(Theme.muted)
                     Text(tr("Буфер", "Buffer")).font(.caption).foregroundStyle(Theme.muted)
                     SegmentRow(items: MonitorBuffer.allCases, selection: $engine.buffer) { "\($0.rawValue) " + tr("мс", "ms") }
+                    Toggle(isOn: Binding(
+                        get: { engine.wifiRedundancy },
+                        set: { engine.setWifiRedundancyFromUser($0) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Wi-Fi 1+1 Redundancy").font(.footnote.weight(.semibold)).foregroundStyle(Theme.text)
+                            Text(tr("Дублювання пакетів +1.5 мс без затримки NACK", "+1.5 ms duplicate flow · zero NACK recovery"))
+                                .font(.caption2).foregroundStyle(Theme.muted)
+                        }
+                    }
+                    .tint(Theme.accent2)
                 }
             }
             if engine.connected == nil {

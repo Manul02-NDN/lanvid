@@ -182,7 +182,7 @@ struct AudioRxEngine::Stream {
     double jitter = 0.0;
     bool saw_wifi_dup = false;  // true once proactive 1+1 duplicates are observed on this stream
 
-    std::atomic<uint64_t> rx{0}, lost{0}, fec_rec{0}, nack_rec{0}, nacks_sent{0}, dups{0}, late{0};
+    std::atomic<uint64_t> rx{0}, lost{0}, fec_rec{0}, nack_rec{0}, nacks_sent{0}, dups{0}, dups_rec{0}, late{0};
     std::atomic<uint32_t> jitter_us{0};
     std::atomic<bool> seen_pub{false};
 
@@ -511,6 +511,9 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
     s.rx.fetch_add(1, std::memory_order_relaxed);
     if (via_fec) s.fec_rec.fetch_add(1, std::memory_order_relaxed);
     if (via_nack && was_hole) s.nack_rec.fetch_add(1, std::memory_order_relaxed);
+    if (!via_fec && !via_nack && (ah.flags & kAudioFlagDuplicate) != 0) {
+        s.dups_rec.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // keep the payload for later XOR recovery of neighbours
     auto& st = s.store[seq % kStoreSlots];
@@ -729,6 +732,13 @@ uint64_t AudioRxEngine::total_duplicates() const {
     uint64_t sum = 0;
     for (const auto& sp : streams_)
         if (sp) sum += sp->dups.load(std::memory_order_relaxed);
+    return sum;
+}
+
+uint64_t AudioRxEngine::total_duplicates_recovered() const {
+    uint64_t sum = 0;
+    for (const auto& sp : streams_)
+        if (sp) sum += sp->dups_rec.load(std::memory_order_relaxed);
     return sum;
 }
 

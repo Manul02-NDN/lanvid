@@ -40,6 +40,8 @@ struct MonitorCtx {
     std::mutex meta_mu;
     std::vector<LV_MonitorMetaChannel> meta;
     LV_MonitorTelemetry tel{};
+    LV_MonitorDanteTelemetry dante_tel{};
+    std::atomic<bool> pending_wifi_redundancy{true};
 
     std::atomic<int32_t> burst{0}, buffer_frames{0}, device_rate{0}, exclusive{0};
     std::atomic<int32_t> xruns{0};
@@ -135,11 +137,14 @@ void io_loop(MonitorCtx* c) {
         if (now - last_meta > std::chrono::milliseconds(66)) {
             lv_monitor_client_request_meta(c->cli);
             LV_MonitorTelemetry tel{};
+            LV_MonitorDanteTelemetry dtel{};
             const int n = lv_monitor_client_get_meta(c->cli, buf.data(), int(buf.size()), &tel);
+            lv_monitor_client_get_dante_telemetry(c->cli, &dtel);
             {
                 std::lock_guard<std::mutex> lk(c->meta_mu);
                 c->meta.assign(buf.begin(), buf.begin() + std::max(0, std::min(n, int(buf.size()))));
                 c->tel = tel;
+                c->dante_tel = dtel;
             }
             last_meta = now;
         }
@@ -179,6 +184,7 @@ void stop_all(MonitorCtx* c) {
     std::lock_guard<std::mutex> lk(c->meta_mu);
     c->meta.clear();
     c->tel = {};
+    c->dante_tel = {};
 }
 
 }  // namespace
@@ -204,6 +210,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeConnect(JNIEn
     stop_all(c);
     c->cli = lv_monitor_client_create(kRate);
     if (!c->cli) return -1;
+    lv_monitor_client_set_wifi_redundancy(c->cli, c->pending_wifi_redundancy.load(std::memory_order_acquire) ? 1 : 0);
     const int rc = lv_monitor_client_connect(c->cli, str(env, host).c_str(), uint16_t(port), str(env, name).c_str(),
                                              uint16_t(bitrate), uint16_t(latency));
     if (rc != LV_OK) {
@@ -258,6 +265,46 @@ JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeSetStream(JNI
                                                                             jint latency) {
     if (!h || !ctx(h)->cli) return -1;
     return lv_monitor_client_set_stream(ctx(h)->cli, uint16_t(bitrate), uint16_t(latency));
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeSetWifiRedundancy(JNIEnv*, jclass, jlong h,
+                                                                                     jboolean enabled) {
+    if (!h) return -1;
+    MonitorCtx* c = ctx(h);
+    c->pending_wifi_redundancy.store(enabled != 0, std::memory_order_release);
+    if (!c->cli) return 0;
+    return lv_monitor_client_set_wifi_redundancy(c->cli, enabled ? 1 : 0);
+}
+
+JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeSetSubscribedMask(JNIEnv*, jclass, jlong h,
+                                                                                     jlong channel_mask) {
+    if (!h || !ctx(h)->cli) return -1;
+    return lv_monitor_client_set_subscribed_mask(ctx(h)->cli, static_cast<uint64_t>(channel_mask));
+}
+
+// Fills out[8] = { clock_locked, clock_offset_jitter_us, duplicates_recovered, active_flow_channels,
+//                  effective_playout_ms, wifi_redundancy_enabled, flow_packets_rx, nacks_sent }.
+JNIEXPORT jint JNICALL Java_com_lanvid_monitor_MonitorNative_nativeGetDanteTelemetry(JNIEnv* env, jclass, jlong h,
+                                                                                     jdoubleArray out) {
+    if (!h || !out || env->GetArrayLength(out) < 8) return -1;
+    MonitorCtx* c = ctx(h);
+    LV_MonitorDanteTelemetry dt{};
+    {
+        std::lock_guard<std::mutex> lk(c->meta_mu);
+        dt = c->dante_tel;
+    }
+    const jdouble v[8] = {
+        double(dt.clock_locked),
+        double(dt.clock_offset_jitter_us),
+        double(dt.duplicates_recovered),
+        double(dt.active_flow_channels),
+        dt.effective_playout_ms,
+        double(dt.wifi_redundancy_enabled),
+        double(dt.flow_packets_rx),
+        double(dt.nacks_sent),
+    };
+    env->SetDoubleArrayRegion(out, 0, 8, v);
+    return 0;
 }
 
 // Fills names[64 * 16] (raw UTF-8, NUL-padded - decoded in Kotlin, which tolerates a multi-byte character cut

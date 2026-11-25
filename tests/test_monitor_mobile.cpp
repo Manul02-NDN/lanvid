@@ -976,3 +976,254 @@ TEST(monitor_dante_multichannel_flow_subscriptions_and_dscp_qos) {
     CHECK(ti_tx >= 10);                      // Tally/Intercom frames transmitted
     CHECK(ti_dup_drop >= 5);                 // Intercom +1.5 ms duplicate instant seq dedup active
 }
+
+// Explicit Dante Multi-Channel Flow & C ABI Rx Subscription test:
+// Packs 8 active channels into ONE kMonitorAudioFlow UDP frame and verifies immediate exclusion
+// of muted channels via lv_monitor_client_set_subscribed_mask / Mute & Solo.
+TEST(monitor_dante_multichannel_flow_and_subscriptions) {
+    constexpr int kCh = 8;
+    constexpr uint32_t kBlk = 240;
+    LvMonitorServerHandle* srv = lv_monitor_server_create(48000);
+    REQUIRE(srv);
+    REQUIRE(lv_monitor_server_set_multichannel_flow(srv, 1, kCh) == LV_OK);
+    REQUIRE(lv_monitor_server_start(srv, 0) == LV_OK);
+    const uint16_t port = lv_monitor_server_port(srv);
+    REQUIRE(port != 0);
+
+    std::atomic<bool> stop{false};
+    std::thread pc([&] {
+        std::vector<std::vector<float>> pl(kCh, std::vector<float>(kBlk));
+        const float* pp[kCh];
+        for (int c = 0; c < kCh; ++c) pp[c] = pl[c].data();
+        uint64_t pos = 0;
+        uint64_t next = lv::now_us();
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (int c = 0; c < kCh; ++c) {
+                for (uint32_t i = 0; i < kBlk; ++i) {
+                    pl[c][i] = 0.35f * float(std::sin(2.0 * 3.141592653589793 * (200.0 + 40.0 * c) *
+                                                      double(pos + i) / 48000.0));
+                }
+            }
+            lv_monitor_server_push_audio_planar(srv, pp, kCh, kBlk);
+            pos += kBlk;
+            next += 5000;
+            lv::sleep_until_us(next, [] {});
+        }
+    });
+
+    LvMonitorClientHandle* cli = lv_monitor_client_create(48000);
+    REQUIRE(cli);
+    REQUIRE(lv_monitor_client_connect(cli, "127.0.0.1", port, "DanteSub8", 256, 10) == LV_OK);
+
+    auto poll_ms = [&](int ms) {
+        const uint64_t until = lv::now_us() + uint64_t(ms) * 1000ull;
+        while (lv::now_us() < until) {
+            lv_monitor_client_poll(cli);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+
+    // 1. All 8 channels active -> packed into ONE kMonitorAudioFlow packet
+    poll_ms(220);
+    LV_MonitorDanteTelemetry dt_all{};
+    REQUIRE(lv_monitor_client_get_dante_telemetry(cli, &dt_all) == LV_OK);
+
+    // 2. Subscribe ONLY to 3 channels (Ch0, Ch3, Ch7 -> mask 0x89) via C ABI
+    REQUIRE(lv_monitor_client_set_subscribed_mask(cli, 0x0089ull) == LV_OK);
+    poll_ms(140);
+    LV_MonitorDanteTelemetry dt_sub3{};
+    REQUIRE(lv_monitor_client_get_dante_telemetry(cli, &dt_sub3) == LV_OK);
+
+    // 3. Mute all channels (mask = 0) -> flow packet RX pauses completely
+    REQUIRE(lv_monitor_client_set_subscribed_mask(cli, 0ull) == LV_OK);
+    poll_ms(60);
+    LV_MonitorDanteTelemetry dt_m0{};
+    REQUIRE(lv_monitor_client_get_dante_telemetry(cli, &dt_m0) == LV_OK);
+    poll_ms(140);
+    LV_MonitorDanteTelemetry dt_m1{};
+    REQUIRE(lv_monitor_client_get_dante_telemetry(cli, &dt_m1) == LV_OK);
+
+    stop.store(true, std::memory_order_relaxed);
+    pc.join();
+    lv_monitor_client_disconnect(cli);
+    lv_monitor_client_destroy(cli);
+    lv_monitor_server_stop(srv);
+    lv_monitor_server_destroy(srv);
+
+    std::printf("    [dante 8ch flow+sub C ABI] all_ch=%u (pkts=%llu lock=%d) -> sub3_ch=%u -> mute_delta=%llu\n",
+                unsigned(dt_all.active_flow_channels), (unsigned long long)dt_all.flow_packets_rx,
+                int(dt_all.clock_locked), unsigned(dt_sub3.active_flow_channels),
+                (unsigned long long)(dt_m1.flow_packets_rx - dt_m0.flow_packets_rx));
+
+    CHECK(dt_all.flow_packets_rx >= 15);
+    CHECK(dt_all.active_flow_channels == 8u);
+    CHECK(dt_all.clock_locked == 1);
+    CHECK(dt_sub3.active_flow_channels == 3u);
+    CHECK((dt_m1.flow_packets_rx - dt_m0.flow_packets_rx) == 0u);  // 0 Wi-Fi packets when all muted
+}
+
+// End-to-end Dante 1+1 Wi-Fi Redundancy test through real UDP sockets + C ABI:
+// Client negotiates 1+1 Redundancy via lv_monitor_client_set_wifi_redundancy(cli, 1) at 10 ms target;
+// a localhost UDP proxy randomly drops 5% of primary kMonitorAudioFlow packets while passing +1.5 ms
+// redundant copies. Verifies duplicates_recovered > 0, nacks_sent == 0, playout within 10 +/- 1 ms, 0 dropouts!
+TEST(monitor_dante_1plus1_redundancy_zero_nack_recovery) {
+    constexpr int kCh = 2;
+    constexpr uint32_t kBlk = 240;
+    constexpr uint16_t kTargetMs = 10;
+
+    lv::PersonalMonitorServer srv(48000);
+    // Note: server global redundancy stays OFF to prove client-initiated kMonitorCapRedundancy1Plus1 works!
+    REQUIRE(srv.start(0, "127.0.0.1", 0));
+    const uint16_t srv_port = srv.bound_port();
+    lv::Endpoint srv_ep{};
+    REQUIRE(lv::Endpoint::parse("127.0.0.1", srv_port, srv_ep));
+
+    // Localhost UDP proxy that models 5% random loss of PRIMARY kMonitorAudioFlow packets
+    lv::UdpSocket proxy;
+    REQUIRE(proxy.open());
+    REQUIRE(proxy.bind("127.0.0.1", 0));
+    proxy.set_nonblocking(true);
+    const uint16_t proxy_port = proxy.local_port();
+    REQUIRE(proxy_port != 0);
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> proxy_dropped_primary{0};
+    std::thread proxy_thread([&] {
+        lv::Endpoint client_ep{};
+        bool have_client = false;
+        uint8_t buf[4200];
+        std::mt19937 rng(20261125);
+        std::uniform_real_distribution<double> u01(0.0, 1.0);
+        uint32_t seen_primary = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            bool any = false;
+            for (int i = 0; i < 64; ++i) {
+                lv::Endpoint src{};
+                const int n = proxy.recv_from(buf, sizeof(buf), src);
+                if (n <= 0) break;
+                any = true;
+                if (src == srv_ep) {
+                    if (!have_client) continue;
+                    // Inspect kMonitorAudioFlow primary vs redundant copy
+                    lv::PacketHeader ph{};
+                    const uint8_t* pl = nullptr;
+                    bool drop = false;
+                    if (lv::parse_packet(buf, size_t(n), ph, &pl) == lv::PacketParseStatus::kOk &&
+                        ph.type == lv::PacketType::kMonitorAudioFlow &&
+                        ph.payload_size >= lv::kMonitorAudioFlowHeaderSize) {
+                        const bool is_dup = (pl[21] & lv::kFlagRedundantCopy) != 0;
+                        if (!is_dup) {
+                            ++seen_primary;
+                            // Drop ~5% of primary packets after initial 20-packet lock-in
+                            if (seen_primary > 20 && u01(rng) < 0.05) {
+                                drop = true;
+                                proxy_dropped_primary.fetch_add(1, std::memory_order_relaxed);
+                            }
+                        }
+                    }
+                    if (!drop) proxy.send_to(buf, size_t(n), client_ep);
+                } else {
+                    client_ep = src;
+                    have_client = true;
+                    proxy.send_to(buf, size_t(n), srv_ep);
+                }
+            }
+            if (!any) std::this_thread::sleep_for(std::chrono::microseconds(250));
+        }
+    });
+
+    std::thread pc([&] {
+        std::vector<float> l(kBlk), r(kBlk);
+        const float* pp[kCh] = {l.data(), r.data()};
+        uint64_t pos = 0;
+        uint64_t next = lv::now_us();
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (uint32_t i = 0; i < kBlk; ++i) {
+                const float v = 0.45f * float(std::sin(2.0 * 3.141592653589793 * 440.0 * double(pos + i) / 48000.0));
+                l[i] = v;
+                r[i] = v;
+            }
+            srv.process_and_send(pp, kCh, kBlk);
+            pos += kBlk;
+            next += 5000;
+            lv::sleep_until_us(next, [] {});
+        }
+    });
+
+    // Phone side through C ABI: enable Wi-Fi 1+1 Redundancy + connect at 10 ms target
+    LvMonitorClientHandle* cli = lv_monitor_client_create(48000);
+    REQUIRE(cli);
+    REQUIRE(lv_monitor_client_set_wifi_redundancy(cli, 1) == LV_OK);
+    REQUIRE(lv_monitor_client_connect(cli, "127.0.0.1", proxy_port, "Dante1Plus1", 512, kTargetMs) == LV_OK);
+
+    // Run real-time poll + steady 48 kHz playback clock for 1.8 s
+    std::vector<float> st(2 * 120);
+    const uint64_t t0 = lv::now_us();
+    const uint64_t t_warm = t0 + 400'000ull;
+    const uint64_t t_end = t0 + 1'800'000ull;
+    uint64_t popped = 0, nonsilent = 0, big_steps = 0;
+    float prev = 0.0f;
+    bool measuring = false;
+    double play_min = 1e9, play_max = 0.0;
+    uint64_t und_before = 0;
+
+    while (lv::now_us() < t_end) {
+        lv_monitor_client_poll(cli);
+        const uint64_t now = lv::now_us();
+        const uint64_t due = (now - t0) * 48000ull / 1'000'000ull;
+        while (popped + 120 <= due) {
+            lv_monitor_client_pop_stereo(cli, st.data(), 120);
+            popped += 120;
+            if (!measuring && now >= t_warm) {
+                measuring = true;
+                prev = st[2 * 119];
+                LV_MonitorDanteTelemetry dt{};
+                lv_monitor_client_get_dante_telemetry(cli, &dt);
+                (void)dt;
+            } else if (measuring) {
+                bool has_sig = false;
+                for (int i = 0; i < 120; ++i) {
+                    const float v = st[size_t(2 * i)];
+                    if (std::fabs(v) > 0.01f) has_sig = true;
+                    if (std::fabs(v - prev) > 0.25f) ++big_steps;
+                    prev = v;
+                }
+                if (has_sig) ++nonsilent;
+                LV_MonitorDanteTelemetry dt{};
+                if (lv_monitor_client_get_dante_telemetry(cli, &dt) == LV_OK && dt.effective_playout_ms > 0.0) {
+                    play_min = std::min(play_min, dt.effective_playout_ms);
+                    play_max = std::max(play_max, dt.effective_playout_ms);
+                }
+            }
+        }
+        lv::sleep_until_us(lv::now_us() + 500, [] {});
+    }
+
+    LV_MonitorDanteTelemetry dt{};
+    REQUIRE(lv_monitor_client_get_dante_telemetry(cli, &dt) == LV_OK);
+    (void)und_before;
+
+    stop.store(true, std::memory_order_relaxed);
+    pc.join();
+    proxy_thread.join();
+    proxy.close();
+    lv_monitor_client_disconnect(cli);
+    lv_monitor_client_destroy(cli);
+    srv.stop();
+
+    std::printf("    [dante 1+1 e2e C ABI] dropped_pri=%llu recovered=%llu nacks=%llu | "
+                "lock=%d jitter=%u us | playout=%.2f..%.2f ms (target=%u ms) | nonsilent=%llu glitches=%llu\n",
+                (unsigned long long)proxy_dropped_primary.load(), (unsigned long long)dt.duplicates_recovered,
+                (unsigned long long)dt.nacks_sent, int(dt.clock_locked), unsigned(dt.clock_offset_jitter_us),
+                play_min, play_max, unsigned(kTargetMs), (unsigned long long)nonsilent,
+                (unsigned long long)big_steps);
+
+    CHECK(dt.wifi_redundancy_enabled == 1);
+    CHECK(dt.clock_locked == 1);
+    CHECK(proxy_dropped_primary.load() >= 10);
+    CHECK(dt.duplicates_recovered >= proxy_dropped_primary.load() - 2);  // every dropped primary rescued by +1.5 ms copy!
+    CHECK(dt.nacks_sent == 0);                                           // ZERO NACK retransmissions!
+    CHECK(big_steps == 0);                                               // ZERO dropouts / glitches!
+    CHECK(nonsilent > 200);
+    CHECK(play_min >= double(kTargetMs) - 1.5 && play_max <= double(kTargetMs) + 1.5);
+}

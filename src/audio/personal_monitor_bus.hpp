@@ -253,6 +253,7 @@ private:
         uint16_t latency_ms = 20;
         bool server_muted = false;
         bool client_supports_flow = false;
+        bool client_wants_redundancy = false;
         uint64_t active_channel_mask = ~0ull;  // Receiver-Driven Subscription bitmask
         uint32_t flow_seq = 0;
         uint64_t last_seen_us = 0;
@@ -284,6 +285,7 @@ private:
     void emit_monitor_flow_locked(ClientSlot& s, int slot_idx, uint8_t flow_ch, uint32_t samples,
                                   uint64_t media_ts, uint64_t now);
     void destroy_slot_flow_codecs_locked(ClientSlot& s);
+    void refresh_any_redundancy_locked();
     void apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps);
 
     int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep);
@@ -297,6 +299,7 @@ private:
     std::string studio_name_ = "LanVid Studio";
     std::atomic<bool> running_{false};
     std::atomic<bool> wifi_redundancy_{false};
+    std::atomic<bool> any_client_redundancy_{false};
     std::atomic<uint32_t> dup_stagger_us_{1500};
     std::atomic<bool> multichannel_flow_{true};
     std::atomic<uint8_t> flow_channels_{2};
@@ -322,6 +325,17 @@ private:
     std::atomic<bool> pacer_stop_{false};
     std::atomic<uint64_t> paced_chunks_{0};
     std::atomic<uint64_t> ring_overflows_{0};
+};
+
+struct MonitorDanteTelemetry {
+    bool clock_locked = false;
+    uint32_t clock_offset_jitter_us = 0;
+    uint64_t duplicates_recovered = 0;  // lost primary Wi-Fi packets rescued by +1.5 ms 1+1 copy (0 NACK)
+    uint32_t active_flow_channels = 0;
+    double effective_playout_ms = 0.0;
+    bool wifi_redundancy_enabled = false;
+    uint64_t flow_packets_rx = 0;
+    uint64_t nacks_sent = 0;
 };
 
 // Smartphone-side C++ client (exposed via C ABI lv_monitor_client_* for Android/iOS/tests).
@@ -356,6 +370,17 @@ public:
     uint64_t active_channel_mask() const { return active_channel_mask_.load(std::memory_order_acquire); }
     uint16_t last_rx_channel_mask() const { return last_rx_flow_mask_.load(std::memory_order_relaxed); }
 
+    // Per-client Dante 1+1 Wi-Fi Redundancy (+1.5 ms backup copy negotiated in kHello + deterministic playout)
+    void set_wifi_redundancy(bool enabled);
+    bool wifi_redundancy() const { return wifi_redundancy_.load(std::memory_order_acquire); }
+
+    MonitorDanteTelemetry dante_telemetry() const;
+    uint64_t duplicates_recovered() const {
+        return flow_dups_recovered_.load(std::memory_order_relaxed) + arx_.total_duplicates_recovered();
+    }
+    bool clock_locked() const { return clock_locked_.load(std::memory_order_relaxed); }
+    uint32_t clock_offset_jitter_us() const { return clock_jitter_us_.load(std::memory_order_relaxed); }
+
     std::vector<MonitorMetaChannel> last_meta() const;
     MonitorBusTelemetry last_bus_telemetry() const;
     uint64_t audio_packets_rx() const { return audio_rx_pkts_.load(std::memory_order_relaxed); }
@@ -377,14 +402,23 @@ private:
     bool send_keepalive_ping(uint64_t now);
     void recompute_active_channel_mask();
     void handle_flow_packet(const PacketHeader& h, const uint8_t* payload, size_t len, uint64_t now);
+    void decode_flow_frame(const MonitorAudioFlowHeader& fh,
+                           const uint8_t* const ch_ptrs[kMaxMonitorFlowChannels],
+                           const uint16_t ch_lens[kMaxMonitorFlowChannels]);
+    void flush_flow_opus_inorder();
+    void service_flow_reorder(uint64_t now);
     void flow_one_way_observe(double media_end_us, uint64_t now);
     void destroy_flow_decoders();
     std::atomic<uint64_t> last_tx_us_{0};
     std::atomic<uint64_t> pings_{0};
     std::atomic<uint64_t> active_channel_mask_{~0ull};
     std::atomic<uint16_t> last_rx_flow_mask_{0};
+    std::atomic<bool> wifi_redundancy_{false};
+    std::atomic<bool> clock_locked_{false};
+    std::atomic<uint32_t> clock_jitter_us_{0};
     std::atomic<uint64_t> flow_rx_pkts_{0};
     std::atomic<uint64_t> flow_dup_drops_{0};
+    std::atomic<uint64_t> flow_dups_recovered_{0};
     bool mask_override_ = false;
     std::array<PersonalMonitorChannelMix, kMonitorMaxInputChannels> local_mix_{};
     // Instant seq deduplication ring for kMonitorAudioFlow (4096-bit window)
@@ -392,13 +426,28 @@ private:
     bool flow_seen_ = false;
     uint32_t flow_highest_ = 0;
     std::array<uint64_t, kFlowDupWindow / 64> flow_recv_bits_{};
-    // One-way clock observer for kMonitorAudioFlow packets
+    // In-order Opus reorder gate for kMonitorAudioFlow (zero added latency in-order; prevents MDCT clicks
+    // when a +1.5 ms redundant backup copy arrives slightly after seq+1).
+    struct PendingFlowOpus {
+        bool valid = false;
+        uint32_t seq = 0;
+        uint64_t arrived_us = 0;
+        MonitorAudioFlowHeader hdr{};
+        std::vector<uint8_t> raw_payload;
+    };
+    static constexpr uint32_t kFlowOpusReorderSlots = 16;
+    bool flow_opus_seq_init_ = false;
+    uint32_t flow_opus_next_seq_ = 0;
+    std::array<PendingFlowOpus, kFlowOpusReorderSlots> flow_opus_pending_{};
+    // One-way clock observer (min-one-way-delay PTP-like offset filter) for kMonitorAudioFlow
     bool flow_ow_have_ = false;
     double flow_ow_applied_ = 0.0;
     double flow_ow_win_[4] = {0, 0, 0, 0};
     double flow_ow_cur_ = -1e300;
     uint64_t flow_ow_win_start_ = 0;
     int flow_ow_win_n_ = 0;
+    uint32_t flow_ow_samples_ = 0;
+    double flow_ow_jitter_ema_ = 0.0;
     std::array<void*, kMaxMonitorFlowChannels> flow_opus_dec_{};
     std::vector<float> flow_dec_scratch_;
 

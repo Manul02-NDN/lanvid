@@ -19,10 +19,30 @@ final class MonitorEngine: ObservableObject {
     /// included) explore every screen without a PC running LanVid Studio.
     @Published private(set) var isDemo = false
 
-    @Published var quality: StreamQuality = .k256 { didSet { if quality != oldValue { pushStream(); save() } } }
+    @Published var quality: StreamQuality = .k256 {
+        didSet {
+            if quality != oldValue {
+                if !wifiRedundancyUserSet {
+                    wifiRedundancy = (quality == .k192 || quality == .k256)
+                }
+                pushStream()
+                save()
+            }
+        }
+    }
     @Published var buffer: MonitorBuffer = .ms10 { didSet { if buffer != oldValue { pushStream(); save() } } }
+    @Published var wifiRedundancy: Bool = true {
+        didSet {
+            if wifiRedundancy != oldValue {
+                pushWifiRedundancy()
+                save()
+            }
+        }
+    }
     @Published var dsp = DspSettings() { didSet { if dsp != oldValue { pushDsp(); save() } } }
     @Published var clientName: String = UIDeviceName.current { didSet { save() } }
+
+    private var wifiRedundancyUserSet = false
 
     private var cli: OpaquePointer?
     private var ioThread: Thread?
@@ -62,6 +82,7 @@ final class MonitorEngine: ObservableObject {
             lastError = tr("Не вдалося створити клієнт", "Could not create the monitor client")
             return
         }
+        lv_monitor_client_set_wifi_redundancy(h, wifiRedundancy ? 1 : 0)
         let rc = lv_monitor_client_connect(h, studio.host, studio.port, String(clientName.prefix(15)),
                                            quality.wireKbps, UInt16(buffer.rawValue))
         guard rc == 0 else {
@@ -78,6 +99,7 @@ final class MonitorEngine: ObservableObject {
         UserDefaults.standard.set(Int(studio.port), forKey: "lastPort")
         pushDsp()
         for ch in channels { pushMix(ch) }
+        pushSubscribedMask()
         startIo(h)
         startAudio(h)
     }
@@ -176,20 +198,34 @@ final class MonitorEngine: ObservableObject {
             gr = -min(24, over * (1 - 1 / Double(max(1, dsp.compRatio))))
         }
         let out = dsp.masterMute ? -120 : min(-0.5, master + gr)
+        let anySolo = channels.contains { $0.solo }
+        let activeCh = UInt32(channels.filter { !$0.mute && (!anySolo || $0.solo) }.count)
         telemetry = MonitorTelemetry(gainReductionDb: Float(gr), mixPeakDbfs: Float(out),
-                                     bufferMs: Double(buffer.rawValue) + 0.8, audioPackets: UInt64(t * 200),
-                                     receiving: true)
+                                     bufferMs: Double(buffer.rawValue) + 0.1, audioPackets: UInt64(t * 200),
+                                     receiving: true, clockLocked: true, clockOffsetJitterUs: 180,
+                                     duplicatesRecovered: wifiRedundancy ? UInt64(t * 3) : 0,
+                                     activeFlowChannels: activeCh,
+                                     effectivePlayoutMs: Double(buffer.rawValue) + 0.1,
+                                     wifiRedundancyEnabled: wifiRedundancy)
     }
 
-    // MARK: - Mixer (sent instantly as kMonitorControl; the PC re-mixes the phone's stereo bus)
+    // MARK: - Mixer (sent instantly as kMonitorControl + Rx Subscription mask)
+
+    func setWifiRedundancyFromUser(_ enabled: Bool) {
+        wifiRedundancyUserSet = true
+        wifiRedundancy = enabled
+        save()
+    }
 
     func update(_ strip: ChannelStrip) {
         guard let i = channels.firstIndex(where: { $0.id == strip.id }) else { return }
         var s = strip
         s.peakDbfs = channels[i].peakDbfs
         guard channels[i] != s else { return }
+        let subChanged = (channels[i].mute != s.mute) || (channels[i].solo != s.solo)
         channels[i] = s
         pushMix(s)
+        if subChanged { pushSubscribedMask() }
         saveMix()
     }
 
@@ -198,7 +234,29 @@ final class MonitorEngine: ObservableObject {
             channels[i].gainDb = 0; channels[i].pan = 0; channels[i].mute = false; channels[i].solo = false
             pushMix(channels[i])
         }
+        pushSubscribedMask()
         saveMix()
+    }
+
+    private func computeSubscribedMask() -> UInt64 {
+        guard !channels.isEmpty else { return UInt64.max }
+        let anySolo = channels.contains { $0.solo }
+        var mask: UInt64 = 0
+        for ch in channels where ch.id >= 0 && ch.id < 64 {
+            let active = anySolo ? (ch.solo && !ch.mute) : !ch.mute
+            if active { mask |= (UInt64(1) << UInt64(ch.id)) }
+        }
+        return mask
+    }
+
+    private func pushSubscribedMask() {
+        guard let h = cli else { return }
+        lv_monitor_client_set_subscribed_mask(h, computeSubscribedMask())
+    }
+
+    private func pushWifiRedundancy() {
+        guard let h = cli else { return }
+        lv_monitor_client_set_wifi_redundancy(h, wifiRedundancy ? 1 : 0)
     }
 
     private func pushMix(_ s: ChannelStrip) {
@@ -254,7 +312,9 @@ final class MonitorEngine: ObservableObject {
                     lv_monitor_client_request_meta(cli)
                     lastMeta = now
                     var tel = LV_MonitorTelemetry()
+                    var dtel = LV_MonitorDanteTelemetry()
                     let n = Int(lv_monitor_client_get_meta(cli, &names, 64, &tel))
+                    lv_monitor_client_get_dante_telemetry(cli, &dtel)
                     let snapshot: [(String, Float)] = (0..<min(max(n, 0), 64)).map { i in
                         let name = withUnsafeBytes(of: names[i].name) { raw -> String in
                             let bytes = raw.prefix { $0 != 0 }
@@ -262,9 +322,16 @@ final class MonitorEngine: ObservableObject {
                         }
                         return (name, Float(names[i].peak_dbfs))
                     }
+                    let playoutMs = dtel.effective_playout_ms > 0 ? dtel.effective_playout_ms : tel.buffer_ms
                     let t = MonitorTelemetry(gainReductionDb: tel.bus_gain_reduction_db,
                                              mixPeakDbfs: tel.bus_peak_dbfs, bufferMs: tel.buffer_ms,
-                                             audioPackets: tel.audio_packets_rx, receiving: false)
+                                             audioPackets: tel.audio_packets_rx, receiving: false,
+                                             clockLocked: dtel.clock_locked != 0,
+                                             clockOffsetJitterUs: dtel.clock_offset_jitter_us,
+                                             duplicatesRecovered: dtel.duplicates_recovered,
+                                             activeFlowChannels: dtel.active_flow_channels,
+                                             effectivePlayoutMs: playoutMs,
+                                             wifiRedundancyEnabled: dtel.wifi_redundancy_enabled != 0)
                     Task { @MainActor in self?.applyMeta(snapshot, t) }
                 }
                 usleep(1000)
@@ -299,7 +366,9 @@ final class MonitorEngine: ObservableObject {
                 pushMix(s)
             }
         }
+        let prevCount = channels.count
         if next != channels { channels = next }
+        if next.count != prevCount && !next.isEmpty { pushSubscribedMask() }
         if !next.isEmpty || t.audioPackets > 0 {
             if !handshakeConfirmed, !isDemo, let s = connected {
                 // The studio really answered: remember it. The LAN scan probes this address first next launch.
@@ -386,6 +455,8 @@ final class MonitorEngine: ObservableObject {
         let d = UserDefaults.standard
         d.set(quality.rawValue, forKey: "quality")
         d.set(buffer.rawValue, forKey: "buffer")
+        d.set(wifiRedundancy, forKey: "wifiRedundancy")
+        d.set(wifiRedundancyUserSet, forKey: "wifiRedundancyUserSet")
         d.set(clientName, forKey: "clientName")
         if let data = try? JSONEncoder().encode(dsp) { d.set(data, forKey: "dsp") }
     }
@@ -394,6 +465,12 @@ final class MonitorEngine: ObservableObject {
         let d = UserDefaults.standard
         if let q = StreamQuality(rawValue: d.object(forKey: "quality") as? Int ?? 256) { quality = q }
         if let b = MonitorBuffer(rawValue: d.object(forKey: "buffer") as? Int ?? 10) { buffer = b }
+        wifiRedundancyUserSet = d.bool(forKey: "wifiRedundancyUserSet")
+        if wifiRedundancyUserSet {
+            wifiRedundancy = d.bool(forKey: "wifiRedundancy")
+        } else {
+            wifiRedundancy = (quality == .k192 || quality == .k256)
+        }
         if let n = d.string(forKey: "clientName"), !n.isEmpty { clientName = n }
         if let data = d.data(forKey: "dsp"), let v = try? JSONDecoder().decode(DspSettings.self, from: data) { dsp = v }
     }

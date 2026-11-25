@@ -77,4 +77,10 @@ data class Telemetry(
     val deviceRate: Int = 0,
     val exclusive: Boolean = false,
     val xruns: Int = 0,
+    val clockLocked: Boolean = false,
+    val clockOffsetJitterUs: Long = 0,
+    val duplicatesRecovered: Long = 0,
+    val activeFlowChannels: Int = 0,
+    val effectivePlayoutMs: Double = 0.0,
+    val wifiRedundancyEnabled: Boolean = false,
 )

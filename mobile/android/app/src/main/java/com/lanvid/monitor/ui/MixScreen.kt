@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,6 +40,17 @@ fun MixScreen() {
             Text(MonitorEngine.quality.detail, color = Lv.muted, fontSize = 11.sp)
             Text("Буфер", color = Lv.muted, fontSize = 12.sp)
             SegmentRow(MonitorBuffer.entries, MonitorEngine.buffer, { "${it.ms} мс" }) { MonitorEngine.changeBuffer(it) }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Wi-Fi 1+1 Redundancy", color = Lv.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Дублювання +1.5 мс · 0 пауз NACK", color = Lv.muted, fontSize = 11.sp)
+                }
+                Switch(
+                    checked = MonitorEngine.wifiRedundancy,
+                    onCheckedChange = { MonitorEngine.changeWifiRedundancy(it) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = Lv.accent2),
+                )
+            }
         }
         when {
             MonitorEngine.connected == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

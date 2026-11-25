@@ -30,6 +30,36 @@ struct ConnectView: View {
                                     + String(format: "%.1f ", engine.telemetry.bufferMs) + tr("мс", "ms")
                                 : tr("Очікування звуку від LanVid Studio…", "Waiting for audio from LanVid Studio…")))
                             .font(.footnote).foregroundStyle(Theme.muted)
+                        HStack(spacing: 8) {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(engine.telemetry.clockLocked ? Theme.green : Theme.amber)
+                                    .frame(width: 7, height: 7)
+                                Text(engine.telemetry.clockLocked ? "PTP Lock" : tr("Синхро…", "Syncing…"))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(engine.telemetry.clockLocked ? Theme.green : Theme.amber)
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Capsule().fill(Theme.cardHi))
+
+                            let playoutMs = engine.telemetry.effectivePlayoutMs > 0
+                                ? engine.telemetry.effectivePlayoutMs
+                                : engine.telemetry.bufferMs
+                            Text(String(format: "Playout: %.1f ms", playoutMs))
+                                .font(.caption2.monospacedDigit().weight(.medium))
+                                .foregroundStyle(Theme.text)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Capsule().fill(Theme.cardHi))
+
+                            if engine.wifiRedundancy || engine.telemetry.duplicatesRecovered > 0 {
+                                Text("1+1 Recovered: \(engine.telemetry.duplicatesRecovered)")
+                                    .font(.caption2.monospacedDigit().weight(.medium))
+                                    .foregroundStyle(Theme.accent2)
+                                    .padding(.horizontal, 8).padding(.vertical, 4)
+                                    .background(Capsule().fill(Theme.cardHi))
+                            }
+                            Spacer(minLength: 0)
+                        }
                     }
                 }
 

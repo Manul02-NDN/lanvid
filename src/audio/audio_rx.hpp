@@ -66,6 +66,7 @@ public:
     AudioChannelRxStats channel_stats(uint16_t channel_index) const;
     uint64_t total_nacks_sent() const;
     uint64_t total_duplicates() const;
+    uint64_t total_duplicates_recovered() const;
     uint64_t rate_mismatch_drops() const { return rate_drops_.load(std::memory_order_relaxed); }
     uint32_t active_channel_count() const;
 

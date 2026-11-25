@@ -351,8 +351,9 @@ constexpr size_t kMonitorControlSize = 64;
 // kHello.bitrate_kbps value requesting a lossless monitor stream (24-bit PCM, ~2.3 Mbps stereo).
 constexpr uint16_t kMonitorBitrateLossless = 0xFFFF;
 // Capability flags carried in MonitorControlPayload::reserved on kHello:
-constexpr uint8_t kMonitorCapFlowV1 = 0x01;       // Client supports compact kMonitorAudioFlow multi-channel frames
-constexpr uint8_t kMonitorCapRxSubMask = 0x02;    // Client sends active_channel_mask in kHello & 15 ms LVKA keep-alive
+constexpr uint8_t kMonitorCapFlowV1 = 0x01;          // Client supports compact kMonitorAudioFlow multi-channel frames
+constexpr uint8_t kMonitorCapRxSubMask = 0x02;       // Client sends active_channel_mask in kHello & 15 ms LVKA keep-alive
+constexpr uint8_t kMonitorCapRedundancy1Plus1 = 0x04;// Client requests 1+1 Wi-Fi Redundant Flow (+1.5 ms backup copy)
 
 struct MonitorControlPayload {
     MonitorControlOp op = MonitorControlOp::kHello;
@@ -398,7 +399,7 @@ bool parse_monitor_keepalive(const uint8_t* in, size_t len, MonitorKeepAlivePayl
 constexpr size_t kMonitorAudioFlowHeaderSize = 24;
 constexpr uint8_t kMaxMonitorFlowChannels = 16;
 constexpr uint8_t kMonitorFlowFlagVarLen = 0x01;   // payload begins with channel_count x u16 per-channel byte lengths
-// kAudioFlagDuplicate (0x04) in flags marks a proactive 1+1 redundant duplicate packet.
+constexpr uint8_t kFlagRedundantCopy = kAudioFlagDuplicate;  // 0x04: proactive 1+1 Wi-Fi redundant copy (+1.5 ms)
 
 struct MonitorAudioFlowHeader {
     uint32_t flow_seq = 0;

@@ -74,6 +74,47 @@ fun ConnectScreen() {
                     if (tel.receiving) "Звук надходить · буфер %.1f мс".format(tel.bufferMs) else "Очікування звуку від LanVid Studio…",
                     color = Lv.muted, fontSize = 13.sp,
                 )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        Modifier
+                            .background(Lv.cardHi, RoundedCornerShape(50))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Box(Modifier.size(7.dp).background(if (tel.clockLocked) Lv.green else Lv.amber, CircleShape))
+                        Text(
+                            if (tel.clockLocked) "PTP Lock" else "Синхро…",
+                            color = if (tel.clockLocked) Lv.green else Lv.amber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    val playoutMs = if (tel.effectivePlayoutMs > 0.0) tel.effectivePlayoutMs else tel.bufferMs
+                    Text(
+                        "Playout: %.1f ms".format(playoutMs),
+                        color = Lv.text,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier
+                            .background(Lv.cardHi, RoundedCornerShape(50))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    )
+                    if (MonitorEngine.wifiRedundancy || tel.duplicatesRecovered > 0L) {
+                        Text(
+                            "1+1 Rec: ${tel.duplicatesRecovered}",
+                            color = Lv.accent2,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier
+                                .background(Lv.cardHi, RoundedCornerShape(50))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                }
                 if (tel.burstFrames > 0) {
                     Text(
                         "AAudio ${if (tel.exclusive) "EXCLUSIVE" else "SHARED"} · burst ${tel.burstFrames} · буфер " +

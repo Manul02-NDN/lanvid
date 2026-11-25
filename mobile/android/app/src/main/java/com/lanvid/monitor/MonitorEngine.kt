@@ -34,14 +34,18 @@ object MonitorEngine {
         private set
     var buffer by mutableStateOf(MonitorBuffer.MS10)
         private set
+    var wifiRedundancy by mutableStateOf(true)
+        private set
     var dsp by mutableStateOf(DspSettings())
         private set
     var clientName by mutableStateOf(Build.MODEL ?: "Android")
         private set
 
+    private var wifiRedundancyUserSet = false
     private val names = ByteArray(64 * 16)
     private val peaks = ByteArray(64)
     private val tel = DoubleArray(10)
+    private val danteTel = DoubleArray(8)
     private var lastPackets = 0L
     private var connectStartedMs = 0L
     private var handshakeConfirmed = false
@@ -53,6 +57,13 @@ object MonitorEngine {
         handle = MonitorNative.nativeCreate()
         quality = StreamQuality.entries.firstOrNull { it.name == prefs.getString("quality", null) } ?: StreamQuality.K256
         buffer = MonitorBuffer.entries.firstOrNull { it.name == prefs.getString("buffer", null) } ?: MonitorBuffer.MS10
+        wifiRedundancyUserSet = prefs.getBoolean("wifiRedundancyUserSet", false)
+        wifiRedundancy = if (wifiRedundancyUserSet) {
+            prefs.getBoolean("wifiRedundancy", true)
+        } else {
+            quality == StreamQuality.K192 || quality == StreamQuality.K256
+        }
+        MonitorNative.setWifiRedundancy(handle, wifiRedundancy)
         prefs.getString("clientName", null)?.takeIf { it.isNotBlank() }?.let { clientName = it }
         dsp = loadDsp()
     }
@@ -64,6 +75,7 @@ object MonitorEngine {
 
     fun connect(studio: Studio) {
         disconnect()
+        MonitorNative.setWifiRedundancy(handle, wifiRedundancy)
         val rc = MonitorNative.nativeConnect(handle, studio.host, studio.port, clientName.take(15), quality.wireKbps, buffer.ms)
         if (rc != 0 && rc != -2) {
             lastError = "Немає з'єднання з ${studio.host}:${studio.port} (код $rc)"
@@ -76,6 +88,7 @@ object MonitorEngine {
         prefs.edit().putString("lastHost", studio.host).putInt("lastPort", studio.port).apply()
         pushDsp()
         channels.forEach { pushMix(it) }
+        pushSubscribedMask()
         startService()
         main.removeCallbacks(tick)
         main.post(tick)
@@ -116,13 +129,25 @@ object MonitorEngine {
     fun changeQuality(q: StreamQuality) {
         quality = q
         prefs.edit().putString("quality", q.name).apply()
-        if (connected != null) MonitorNative.nativeSetStream(handle, q.wireKbps, buffer.ms)
+        if (!wifiRedundancyUserSet) {
+            wifiRedundancy = (q == StreamQuality.K192 || q == StreamQuality.K256)
+            prefs.edit().putBoolean("wifiRedundancy", wifiRedundancy).apply()
+            MonitorNative.setWifiRedundancy(handle, wifiRedundancy)
+        }
+        if (connected != null && !isDemo) MonitorNative.nativeSetStream(handle, q.wireKbps, buffer.ms)
     }
 
     fun changeBuffer(b: MonitorBuffer) {
         buffer = b
         prefs.edit().putString("buffer", b.name).apply()
-        if (connected != null) MonitorNative.nativeSetStream(handle, quality.wireKbps, b.ms)
+        if (connected != null && !isDemo) MonitorNative.nativeSetStream(handle, quality.wireKbps, b.ms)
+    }
+
+    fun changeWifiRedundancy(enabled: Boolean) {
+        wifiRedundancyUserSet = true
+        wifiRedundancy = enabled
+        prefs.edit().putBoolean("wifiRedundancy", enabled).putBoolean("wifiRedundancyUserSet", true).apply()
+        MonitorNative.setWifiRedundancy(handle, enabled)
     }
 
     fun changeClientName(n: String) {
@@ -139,12 +164,32 @@ object MonitorEngine {
 
     fun setGain(ch: ChannelState, db: Float) { ch.gainDb = db; pushMix(ch); saveMix() }
     fun setPan(ch: ChannelState, pan: Float) { ch.pan = pan; pushMix(ch); saveMix() }
-    fun toggleMute(ch: ChannelState) { ch.mute = !ch.mute; pushMix(ch); saveMix() }
-    fun toggleSolo(ch: ChannelState) { ch.solo = !ch.solo; pushMix(ch); saveMix() }
+    fun toggleMute(ch: ChannelState) { ch.mute = !ch.mute; pushMix(ch); pushSubscribedMask(); saveMix() }
+    fun toggleSolo(ch: ChannelState) { ch.solo = !ch.solo; pushMix(ch); pushSubscribedMask(); saveMix() }
 
     fun resetMix() {
         channels.forEach { it.gainDb = 0f; it.pan = 0f; it.mute = false; it.solo = false; pushMix(it) }
+        pushSubscribedMask()
         saveMix()
+    }
+
+    private fun computeSubscribedMask(): Long {
+        if (channels.isEmpty()) return -1L
+        val anySolo = channels.any { it.solo }
+        var mask = 0L
+        for (c in channels) {
+            if (c.index in 0..63) {
+                val active = if (anySolo) (c.solo && !c.mute) else !c.mute
+                if (active) mask = mask or (1L shl c.index)
+            }
+        }
+        return mask
+    }
+
+    private fun pushSubscribedMask() {
+        if (connected != null && !isDemo) {
+            MonitorNative.setSubscribedMask(handle, computeSubscribedMask())
+        }
     }
 
     private fun pushMix(c: ChannelState) {
@@ -183,6 +228,7 @@ object MonitorEngine {
         val gr = if (dsp.compOn && mixPeak > dsp.compThresholdDb) {
             ((mixPeak - dsp.compThresholdDb) * (1f / dsp.compRatio - 1f)).coerceIn(-18f, 0f)
         } else 0f
+        val activeCount = channels.count { if (anySolo) (it.solo && !it.mute) else !it.mute }
         telemetry = Telemetry(
             gainReductionDb = gr,
             mixPeakDbfs = mixPeak,
@@ -194,12 +240,20 @@ object MonitorEngine {
             deviceRate = 48000,
             exclusive = true,
             xruns = 0,
+            clockLocked = true,
+            clockOffsetJitterUs = 160L,
+            duplicatesRecovered = if (wifiRedundancy) (demoStep / 6).toLong() else 0L,
+            activeFlowChannels = activeCount,
+            effectivePlayoutMs = buffer.ms.toDouble(),
+            wifiRedundancyEnabled = wifiRedundancy,
         )
     }
 
     private fun pullMeta() {
         if (connected == null) return
+        val prevCount = channels.size
         val n = MonitorNative.nativeGetMeta(handle, names, peaks, tel).coerceIn(0, 64)
+        MonitorNative.getDanteTelemetry(handle, danteTel)
         val saved = if (n > channels.size) loadMix() else emptyMap()
         for (i in 0 until n) {
             val raw = names.copyOfRange(i * 16, i * 16 + 16)
@@ -218,6 +272,7 @@ object MonitorEngine {
             }
         }
         while (channels.size > n) channels.removeAt(channels.size - 1)
+        if (channels.size != prevCount && channels.isNotEmpty()) pushSubscribedMask()
         val packets = tel[4].toLong()
         if (n > 0 || packets > 0L) {
             handshakeConfirmed = true
@@ -228,11 +283,18 @@ object MonitorEngine {
                 lastError = "Немає відповіді від ${s.host}:${s.port} — перевірте Wi-Fi, LanVid Studio на ПК та Firewall (UDP 5020)"
             }
         }
+        val playoutMs = if (danteTel[4] > 0.0) danteTel[4] else tel[3]
         telemetry = Telemetry(
             gainReductionDb = tel[1].toFloat(), mixPeakDbfs = tel[2].toFloat(), bufferMs = tel[3],
             audioPackets = packets, receiving = packets > lastPackets,
             burstFrames = tel[5].toInt(), deviceBufferFrames = tel[6].toInt(), deviceRate = tel[7].toInt(),
             exclusive = tel[8] != 0.0, xruns = tel[9].toInt(),
+            clockLocked = danteTel[0] != 0.0,
+            clockOffsetJitterUs = danteTel[1].toLong(),
+            duplicatesRecovered = danteTel[2].toLong(),
+            activeFlowChannels = danteTel[3].toInt(),
+            effectivePlayoutMs = playoutMs,
+            wifiRedundancyEnabled = danteTel[5] != 0.0,
         )
         lastPackets = packets
     }

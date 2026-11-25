@@ -25,6 +25,18 @@ struct SettingsView: View {
                     SegmentRow(items: StreamQuality.allCases, selection: $engine.quality) { $0.label }
                     Text(tr("Буфер", "Buffer")).font(.caption).foregroundStyle(Theme.muted)
                     SegmentRow(items: MonitorBuffer.allCases, selection: $engine.buffer) { "\($0.rawValue) " + tr("мс", "ms") }
+                    Toggle(isOn: Binding(
+                        get: { engine.wifiRedundancy },
+                        set: { engine.setWifiRedundancyFromUser($0) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Wi-Fi 1+1 Redundancy").font(.subheadline.weight(.semibold)).foregroundStyle(Theme.text)
+                            Text(tr("Проактивний дублікат +1.5 мс (увімкнено для Opus 192/256) — 0 пауз NACK",
+                                    "Proactive +1.5 ms backup packet (default on for Opus 192/256) — zero NACK stalls"))
+                                .font(.caption2).foregroundStyle(Theme.muted)
+                        }
+                    }
+                    .tint(Theme.accent2)
                     Text(tr("Менший буфер — менша затримка в навушниках, але потрібна стабільна Wi-Fi мережа.",
                             "A smaller buffer means lower latency in your headphones, but needs a stable Wi-Fi network."))
                         .font(.caption2).foregroundStyle(Theme.muted)

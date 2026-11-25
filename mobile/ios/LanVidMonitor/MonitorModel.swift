@@ -88,4 +88,10 @@ struct MonitorTelemetry: Equatable {
     var bufferMs: Double = 0
     var audioPackets: UInt64 = 0
     var receiving = false
+    var clockLocked = false
+    var clockOffsetJitterUs: UInt32 = 0
+    var duplicatesRecovered: UInt64 = 0
+    var activeFlowChannels: UInt32 = 0
+    var effectivePlayoutMs: Double = 0
+    var wifiRedundancyEnabled = false
 }

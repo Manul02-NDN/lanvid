@@ -368,6 +368,28 @@ LV_API int lv_monitor_client_set_stream(LvMonitorClientHandle* cli, uint16_t bit
 /* Keepalive: the PC drops phones it has not heard from for 15 s. Call every 1-3 s. */
 LV_API int lv_monitor_client_keepalive(LvMonitorClientHandle* cli);
 
+/* ---- Dante-style Wi-Fi Redundancy, Rx Subscriptions & Telemetry (additive) ---- */
+typedef struct LV_MonitorDanteTelemetry {
+    int32_t  clock_locked;            /* 1 once min-delay clock offset filter locked, 0 otherwise */
+    uint32_t clock_offset_jitter_us;  /* filtered one-way clock offset jitter (us) */
+    uint64_t duplicates_recovered;    /* lost Wi-Fi primary packets rescued by +1.5 ms 1+1 copy (0 NACK) */
+    uint32_t active_flow_channels;    /* active channels carried in latest kMonitorAudioFlow packet */
+    double   effective_playout_ms;    /* actual deterministic playout deadline delay (ms) */
+    int32_t  wifi_redundancy_enabled; /* 1 if 1+1 Wi-Fi Redundancy is active */
+    uint64_t flow_packets_rx;         /* total unique kMonitorAudioFlow datagrams received */
+    uint64_t nacks_sent;              /* total NACK retransmission requests sent */
+} LV_MonitorDanteTelemetry;
+
+/* Toggles per-client Dante 1+1 Wi-Fi Redundancy (+1.5 ms backup copy + deterministic playout) live. */
+LV_API int lv_monitor_client_set_wifi_redundancy(LvMonitorClientHandle* cli, int enabled);
+/* Sends Receiver-Driven Subscription bitmask (bit c = channel c active) in 15 ms LVKA keep-alive. */
+LV_API int lv_monitor_client_set_subscribed_mask(LvMonitorClientHandle* cli, uint64_t channel_mask);
+/* Returns Dante clock-lock, effective playout ms, and 1+1 recovery telemetry. */
+LV_API int lv_monitor_client_get_dante_telemetry(LvMonitorClientHandle* cli, LV_MonitorDanteTelemetry* out);
+/* Server-side controls for Dante multi-channel flows and global 1+1 Wi-Fi redundancy. */
+LV_API int lv_monitor_server_set_wifi_redundancy(LvMonitorServerHandle* srv, int enabled, uint32_t stagger_us);
+LV_API int lv_monitor_server_set_multichannel_flow(LvMonitorServerHandle* srv, int enabled, uint8_t flow_channels);
+
 /* ---- Real-Time Bidirectional Config Sync (PacketType::kControlSync) ---- */
 typedef struct LV_ControlSyncState {
     uint64_t revision;           /* monotonic version (anti-loop / dedup) */

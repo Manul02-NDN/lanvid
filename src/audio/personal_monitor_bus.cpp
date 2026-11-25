@@ -386,7 +386,9 @@ void PersonalMonitorServer::pacer_loop() {
     uint64_t next = now_us();
     uint64_t last = next;
     while (!pacer_stop_.load(std::memory_order_acquire)) {
-        const uint32_t tick_us = wifi_redundancy_.load(std::memory_order_relaxed) ? 1000u : kPaceTickUs;
+        const bool fast_tick =
+            wifi_redundancy_.load(std::memory_order_relaxed) || any_client_redundancy_.load(std::memory_order_relaxed);
+        const uint32_t tick_us = fast_tick ? 1000u : kPaceTickUs;
         next += tick_us;
         sleep_until_us(next, [] {});
         const uint64_t now = now_us();
@@ -404,14 +406,25 @@ void PersonalMonitorServer::pacer_loop() {
     }
 }
 
+void PersonalMonitorServer::refresh_any_redundancy_locked() {
+    bool any = false;
+    for (const auto& s : slots_) {
+        if (s.active && s.client_wants_redundancy) {
+            any = true;
+            break;
+        }
+    }
+    any_client_redundancy_.store(any, std::memory_order_release);
+}
+
 void PersonalMonitorServer::set_wifi_redundancy(bool enabled, uint32_t stagger_us) {
     dup_stagger_us_.store(std::clamp<uint32_t>(stagger_us, 0, 10000), std::memory_order_relaxed);
     wifi_redundancy_.store(enabled, std::memory_order_release);
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& s : slots_) {
-        if (s.active && s.tx) s.tx->set_wifi_redundancy(enabled, stagger_us);
+        if (s.active && s.tx) s.tx->set_wifi_redundancy(enabled || s.client_wants_redundancy, stagger_us);
     }
-    if (!enabled) flow_dups_.clear();
+    if (!enabled && !any_client_redundancy_.load(std::memory_order_relaxed)) flow_dups_.clear();
 }
 
 void PersonalMonitorServer::set_multichannel_flow(bool enabled, uint8_t flow_channels) {
@@ -592,8 +605,8 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
     }
 
     // Glitch-Free Wi-Fi Redundancy (1+1 Duplicate): schedule identical backup packet +1.5 ms later
-    if (wifi_redundancy_.load(std::memory_order_acquire)) {
-        body[21] |= kAudioFlagDuplicate;
+    if (wifi_redundancy_.load(std::memory_order_acquire) || s.client_wants_redundancy) {
+        body[21] |= kFlagRedundantCopy;
         uint8_t dup_dg[kPacketHeaderSize + sizeof(body)];
         const size_t dup_len = write_packet(dup_dg, sizeof(dup_dg), ph, body, blen);
         if (dup_len > 0) {
@@ -781,6 +794,7 @@ int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const E
             s.latency_ms = 20;
             s.server_muted = false;
             s.client_supports_flow = false;
+            s.client_wants_redundancy = false;
             s.active_channel_mask = ~0ull;
             s.flow_seq = 0;
             s.packets_tx = 0;
@@ -858,6 +872,12 @@ void PersonalMonitorServer::handle_control_packet(const PacketHeader&, const uin
             if (mc.client_name[0] != '\0') s.name = mc.client_name;
             if ((mc.reserved & kMonitorCapFlowV1) != 0) s.client_supports_flow = true;
             if ((mc.reserved & kMonitorCapRxSubMask) != 0) s.active_channel_mask = mc.active_channel_mask;
+            s.client_wants_redundancy = (mc.reserved & kMonitorCapRedundancy1Plus1) != 0;
+            refresh_any_redundancy_locked();
+            if (s.tx) {
+                s.tx->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire) || s.client_wants_redundancy,
+                                          dup_stagger_us_.load(std::memory_order_relaxed));
+            }
             if ((mc.bitrate_kbps >= 128 && mc.bitrate_kbps <= 512) || mc.bitrate_kbps == kMonitorBitrateLossless)
                 apply_bitrate_locked(s, mc.bitrate_kbps);
             if (mc.target_latency_ms >= 2 && mc.target_latency_ms <= 500) {
@@ -903,6 +923,8 @@ void PersonalMonitorServer::handle_control_packet(const PacketHeader&, const uin
         case MonitorControlOp::kDisconnect:
             destroy_slot_flow_codecs_locked(s);
             s.active = false;
+            s.client_wants_redundancy = false;
+            refresh_any_redundancy_locked();
             s.tx.reset();
             s.bus.reset();
             break;
@@ -1144,11 +1166,19 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
     flow_seen_ = false;
     flow_highest_ = 0;
     flow_recv_bits_.fill(0);
+    flow_opus_seq_init_ = false;
+    flow_opus_next_seq_ = 0;
+    for (auto& po : flow_opus_pending_) po.valid = false;
     flow_ow_have_ = false;
     flow_ow_applied_ = 0.0;
     flow_ow_cur_ = -1e300;
     flow_ow_win_start_ = 0;
     flow_ow_win_n_ = 0;
+    flow_ow_samples_ = 0;
+    flow_ow_jitter_ema_ = 0.0;
+    clock_locked_.store(false, std::memory_order_relaxed);
+    clock_jitter_us_.store(0, std::memory_order_relaxed);
+    flow_dups_recovered_.store(0, std::memory_order_relaxed);
     last_rx_flow_mask_.store(0, std::memory_order_relaxed);
     if (!sock_.open()) return false;
     if (!sock_.bind("0.0.0.0", 0)) {
@@ -1167,8 +1197,8 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
     arx_.set_adaptive_jitter_enabled(false);
     arx_.set_one_way_clock_sync(true);          // steady playout position from the packet timestamps
     matrix_.set_underrun_prefill(true, 75);     // refill to 75 % of the buffer after an underrun
-    if (latency_ms <= 10) {
-        matrix_.set_deterministic_playout(true, 1000.0);  // strict 5..10 ms horizon, +/-0.1% micro-trim
+    if (latency_ms <= 10 || wifi_redundancy_.load(std::memory_order_acquire)) {
+        matrix_.set_deterministic_playout(true, 1000.0);  // strict Playout Deadline, +/-0.1% micro-trim
     } else {
         matrix_.set_deterministic_playout(false);
         matrix_.set_max_resample_ppm(2000.0);   // follow phone / PC crystal drift within +/-0.2 %
@@ -1183,7 +1213,8 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
 bool PersonalMonitorClient::keepalive() {
     MonitorControlPayload hello{};
     hello.op = MonitorControlOp::kHello;
-    hello.reserved = uint8_t(kMonitorCapFlowV1 | kMonitorCapRxSubMask);
+    hello.reserved = uint8_t(kMonitorCapFlowV1 | kMonitorCapRxSubMask |
+                             (wifi_redundancy_.load(std::memory_order_acquire) ? kMonitorCapRedundancy1Plus1 : 0u));
     hello.client_id = client_id_;
     hello.bitrate_kbps = bitrate_kbps_.load(std::memory_order_relaxed);
     hello.target_latency_ms = latency_ms_.load(std::memory_order_relaxed);
@@ -1197,13 +1228,46 @@ bool PersonalMonitorClient::update_stream(uint16_t bitrate_kbps, uint16_t latenc
     latency_ms_.store(latency_ms, std::memory_order_relaxed);
     const uint16_t clamped = std::clamp<uint16_t>(latency_ms, 2, 2000);
     arx_.set_latency_ms(clamped);  // local playout buffer, live
-    if (clamped <= 10) {
+    if (clamped <= 10 || wifi_redundancy_.load(std::memory_order_acquire)) {
         matrix_.set_deterministic_playout(true, 1000.0);
     } else {
         matrix_.set_deterministic_playout(false);
         matrix_.set_max_resample_ppm(2000.0);
     }
     return keepalive();  // server: codec + its jitter profile
+}
+
+void PersonalMonitorClient::set_wifi_redundancy(bool enabled) {
+    wifi_redundancy_.store(enabled, std::memory_order_release);
+    const uint16_t lat = latency_ms_.load(std::memory_order_relaxed);
+    if (enabled || lat <= 10) {
+        matrix_.set_deterministic_playout(true, 1000.0);
+    } else {
+        matrix_.set_deterministic_playout(false);
+        matrix_.set_max_resample_ppm(2000.0);
+    }
+    if (connected_.load(std::memory_order_acquire)) {
+        keepalive();
+    }
+}
+
+MonitorDanteTelemetry PersonalMonitorClient::dante_telemetry() const {
+    MonitorDanteTelemetry t{};
+    t.clock_locked = clock_locked_.load(std::memory_order_relaxed);
+    t.clock_offset_jitter_us = clock_jitter_us_.load(std::memory_order_relaxed);
+    t.duplicates_recovered = duplicates_recovered();
+    const uint16_t mask = last_rx_flow_mask_.load(std::memory_order_relaxed);
+    uint32_t ch = 0;
+    for (uint8_t b = 0; b < kMaxMonitorFlowChannels; ++b) {
+        if ((mask >> b) & 1u) ++ch;
+    }
+    if (ch == 0 && audio_rx_pkts_.load(std::memory_order_relaxed) > 0) ch = 2;
+    t.active_flow_channels = ch;
+    t.effective_playout_ms = matrix_.current_effective_latency_ms();
+    t.wifi_redundancy_enabled = wifi_redundancy_.load(std::memory_order_acquire);
+    t.flow_packets_rx = flow_rx_pkts_.load(std::memory_order_relaxed);
+    t.nacks_sent = arx_.total_nacks_sent();
+    return t;
 }
 
 void PersonalMonitorClient::disconnect() {
@@ -1324,7 +1388,7 @@ bool PersonalMonitorClient::set_dsp(const PersonalMonitorDspParams& dsp) {
 }
 
 void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t now) {
-    constexpr uint64_t kWinUs = 500'000;  // 4 windows x 0.5 s (matches AudioRxEngine::one_way_observe)
+    constexpr uint64_t kWinUs = 500'000;  // 4 windows x 0.5 s: min one-way delay filter (immune to Wi-Fi spikes)
     const double d = media_end_us - double(now);
     if (!flow_ow_have_ || std::fabs(d - flow_ow_applied_) > 500'000.0) {
         flow_ow_have_ = true;
@@ -1332,9 +1396,14 @@ void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t n
         flow_ow_win_n_ = 0;
         flow_ow_win_start_ = now;
         flow_ow_applied_ = d;
+        flow_ow_samples_ = 1;
+        flow_ow_jitter_ema_ = 0.0;
+        clock_locked_.store(false, std::memory_order_relaxed);
+        clock_jitter_us_.store(0, std::memory_order_relaxed);
         mclock_.set_fixed_offset(int64_t(std::llround(d)));
         return;
     }
+    ++flow_ow_samples_;
     flow_ow_cur_ = std::max(flow_ow_cur_, d);
     if (now - flow_ow_win_start_ >= kWinUs) {
         for (int i = 3; i > 0; --i) flow_ow_win_[i] = flow_ow_win_[i - 1];
@@ -1345,79 +1414,21 @@ void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t n
     }
     double est = flow_ow_cur_;
     for (int i = 0; i < flow_ow_win_n_; ++i) est = std::max(est, flow_ow_win_[i]);
+    const double resid = std::fabs(est - d);  // one-way Wi-Fi delay above the minimum envelope (us)
+    flow_ow_jitter_ema_ += (resid - flow_ow_jitter_ema_) * 0.125;
+    clock_jitter_us_.store(uint32_t(std::clamp(flow_ow_jitter_ema_, 0.0, 500000.0)), std::memory_order_relaxed);
+    if (flow_ow_samples_ >= 8) {
+        clock_locked_.store(true, std::memory_order_relaxed);
+    }
     if (std::fabs(est - flow_ow_applied_) >= 20.0) {
         flow_ow_applied_ = est;
         mclock_.set_fixed_offset(int64_t(std::llround(est)));
     }
 }
 
-void PersonalMonitorClient::handle_flow_packet(const PacketHeader&, const uint8_t* payload, size_t len,
-                                               uint64_t now) {
-    MonitorAudioFlowHeader fh{};
-    const uint8_t* ch_ptrs[kMaxMonitorFlowChannels]{};
-    uint16_t ch_lens[kMaxMonitorFlowChannels]{};
-    if (!parse_monitor_audio_flow(payload, len, fh, ch_ptrs, ch_lens)) return;
-    if (fh.sample_rate != sample_rate_) return;
-
-    // Instant seq deduplication (1+1 Glitch-Free Wi-Fi Redundancy):
-    // First copy (primary OR +1.5 ms duplicate) goes straight to playback; duplicate copy is dropped immediately.
-    const uint32_t seq = fh.flow_seq;
-    auto bit_get = [&](uint32_t s) {
-        const uint32_t idx = s & (kFlowDupWindow - 1u);
-        return ((flow_recv_bits_[idx >> 6] >> (idx & 63u)) & 1ull) != 0ull;
-    };
-    auto bit_set = [&](uint32_t s) {
-        const uint32_t idx = s & (kFlowDupWindow - 1u);
-        flow_recv_bits_[idx >> 6] |= (1ull << (idx & 63u));
-    };
-    auto bit_clr = [&](uint32_t s) {
-        const uint32_t idx = s & (kFlowDupWindow - 1u);
-        flow_recv_bits_[idx >> 6] &= ~(1ull << (idx & 63u));
-    };
-
-    if (!flow_seen_) {
-        flow_seen_ = true;
-        flow_highest_ = seq;
-        flow_recv_bits_.fill(0);
-        bit_set(seq);
-    } else {
-        const int32_t diff = int32_t(seq - flow_highest_);
-        if (diff > 0) {
-            if (uint32_t(diff) >= kFlowDupWindow) {
-                flow_recv_bits_.fill(0);
-            } else {
-                for (uint32_t s = flow_highest_ + 1u; s != seq; ++s) bit_clr(s);
-            }
-            flow_highest_ = seq;
-            bit_set(seq);
-        } else {
-            const uint32_t age = uint32_t(-diff);
-            if (age >= kFlowDupWindow) {
-                if (seq < 16u) {  // server restarted / new stream epoch
-                    flow_recv_bits_.fill(0);
-                    flow_highest_ = seq;
-                    bit_set(seq);
-                } else {
-                    flow_dup_drops_.fetch_add(1, std::memory_order_relaxed);
-                    return;
-                }
-            } else if (bit_get(seq)) {
-                flow_dup_drops_.fetch_add(1, std::memory_order_relaxed);
-                return;
-            } else {
-                bit_set(seq);
-            }
-        }
-    }
-
-    flow_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
-    audio_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
-    last_rx_flow_mask_.store(fh.channel_mask, std::memory_order_relaxed);
-
-    const double media_end_us =
-        double(fh.media_timestamp_samples + fh.num_samples) * 1e6 / double(fh.sample_rate);
-    flow_one_way_observe(media_end_us, now);
-
+void PersonalMonitorClient::decode_flow_frame(const MonitorAudioFlowHeader& fh,
+                                              const uint8_t* const ch_ptrs[kMaxMonitorFlowChannels],
+                                              const uint16_t ch_lens[kMaxMonitorFlowChannels]) {
     if (flow_dec_scratch_.size() < fh.num_samples) flow_dec_scratch_.resize(fh.num_samples);
     uint8_t slot = 0;
     for (uint8_t c = 0; c < kMaxMonitorFlowChannels && slot < fh.channel_count; ++c) {
@@ -1472,6 +1483,166 @@ void PersonalMonitorClient::handle_flow_packet(const PacketHeader&, const uint8_
     }
 }
 
+void PersonalMonitorClient::flush_flow_opus_inorder() {
+    while (flow_opus_seq_init_) {
+        auto& po = flow_opus_pending_[flow_opus_next_seq_ & (kFlowOpusReorderSlots - 1u)];
+        if (!po.valid || po.seq != flow_opus_next_seq_) break;
+        MonitorAudioFlowHeader pfh{};
+        const uint8_t* ptrs[kMaxMonitorFlowChannels]{};
+        uint16_t lens[kMaxMonitorFlowChannels]{};
+        if (parse_monitor_audio_flow(po.raw_payload.data(), po.raw_payload.size(), pfh, ptrs, lens)) {
+            decode_flow_frame(pfh, ptrs, lens);
+        }
+        po.valid = false;
+        ++flow_opus_next_seq_;
+    }
+}
+
+void PersonalMonitorClient::service_flow_reorder(uint64_t now) {
+    if (!flow_opus_seq_init_) return;
+    // If a buffered packet sits behind a missing flow_opus_next_seq_ for > 4.5 ms (both primary + 1.5 ms
+    // duplicate were lost), generate Opus PLC for the missing frame and flush consecutive buffered packets!
+    for (uint32_t off = 1; off < kFlowOpusReorderSlots; ++off) {
+        const uint32_t s = flow_opus_next_seq_ + off;
+        const auto& po = flow_opus_pending_[s & (kFlowOpusReorderSlots - 1u)];
+        if (!po.valid || po.seq != s) continue;
+        if (now - po.arrived_us < 4500ull) return;  // still waiting for +1.5 ms backup copy
+        const uint32_t n_samp = po.hdr.num_samples ? po.hdr.num_samples : 240u;
+        const uint16_t mask = po.hdr.channel_mask;
+        if (flow_dec_scratch_.size() < n_samp) flow_dec_scratch_.resize(n_samp);
+        while (flow_opus_next_seq_ != s) {
+            const uint32_t missing_dist = s - flow_opus_next_seq_;
+            const uint64_t est_ts =
+                (po.hdr.media_timestamp_samples >= uint64_t(missing_dist) * n_samp)
+                    ? (po.hdr.media_timestamp_samples - uint64_t(missing_dist) * n_samp)
+                    : 0ull;
+#ifdef LV_HAVE_OPUS
+            for (uint8_t c = 0; c < kMaxMonitorFlowChannels; ++c) {
+                if (((mask >> c) & 1u) == 0u) continue;
+                if (flow_opus_dec_[c]) {
+                    const int n = opus_decode_float(reinterpret_cast<OpusDecoder*>(flow_opus_dec_[c]),
+                                                    nullptr, 0, flow_dec_scratch_.data(), int(n_samp), 0);
+                    if (n > 0) matrix_.write(c, est_ts, flow_dec_scratch_.data(), uint32_t(n));
+                }
+            }
+#endif
+            ++flow_opus_next_seq_;
+            flush_flow_opus_inorder();
+        }
+        return;
+    }
+}
+
+void PersonalMonitorClient::handle_flow_packet(const PacketHeader&, const uint8_t* payload, size_t len,
+                                               uint64_t now) {
+    MonitorAudioFlowHeader fh{};
+    const uint8_t* ch_ptrs[kMaxMonitorFlowChannels]{};
+    uint16_t ch_lens[kMaxMonitorFlowChannels]{};
+    if (!parse_monitor_audio_flow(payload, len, fh, ch_ptrs, ch_lens)) return;
+    if (fh.sample_rate != sample_rate_) return;
+
+    // Instant seq deduplication (1+1 Glitch-Free Wi-Fi Redundancy):
+    // First copy (primary OR +1.5 ms duplicate) goes straight to playback; duplicate copy is dropped immediately.
+    const uint32_t seq = fh.flow_seq;
+    auto bit_get = [&](uint32_t s) {
+        const uint32_t idx = s & (kFlowDupWindow - 1u);
+        return ((flow_recv_bits_[idx >> 6] >> (idx & 63u)) & 1ull) != 0ull;
+    };
+    auto bit_set = [&](uint32_t s) {
+        const uint32_t idx = s & (kFlowDupWindow - 1u);
+        flow_recv_bits_[idx >> 6] |= (1ull << (idx & 63u));
+    };
+    auto bit_clr = [&](uint32_t s) {
+        const uint32_t idx = s & (kFlowDupWindow - 1u);
+        flow_recv_bits_[idx >> 6] &= ~(1ull << (idx & 63u));
+    };
+
+    if (!flow_seen_) {
+        flow_seen_ = true;
+        flow_highest_ = seq;
+        flow_recv_bits_.fill(0);
+        bit_set(seq);
+    } else {
+        const int32_t diff = int32_t(seq - flow_highest_);
+        if (diff > 0) {
+            if (uint32_t(diff) >= kFlowDupWindow) {
+                flow_recv_bits_.fill(0);
+            } else {
+                for (uint32_t s = flow_highest_ + 1u; s != seq; ++s) bit_clr(s);
+            }
+            flow_highest_ = seq;
+            bit_set(seq);
+        } else {
+            const uint32_t age = uint32_t(-diff);
+            if (age >= kFlowDupWindow) {
+                if (seq < 16u) {  // server restarted / new stream epoch
+                    flow_recv_bits_.fill(0);
+                    flow_highest_ = seq;
+                    flow_opus_seq_init_ = false;
+                    for (auto& po : flow_opus_pending_) po.valid = false;
+                    bit_set(seq);
+                } else {
+                    flow_dup_drops_.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            } else if (bit_get(seq)) {
+                flow_dup_drops_.fetch_add(1, std::memory_order_relaxed);
+                return;
+            } else {
+                bit_set(seq);
+            }
+        }
+    }
+
+    // If this unique (first-arriving) frame is a +1.5 ms redundant copy, 1+1 redundancy just rescued a
+    // dropped Wi-Fi primary packet with ZERO NACK RTT!
+    const bool is_redundant = (fh.flags & kFlagRedundantCopy) != 0u;
+    if (is_redundant) {
+        flow_dups_recovered_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    flow_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
+    audio_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
+    last_rx_flow_mask_.store(fh.channel_mask, std::memory_order_relaxed);
+
+    // Exclude +1.5 ms staggered redundant copies from the min-one-way-delay clock filter once locked
+    if (!flow_ow_have_ || !is_redundant) {
+        const double media_end_us =
+            double(fh.media_timestamp_samples + fh.num_samples) * 1e6 / double(fh.sample_rate);
+        flow_one_way_observe(media_end_us, now);
+    }
+
+    if (fh.sample_format == AudioFormat2::kOpus) {
+        if (!flow_opus_seq_init_) {
+            flow_opus_seq_init_ = true;
+            flow_opus_next_seq_ = seq;
+        }
+        const int32_t odiff = int32_t(seq - flow_opus_next_seq_);
+        if (odiff == 0) {
+            decode_flow_frame(fh, ch_ptrs, ch_lens);
+            ++flow_opus_next_seq_;
+            flush_flow_opus_inorder();
+        } else if (odiff > 0 && odiff < int32_t(kFlowOpusReorderSlots)) {
+            auto& po = flow_opus_pending_[seq & (kFlowOpusReorderSlots - 1u)];
+            po.valid = true;
+            po.seq = seq;
+            po.arrived_us = now;
+            po.hdr = fh;
+            po.raw_payload.assign(payload, payload + len);
+        } else if (odiff >= int32_t(kFlowOpusReorderSlots)) {
+            for (auto& po : flow_opus_pending_) po.valid = false;
+            flow_opus_next_seq_ = seq;
+            decode_flow_frame(fh, ch_ptrs, ch_lens);
+            ++flow_opus_next_seq_;
+        }
+        return;
+    }
+
+    // Stateless PCM formats decode directly into sample-addressed AudioSyncMatrix
+    flow_opus_seq_init_ = false;
+    decode_flow_frame(fh, ch_ptrs, ch_lens);
+}
+
 void PersonalMonitorClient::poll() {
     if (!connected_.load(std::memory_order_acquire)) return;
     uint8_t buf[4200];
@@ -1506,7 +1677,8 @@ void PersonalMonitorClient::poll() {
             }
         }
     }
-    // Drive NACK retransmission requests and Opus PLC (Packet Loss Concealment) for lost Wi-Fi packets!
+    // Drive flow reorder timeout PLC and legacy AUDIO2 NACK/PLC!
+    service_flow_reorder(now);
     arx_.service(now);
 }
 
