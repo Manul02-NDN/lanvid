@@ -335,7 +335,7 @@ std::vector<NetworkInterfaceInfo> enumerate_network_interfaces(bool include_disc
                 m.type = contains_ci(m.display_name, "usb") || contains_ci(m.display_name, "thunderbolt")
                              ? NetworkInterfaceType::kUsbEthernet
                              : NetworkInterfaceType::kEthernet;
-            } else if (itype && (CFEqual(itype, kSCNetworkInterfaceTypeBridge) ||
+            } else if (itype && (CFEqual(itype, kSCNetworkInterfaceTypeBond) ||  // no Bridge type in the SDK; bridgeN is classified by name
                                  CFEqual(itype, kSCNetworkInterfaceTypeVLAN))) {
                 m.type = NetworkInterfaceType::kVirtual;
             }

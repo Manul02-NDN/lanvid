@@ -329,15 +329,25 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         return p;
     }
 
-    if (prefill_enabled_.load(std::memory_order_acquire)) {
+    // Deterministic (Dante-style) playout keeps its deadline: a dry spell is faded and concealed, never
+    // paused, so the prefill hysteresis only applies to the Fixed / Adaptive buffers.
+    if (det) {
+        underrun_flag_.store(false, std::memory_order_relaxed);
+        prefill_ = false;
+        realize_cushion_ = false;
+    } else if (prefill_enabled_.load(std::memory_order_acquire)) {
         const double base = double(latency_ms_.load(std::memory_order_relaxed));
         if (underrun_flag_.exchange(false, std::memory_order_acq_rel)) {
-            if (!prefill_) prefill_events_.fetch_add(1, std::memory_order_relaxed);
-            prefill_ = true;
-            // Dry underrun (the cursor ran past the newest data, not just over a lost packet): the delay
-            // was too short for this network. Learn the missing amount + one render block + 2 ms guard as
-            // a cushion (Fixed mode) and realise it right now, inside the dropout, instead of trickling.
+            // Only a DRY underrun (the cursor ran past the newest data) pauses playout. A hole from a lost
+            // packet with newer data already queued is concealed and playback continues: holding there
+            // would add latency for nothing (with 5 ms packets, "ahead" legitimately dips below 75 %).
             const double deficit = cursor_ - double(newest_media_ts());
+            if (deficit > 0.0) {
+                if (!prefill_) prefill_events_.fetch_add(1, std::memory_order_relaxed);
+                prefill_ = true;
+            }
+            // Dry underrun: the delay was too short for this network. Learn the missing amount + one render
+            // block + 2 ms guard as a cushion (Fixed mode) and realise it right now, inside the dropout.
             if (deficit > 0.0 && !adaptive && !det && clk.synced()) {
                 const double now_ms = (master_now - cursor_) * 1000.0 / double(rate_);
                 const double want = now_ms - base + (deficit + double(frames)) * 1000.0 / double(rate_) +
