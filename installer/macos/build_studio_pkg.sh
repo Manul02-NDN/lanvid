@@ -25,9 +25,23 @@ rm -rf "$BUILD" "$PKG" "$DMG"
 mkdir -p "$STAGE" "$DIST"
 
 echo "=== Building LanVid Studio.app + lanvid_dsp_server + liblanvid_core.dylib + LanVidAudio.driver ($VER) ==="
+# OBS Studio plugin: built against the installed OBS (light SDK = matching headers + OBS.app binaries) when
+# OBS.app is present or LANVID_OBS_SDK_DIR is given; otherwise the OBS component ships locales only.
+OBS_ARGS=(-DBUILD_OBS_PLUGIN=OFF)
+OBS_TARGET=()
+OBS_APP="${LANVID_OBS_APP:-/Applications/OBS.app}"
+if [ -z "${LANVID_OBS_SDK_DIR:-}" ] && [ -d "$OBS_APP" ]; then
+  LANVID_OBS_SDK_DIR="$BUILD/obs-sdk"
+  "$ROOT/plugins/obs-lanvid/tools/fetch_obs_sdk.sh" "$LANVID_OBS_SDK_DIR" "$OBS_APP" || LANVID_OBS_SDK_DIR=""
+fi
+if [ -n "${LANVID_OBS_SDK_DIR:-}" ]; then
+  OBS_ARGS=(-DBUILD_OBS_PLUGIN=ON "-DLANVID_OBS_SDK_DIR=$LANVID_OBS_SDK_DIR" "-DLANVID_OBS_APP=$OBS_APP")
+  OBS_TARGET=(obs-lanvid)
+fi
 cmake -S "$ROOT" -B "$BUILD/cmake" -G "$GEN" -DCMAKE_BUILD_TYPE=Release \
-  -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=ON -DLANVID_BUILD_CLI=ON -DLANVID_BUILD_SHARED=ON
-cmake --build "$BUILD/cmake" --target lanvid_app lanvid_dsp_server lanvid_core_shared LanVidAudio --parallel "$(sysctl -n hw.ncpu)"
+  -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=ON -DLANVID_BUILD_CLI=ON -DLANVID_BUILD_SHARED=ON "${OBS_ARGS[@]}"
+cmake --build "$BUILD/cmake" --target lanvid_app lanvid_dsp_server lanvid_core_shared LanVidAudio "${OBS_TARGET[@]}" \
+  --parallel "$(sysctl -n hw.ncpu)"
 APP="$BUILD/cmake/LanVid Studio.app"
 DSP="$BUILD/cmake/lanvid_dsp_server"
 DYLIB="$BUILD/cmake/liblanvid_core.dylib"
@@ -70,6 +84,10 @@ if [ -d "$ROOT/plugins/obs-lanvid/data/locale" ]; then
   cp "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$STAGE/obs/Library/Application Support/LanVid/obs-lanvid/locale/"
 fi
 if [ -d "$BUILD/cmake/plugins/obs-lanvid/obs-lanvid.plugin" ]; then
+  # OBS looks for the plugin's locale files inside the bundle (Contents/Resources/locale)
+  mkdir -p "$BUILD/cmake/plugins/obs-lanvid/obs-lanvid.plugin/Contents/Resources/locale"
+  cp "$ROOT/plugins/obs-lanvid/data/locale/"*.ini "$BUILD/cmake/plugins/obs-lanvid/obs-lanvid.plugin/Contents/Resources/locale/"
+  codesign --force --deep --sign "${LANVID_APP_SIGN_ID:--}" "$BUILD/cmake/plugins/obs-lanvid/obs-lanvid.plugin"
   cp -R "$BUILD/cmake/plugins/obs-lanvid/obs-lanvid.plugin" "$STAGE/obs/Library/Application Support/LanVid/obs-lanvid/"
 fi
 

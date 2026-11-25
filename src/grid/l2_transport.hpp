@@ -29,6 +29,10 @@ struct L2AdapterInfo {
 
 // Enumerates local Ethernet/network interfaces with their physical MAC addresses.
 std::vector<L2AdapterInfo> list_l2_adapters();
+// Best adapter for the Grid when the user has not picked one: a wired Ethernet with carrier, fastest first
+// (macOS also lists virtual "Ethernet Adapter" / Thunderbolt ports that are UP with 0 Mbps), then any
+// Ethernet that is up, then any link that is up. Returns false if `adapters` is empty.
+bool pick_default_l2_adapter(const std::vector<L2AdapterInfo>& adapters, L2AdapterInfo& out);
 
 // Returns true if the native OS Layer 2 backend is ready (Npcap loaded on Windows, AF_PACKET/BPF on POSIX).
 bool l2_native_backend_available(std::string* out_status = nullptr);

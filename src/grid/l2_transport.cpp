@@ -462,6 +462,23 @@ std::vector<L2AdapterInfo> list_l2_adapters() {
     return out;
 }
 
+bool pick_default_l2_adapter(const std::vector<L2AdapterInfo>& adapters, L2AdapterInfo& out) {
+    if (adapters.empty()) return false;
+    auto score = [](const L2AdapterInfo& a) -> int64_t {
+        int64_t s = 0;
+        if (a.link_up) s += 1'000'000'000'000LL;
+        if (a.is_ethernet) s += 100'000'000'000LL;
+        if (a.speed_mbps > 0) s += 10'000'000'000LL + int64_t(a.speed_mbps);  // real carrier, then faster
+        return s;
+    };
+    const L2AdapterInfo* best = &adapters.front();
+    for (const auto& a : adapters) {
+        if (score(a) > score(*best)) best = &a;
+    }
+    out = *best;
+    return true;
+}
+
 bool l2_native_backend_available(std::string* out_status) {
 #if defined(_WIN32)
     const bool ok = NpcapApi::instance().ready();

@@ -4693,15 +4693,7 @@ bool LanVidStudioApp::start_grid_node() {
             break;
         }
     }
-    if (!found) {
-        for (const auto& a : grid_adapters_) {
-            if (a.is_ethernet && a.link_up) { chosen = a; found = true; break; }
-        }
-    }
-    if (!found && !grid_adapters_.empty()) {
-        chosen = grid_adapters_.front();
-        found = true;
-    }
+    if (!found) found = lv::grid::pick_default_l2_adapter(grid_adapters_, chosen);  // wired Ethernet with carrier
     if (!found) {
         grid_last_err_ = "Не знайдено Ethernet-адаптера";
         return false;

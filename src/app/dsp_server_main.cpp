@@ -58,23 +58,15 @@ int main(int argc, char** argv) {
     lv::grid::L2AdapterInfo chosen{};
     bool found = false;
     for (const auto& a : adapters) {
-        if (!nic_filter.empty()) {
-            if (a.friendly_name.find(nic_filter) != std::string::npos ||
-                a.device_name.find(nic_filter) != std::string::npos) {
-                chosen = a;
-                found = true;
-                break;
-            }
-        } else if (a.is_ethernet && a.link_up) {
+        if (!nic_filter.empty() && (a.device_name == nic_filter ||
+                                    a.friendly_name.find(nic_filter) != std::string::npos ||
+                                    a.device_name.find(nic_filter) != std::string::npos)) {
             chosen = a;
             found = true;
             break;
         }
     }
-    if (!found && !adapters.empty()) {
-        chosen = adapters.front();
-        found = true;
-    }
+    if (!found) found = lv::grid::pick_default_l2_adapter(adapters, chosen);  // wired Ethernet with carrier
     if (!found) {
         std::fprintf(stderr, "[lanvid_dsp_server] No network adapter found.\n");
         return 1;
