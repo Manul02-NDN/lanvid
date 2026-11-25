@@ -171,16 +171,22 @@ EOF
 chmod 0755 /usr/local/bin/lanvid-sdk-info
 echo "[OK] Installed /usr/local/bin/lanvid-sdk-info"
 
-# 5. Add macOS Application Firewall exemptions so LAN Discovery & UDP streams are never blocked
+# 5. Add macOS Application Firewall exemptions so LAN Discovery, Grid DSP & UDP streams are never blocked
 FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
 if [ -x "$FW" ]; then
-  for target in "$SDK_ROOT/lib/liblanvid_core.dylib" "/usr/local/bin/lanvid-sdk-info"; do
+  for target in \
+      "/Applications/LanVid Studio.app" \
+      "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio" \
+      "/usr/local/bin/lanvid_dsp_server" \
+      "$SDK_ROOT/lib/liblanvid_core.dylib" \
+      "/usr/local/lib/liblanvid_core.dylib" \
+      "/usr/local/bin/lanvid-sdk-info"; do
     if [ -e "$target" ]; then
       "$FW" --add "$target" >/dev/null 2>&1 || true
       "$FW" --unblockapp "$target" >/dev/null 2>&1 || true
     fi
   done
-  echo "[OK] Configured macOS Application Firewall rules."
+  echo "[OK] Configured macOS Application Firewall rules (LanVid Studio, DSP Server & Core SDK)."
 fi
 
 # 6. Open /usr/local/LanVidSDK in Finder for the logged-in user (interactive installs only)

@@ -478,8 +478,10 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_audio_only_toggle.cpp
     tests/test_monitor_mobile.cpp
     tests/test_lanvid_grid_l2.cpp
+    tests/test_installer_packaging.cpp
     src/gui/app_config.cpp
   )
+  target_compile_definitions(lanvid_tests PRIVATE LV_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
   if(TARGET obs_lanvid_core)
     target_sources(lanvid_tests PRIVATE tests/test_obs_plugin.cpp)

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>LanVidSDK v2.6.0</title>
+    <title>LanVid Studio + Grid L2 + SDK v2.6.0</title>
     <organization>com.lanvid</organization>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false" />
     <options customize="allow" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
@@ -16,17 +16,34 @@
 
     <choices-outline>
         <line choice="choice_core" />
+        <line choice="choice_grid" />
+        <line choice="choice_hal" />
         <line choice="choice_swift" />
         <line choice="choice_extras" />
-        <line choice="choice_hal" />
     </choices-outline>
 
     <choice id="choice_core"
-            title="Core C/C++ SDK &amp; XCFramework"
-            description="Universal liblanvid_core.dylib (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework (iOS + macOS + Simulator), C/C++17 headers, CMake &amp; pkg-config packages, and lanvid-sdk-info CLI."
+            title="LanVid Studio, Core SDK &amp; DSP CLI"
+            description="LanVid Studio.app (when bundled), Universal liblanvid_core.dylib &amp; lanvid_dsp_server (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages."
             start_selected="true"
             enabled="false">
         <pkg-ref id="com.lanvid.sdk.core" />
+    </choice>
+
+    <choice id="choice_grid"
+            title="LanVid Grid L2 (ChmodBPF) + DSP Server Auto-Start + OBS &amp; Firewall"
+            description="Installs LaunchDaemons for rootless Layer 2 Ethernet (/dev/bpf* via access_bpf group) and auto-starting 256ch LanVid Grid DSP Server, configures macOS Application Firewall, and auto-installs obs-lanvid plugin when OBS Studio is present."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.grid.system" />
+    </choice>
+
+    <choice id="choice_hal"
+            title="Virtual Audio Device «LanVid Virtual 64ch»"
+            description="CoreAudio HAL plug-in (64 In / 64 Out, Float32, 48/96 kHz) installed to /Library/Audio/Plug-Ins/HAL. Appears in Audio MIDI Setup, Logic Pro, REAPER and OBS; streams through LanVid Studio. Restarts coreaudiod."
+            start_selected="true"
+            enabled="true">
+        <pkg-ref id="com.lanvid.audio.hal" />
     </choice>
 
     <choice id="choice_swift"
@@ -38,23 +55,16 @@
     </choice>
 
     <choice id="choice_extras"
-            title="Python Bindings &amp; Xcode/CMake Examples"
-            description="Zero-dependency Python ctypes/NumPy wrapper (lanvid_sdk.py), SwiftUI iOSCameraSender &amp; MacReceiverMetal examples, and CMake C++17 client."
+            title="Python Bindings, OBS Plugin Bundle &amp; Examples"
+            description="Zero-dependency Python ctypes/NumPy wrapper (lanvid_sdk.py), obs-lanvid plugin resources, SwiftUI iOSCameraSender &amp; MacReceiverMetal examples, and CMake C++17 client."
             start_selected="true"
             enabled="true">
         <pkg-ref id="com.lanvid.sdk.extras" />
     </choice>
 
-    <choice id="choice_hal"
-            title="Virtual Audio Device «LanVid Virtual 64ch»"
-            description="CoreAudio HAL plug-in (64 In / 64 Out, Float32, 48/96 kHz) installed to /Library/Audio/Plug-Ins/HAL. Appears in Audio MIDI Setup, Logic Pro, REAPER and OBS; streams through LanVid Studio. Restarts coreaudiod."
-            start_selected="true"
-            enabled="true">
-        <pkg-ref id="com.lanvid.audio.hal" />
-    </choice>
-
     <pkg-ref id="com.lanvid.sdk.core" version="2.6.0" onConclusion="none">lanvid-core.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.grid.system" version="2.6.0" onConclusion="none">lanvid-grid.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.audio.hal" version="2.6.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.swift" version="2.6.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
     <pkg-ref id="com.lanvid.sdk.extras" version="2.6.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.audio.hal" version="2.6.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
 </installer-gui-script>

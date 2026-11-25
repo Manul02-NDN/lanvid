@@ -1,5 +1,10 @@
-# Builds standalone one-click installer: installer\windows\LanVid_Setup.exe
+# Builds standalone one-click Windows installer: installer\windows\LanVid_Setup.exe & LanVid_Setup_v2.6.0.exe
 # Links static CRT (/MT) so LanVid_Setup.exe runs on clean Windows 10/11 BEFORE VC++ Redist is installed!
+# Optional: pass -BuildInno to also compile installer\windows\lanvid.iss with Inno Setup 6 (ISCC.exe) if installed.
+param(
+    [switch]$BuildInno
+)
+
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $buildDir = Join-Path $root "build"
@@ -13,6 +18,7 @@ $outExe = Join-Path $winDir "LanVid_Setup.exe"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
+# 1. Stage Core Studio + Grid L2 DSP Server + Virtual ASIO + Preflight Configurator
 $files = @(
     (Join-Path $buildDir "lanvid_app.exe"),
     (Join-Path $buildDir "lanvid_core.dll"),
@@ -27,17 +33,35 @@ foreach ($f in $files) {
     Copy-Item $f $stageDir -Force
 }
 
-# Stage obs-lanvid plugin + locales if built against OBS SDK, and copy to local OBS Studio if installed
+$readme = Join-Path $root "README.md"
+if (Test-Path $readme) {
+    New-Item -ItemType Directory -Path (Join-Path $stageDir "docs") -Force | Out-Null
+    Copy-Item $readme (Join-Path $stageDir "docs\README.md") -Force
+}
+
+# 2. Stage optional bundled Npcap OEM / setup executable if provided in installer\windows\third_party\
+$thirdPartyDir = Join-Path $winDir "third_party"
+if (Test-Path $thirdPartyDir) {
+    $npcapFiles = Get-ChildItem -Path $thirdPartyDir -Filter "npcap-*.exe" -ErrorAction SilentlyContinue
+    if ($npcapFiles) {
+        $tpStage = Join-Path $stageDir "third_party"
+        New-Item -ItemType Directory -Path $tpStage -Force | Out-Null
+        foreach ($nf in $npcapFiles) { Copy-Item $nf.FullName $tpStage -Force }
+        Write-Host "Staged bundled Npcap installer(s): $(($npcapFiles | Select-Object -ExpandProperty Name) -join ', ')"
+    }
+}
+
+# 3. Stage obs-lanvid plugin + locales (en-US.ini, uk-UA.ini) if built against OBS SDK
 $obsDll = Join-Path $buildDir "plugins\obs-lanvid\obs-lanvid.dll"
 $obsLocaleDir = Join-Path $root "plugins\obs-lanvid\data\locale"
-if (Test-Path $obsDll) {
-    $obsStage = Join-Path $stageDir "obs-lanvid"
-    New-Item -ItemType Directory -Path (Join-Path $obsStage "obs-plugins\64bit") -Force | Out-Null
+$obsStage = Join-Path $stageDir "obs-lanvid"
+if (Test-Path $obsLocaleDir) {
     New-Item -ItemType Directory -Path (Join-Path $obsStage "data\obs-plugins\obs-lanvid\locale") -Force | Out-Null
+    Copy-Item (Join-Path $obsLocaleDir "*.ini") (Join-Path $obsStage "data\obs-plugins\obs-lanvid\locale\") -Force
+}
+if (Test-Path $obsDll) {
+    New-Item -ItemType Directory -Path (Join-Path $obsStage "obs-plugins\64bit") -Force | Out-Null
     Copy-Item $obsDll (Join-Path $obsStage "obs-plugins\64bit\obs-lanvid.dll") -Force
-    if (Test-Path $obsLocaleDir) {
-        Copy-Item (Join-Path $obsLocaleDir "*.ini") (Join-Path $obsStage "data\obs-plugins\obs-lanvid\locale\") -Force
-    }
     $obsSystemDir = "C:\Program Files\obs-studio\obs-plugins\64bit"
     if (Test-Path $obsSystemDir) {
         try {
@@ -47,6 +71,7 @@ if (Test-Path $obsDll) {
     }
 }
 
+# 4. Compress payload and compile zero-dependency Win32 setup_wizard.cpp
 Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -CompressionLevel Optimal -Force
 
 $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
@@ -70,3 +95,18 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath, (
 Copy-Item -Force $outExe $outExeVersioned
 $item = Get-Item $outExeVersioned
 Write-Host ("Built {0} and {1} ({2:N0} bytes)" -f $item.FullName, $outExe, $item.Length)
+
+# 5. Optional Inno Setup 6 compilation of lanvid.iss
+if ($BuildInno) {
+    $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+    if (-not $iscc -and (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+        $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    }
+    if ($iscc) {
+        Write-Host "Compiling Inno Setup script: installer\windows\lanvid.iss"
+        & $iscc (Join-Path $winDir "lanvid.iss")
+        if ($LASTEXITCODE -ne 0) { throw "ISCC.exe failed (exit=$LASTEXITCODE)" }
+    } else {
+        Write-Warning "Inno Setup 6 (ISCC.exe) not found; skipped lanvid.iss compilation."
+    }
+}

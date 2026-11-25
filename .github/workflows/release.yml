@@ -51,17 +51,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build Core, Studio GUI, Tests & SDK
+      - name: Build Core, Studio GUI, DSP Server, Tests & SDK
         shell: pwsh
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
           cmake --build build
+          if (-not (Test-Path build\lanvid_dsp_server.exe)) { throw "Missing build\lanvid_dsp_server.exe" }
           .\build\lanvid_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "lanvid_tests failed (exit=$LASTEXITCODE)" }
           python sdk/build_sdk.py --verify-client
           powershell -NoProfile -ExecutionPolicy Bypass -File installer/windows/build_windows_setup.ps1
 
-      - name: Verify installer version & package Windows SDK
+      - name: Verify installer version, preflight dry-run & package Windows SDK
         shell: pwsh
         run: |
           $exe = "installer/windows/LanVid_Setup_v$env:V.exe"
@@ -69,6 +70,8 @@ jobs:
           $fv = (Get-Item $exe).VersionInfo.FileVersion
           Write-Host "FileVersion of $exe = $fv"
           if (-not $fv.StartsWith($env:V)) { throw "File version '$fv' does not match $env:V" }
+          & $exe --check-only | Out-String
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer/windows/preflight.ps1 -CheckOnly
           Compress-Archive -Path "dist/LanVidSDK-v$env:V" -DestinationPath "dist/LanVidSDK-v$env:V-Windows.zip" -Force
 
       - uses: actions/upload-artifact@v4
@@ -91,12 +94,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config \
+            build-essential cmake ninja-build pkg-config libcap2-bin \
             libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libpipewire-0.3-dev \
             libavcodec-dev libavutil-dev
 
-      - name: Build Core, Studio GUI, SDK & Linux packages (.run, .tar.gz, .deb)
+      - name: Build Core, Studio GUI, Grid DSP Server, SDK & Linux packages (.deb, .run, .tar.gz)
         run: |
+          bash -n installer/linux/build_linux_packages.sh installer/linux/install_lanvid.sh
           chmod +x installer/linux/build_linux_packages.sh installer/linux/install_lanvid.sh
           ./installer/linux/build_linux_packages.sh
           python3 sdk/build_sdk.py --verify-client
@@ -105,6 +109,7 @@ jobs:
         with:
           name: rel-linux
           path: |
+            installer/linux/lanvid-studio_${{ needs.version.outputs.v }}_amd64.deb
             installer/linux/LanVid-Linux-x86_64.run
             installer/linux/lanvid-v${{ needs.version.outputs.v }}-linux-x86_64.tar.gz
             dist/LanVidSDK-v${{ needs.version.outputs.v }}/lib/
@@ -120,8 +125,10 @@ jobs:
       - name: Install tools
         run: brew install cmake ninja sdl2
 
-      - name: Build LanVid Studio .pkg / .dmg (CoreAudio HAL driver included)
+      - name: Build LanVid Studio .pkg / .dmg (Grid L2 ChmodBPF, DSP Daemon & CoreAudio HAL included)
         run: |
+          bash -n installer/macos/build_studio_pkg.sh sdk/apple/build_macos_pkg.sh \
+                  sdk/apple/installer/scripts/preinstall sdk/apple/installer/scripts/postinstall
           chmod +x installer/macos/build_studio_pkg.sh
           ./installer/macos/build_studio_pkg.sh
 
@@ -130,8 +137,8 @@ jobs:
           chmod +x sdk/apple/build_xcframework.sh sdk/apple/build_macos_pkg.sh \
                    sdk/apple/installer/scripts/preinstall sdk/apple/installer/scripts/postinstall
           cmake -S . -B build-macos-app -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=OFF -DLANVID_BUILD_CLI=OFF
-          cmake --build build-macos-app --target lanvid_app
+            -DLANVID_BUILD_TESTS=OFF -DLANVID_BUILD_DRIVERS=OFF -DLANVID_BUILD_CLI=ON
+          cmake --build build-macos-app --target lanvid_app lanvid_dsp_server
           codesign --force --deep --sign - "build-macos-app/LanVid Studio.app"
           ditto -c -k --sequesterRsrc --keepParent "build-macos-app/LanVid Studio.app" dist/apple/LanVid-Studio-macOS.zip
           ./sdk/apple/build_macos_pkg.sh
@@ -262,6 +269,7 @@ jobs:
           cp "$S/rel-windows/installer/windows/LanVid_Setup_v$V.exe" release-assets/
           cp "$S/rel-windows/dist/LanVidSDK-v$V-Windows.zip" release-assets/
           # Linux
+          cp "$S/rel-linux/installer/linux/lanvid-studio_${V}_amd64.deb" release-assets/
           cp "$S/rel-linux/installer/linux/lanvid-v$V-linux-x86_64.tar.gz" release-assets/
           cp "$S/rel-linux/installer/linux/LanVid-Linux-x86_64.run" release-assets/
           # macOS
@@ -330,6 +338,7 @@ jobs:
             release-assets/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS.zip
             release-assets/LanVid-Monitor-v${{ needs.version.outputs.v }}-iOS-unsigned.ipa
             release-assets/LanVidCore.xcframework.zip
+            release-assets/lanvid-studio_${{ needs.version.outputs.v }}_amd64.deb
             release-assets/lanvid-v${{ needs.version.outputs.v }}-linux-x86_64.tar.gz
             release-assets/LanVid-Linux-x86_64.run
             release-assets/LanVidSDK-Universal.zip
