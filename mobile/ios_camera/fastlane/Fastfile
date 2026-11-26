@@ -321,7 +321,7 @@ platform :ios do
       require "deliver/upload_metadata"
       unless Deliver::UploadMetadata.instance_variable_defined?(:@lanvid_review_attachment_patched)
         patch = Module.new do
-          def review_attachment_file(options, version)
+          def review_attachment_file(*args, **kwargs)
             super
           rescue RuntimeError => e
             raise unless e.message.to_s.include?("No data")
