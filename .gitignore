@@ -62,8 +62,5 @@ __pycache__/
 *.pyc
 .venv/
 
-# Keep vendored Dear ImGui (MIT) for self-contained Desktop GUI builds
-!third_party/imgui/
-
-# XcodeGen output (drivers/macos_vcam/build_vcam.sh regenerates it)
-drivers/macos_vcam/*.xcodeproj/
+# XcodeGen output (mobile/ios_camera: `xcodegen generate` regenerates it)
+mobile/ios_camera/*.xcodeproj/

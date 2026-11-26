@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=LanVid Audio
-Comment=Pro AoIP, Patchbay 64x64, Personal Monitor & Grid L2 (256ch)
-Exec=/usr/local/bin/lanvid_audio_studio
-Icon=lanvid
-Terminal=false
-Type=Application
-Categories=AudioVideo;Audio;

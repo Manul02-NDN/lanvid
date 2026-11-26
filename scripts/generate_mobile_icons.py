@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Generates unified Dark Studio Glass + Soft Pastel Lavender icons for:
-  1. LanVid Studio / Camera (android/) -> Cinema Aperture Lens + Red ON AIR Tally Dot
-  2. LanVid Monitor (mobile/android/ & mobile/ios/) -> Studio Headphones + Lavender-to-Mint 5-Band EQ
+Generates the Dark Studio Glass + Soft Pastel Lavender icon for
+LanVid Camera (android/) -> Cinema Aperture Lens + Red ON AIR Tally Dot
+(iOS: mobile/ios_camera/scripts/make_icon.py).
 
 Uses 4x supersampling (2048x2048 canvas -> LANCZOS downscale) and keeps all foreground
 artwork within the 66% Android Adaptive Icon safe zone so no launcher mask clips anything.
@@ -177,108 +177,6 @@ def render_camera_foreground(size: int = CANVAS) -> Image.Image:
     return fg
 
 
-def render_monitor_foreground(size: int = CANVAS) -> Image.Image:
-    """
-    LanVid Monitor foreground (transparent):
-      - Studio monitoring headphones with soft pastel-lavender headband (#DDD6FE -> #A78BFA)
-      - Dark glass earcups with crisp lavender rim
-      - 5-band audio equalizer centered inside, transitioning from lavender (#C4B5FD) to mint (#34D399)
-    Fits strictly inside central 64% Android Adaptive safe zone.
-    """
-    fg = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    cx, cy = size * 0.5, size * 0.52
-
-    # 1. Headband Arc (thick antialiased ring arc from 195 deg to 345 deg)
-    arc_r_out = size * 0.268
-    arc_r_in = size * 0.214
-    arc_cy = cy - size * 0.015
-
-    band_mask = Image.new("L", (size, size), 0)
-    bd = ImageDraw.Draw(band_mask)
-    bd.pieslice((cx - arc_r_out, arc_cy - arc_r_out, cx + arc_r_out, arc_cy + arc_r_out),
-                start=176, end=364, fill=255)
-    bd.ellipse((cx - arc_r_in, arc_cy - arc_r_in, cx + arc_r_in, arc_cy + arc_r_in), fill=0)
-
-    # Seamless stem connecting headband into top of each earcup
-    for side in (-1, 1):
-        jx = cx + side * size * 0.228
-        stem_w = (arc_r_out - arc_r_in) * 0.52
-        bd.rectangle((jx - stem_w * 0.5, arc_cy - size * 0.01, jx + stem_w * 0.5, cy + size * 0.03), fill=255)
-
-    grad_band = make_diag_gradient(size, (0xED, 0xE9, 0xFE), (0x8B, 0x5C, 0xF6))
-    composite_masked_gradient(fg, grad_band, band_mask)
-
-    # 2. Studio Earcups (Left & Right)
-    cup_w = size * 0.095
-    cup_h = size * 0.215
-    cup_y0 = cy - size * 0.015
-    cup_y1 = cup_y0 + cup_h
-    cup_rad = int(cup_w * 0.46)
-
-    cup_mask = Image.new("L", (size, size), 0)
-    cmd = ImageDraw.Draw(cup_mask)
-    for side in (-1, 1):
-        cup_cx = cx + side * size * 0.228
-        cmd.rounded_rectangle((cup_cx - cup_w * 0.5, cup_y0, cup_cx + cup_w * 0.5, cup_y1),
-                              radius=cup_rad, fill=255)
-    grad_cup = make_vertical_gradient(size, (0xC4, 0xB5, 0xFD), (0x7C, 0x3A, 0xED))
-    composite_masked_gradient(fg, grad_cup, cup_mask)
-
-    # Inner dark glass cushion inside each earcup
-    draw = ImageDraw.Draw(fg)
-    pad = size * 0.015
-    for side in (-1, 1):
-        cup_cx = cx + side * size * 0.228
-        draw.rounded_rectangle(
-            (cup_cx - cup_w * 0.5 + pad, cup_y0 + pad, cup_cx + cup_w * 0.5 - pad, cup_y1 - pad),
-            radius=max(6, cup_rad - int(pad)),
-            fill=(0x18, 0x13, 0x2B, 255),
-        )
-
-    # 3. 5-Band Studio Audio Equalizer inside the headphones (Lavender #C4B5FD -> Mint #34D399)
-    bar_heights = [0.115, 0.205, 0.265, 0.185, 0.105]  # musical peak silhouette
-    bar_w = size * 0.036
-    bar_gap = size * 0.022
-    total_w = len(bar_heights) * bar_w + (len(bar_heights) - 1) * bar_gap
-    start_x = cx - total_w * 0.5
-    eq_center_y = cy + size * 0.075
-
-    # Soft mint/lavender glow behind equalizer
-    eq_glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    egd = ImageDraw.Draw(eq_glow)
-    egd.ellipse((cx - size * 0.14, eq_center_y - size * 0.13, cx + size * 0.14, eq_center_y + size * 0.13),
-                fill=(0x34, 0xD3, 0x99, 75))
-    eq_glow = eq_glow.filter(ImageFilter.GaussianBlur(size * 0.035))
-    fg.alpha_composite(eq_glow)
-
-    eq_mask = Image.new("L", (size, size), 0)
-    emd = ImageDraw.Draw(eq_mask)
-    for i, h_frac in enumerate(bar_heights):
-        bx0 = start_x + i * (bar_w + bar_gap)
-        bx1 = bx0 + bar_w
-        bh = size * h_frac
-        by0 = eq_center_y - bh * 0.5
-        by1 = eq_center_y + bh * 0.5
-        emd.rounded_rectangle((bx0, by0, bx1, by1), radius=int(bar_w * 0.5), fill=255)
-
-    # Vertical gradient on the EQ bars: mint (#34D399) at top peaks -> soft lavender (#C4B5FD) at bottom
-    grad_eq = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    eq_top = int(eq_center_y - size * 0.14)
-    eq_bot = int(eq_center_y + size * 0.14)
-    g2 = Image.new("RGBA", (4, max(2, eq_bot - eq_top)))
-    gpx = g2.load()
-    for y in range(g2.height):
-        t = y / float(max(1, g2.height - 1))
-        c = lerp_rgb((0x34, 0xD3, 0x99), (0xC4, 0xB5, 0xFD), t)
-        for x in range(4):
-            gpx[x, y] = (*c, 255)
-    g2 = g2.resize((size, g2.height), Image.Resampling.BILINEAR)
-    grad_eq.paste(g2, (0, eq_top))
-    composite_masked_gradient(fg, grad_eq, eq_mask)
-
-    return fg
-
-
 def compose_full_icon(bg: Image.Image, fg: Image.Image) -> Image.Image:
     out = bg.copy()
     out.alpha_composite(fg)
@@ -407,33 +305,6 @@ def main() -> None:
         cam_icon_512.save(img_dir / "icon.png", optimize=True)
         cam_feat.save(img_dir / "featureGraphic.png", optimize=True)
     print("  [OK] LanVid Studio / Camera (android/ + Play Store 512x512 & 1024x500)")
-
-    # 2. LanVid Monitor (mobile/android/ & mobile/ios/)
-    mon_fg = render_monitor_foreground(CANVAS)
-    mon_full = compose_full_icon(bg, mon_fg)
-    install_android_resources(ROOT / "mobile" / "android" / "app" / "src" / "main" / "res", bg, mon_fg, mon_full)
-
-    mon_icon_512 = mon_full.resize((512, 512), Image.Resampling.LANCZOS).convert("RGB")
-    mon_feat = make_feature_graphic(mon_full, "LanVid Monitor", "64ch Personal IEM Mixer · Studio DSP · Ultra-Low Latency")
-    for lang in ("en-US", "uk"):
-        img_dir = ROOT / "mobile" / "android" / "fastlane" / "metadata" / "android" / lang / "images"
-        img_dir.mkdir(parents=True, exist_ok=True)
-        mon_icon_512.save(img_dir / "icon.png", optimize=True)
-        mon_feat.save(img_dir / "featureGraphic.png", optimize=True)
-
-    # 3. iOS AppIcon (1024x1024 RGB, strictly no alpha channel for App Store Connect)
-    ios_icon_path = (
-        ROOT / "mobile" / "ios" / "LanVidMonitor" / "Assets.xcassets" / "AppIcon.appiconset" / "AppIcon-1024.png"
-    )
-    ios_icon_path.parent.mkdir(parents=True, exist_ok=True)
-    # Zoom 1.12x for iOS full-bleed square icon so headphones + EQ look bold & balanced on Home Screen
-    z_sz = int(round(CANVAS * 1.12))
-    z_mon = mon_full.resize((z_sz, z_sz), Image.Resampling.LANCZOS)
-    off = (z_sz - CANVAS) // 2
-    ios_rgb = z_mon.crop((off, off, off + CANVAS, off + CANVAS)).resize((1024, 1024), Image.Resampling.LANCZOS).convert("RGB")
-    ios_rgb.save(ios_icon_path, optimize=True)
-    print("  [OK] LanVid Monitor (mobile/android/, Play Store 512x512 & 1024x500, iOS AppIcon-1024.png RGB)")
-
 
 if __name__ == "__main__":
     main()

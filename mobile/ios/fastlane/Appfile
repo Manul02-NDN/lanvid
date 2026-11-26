@@ -1,5 +1,0 @@
-# App identity for Fastlane. The App Store Connect API key (secrets) authenticates uploads; APPLE_ID is only
-# needed for the optional Apple-ID based tools, TEAM_ID overrides the automatic team detection (see Fastfile).
-app_identifier(ENV["APP_IDENTIFIER"] || "com.manul02.lanvid.monitor")
-apple_id(ENV["APPLE_ID"]) if ENV["APPLE_ID"] && !ENV["APPLE_ID"].empty?
-team_id(ENV["TEAM_ID"]) if ENV["TEAM_ID"] && !ENV["TEAM_ID"].empty?

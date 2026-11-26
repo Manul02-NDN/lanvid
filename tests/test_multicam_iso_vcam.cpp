@@ -22,7 +22,6 @@
 #include "video/multicam_manager.hpp"
 #include "video/video_bus.hpp"
 #include "video/video_playout_buffer.hpp"
-#include "video_service.hpp"
 
 namespace fs = std::filesystem;
 
@@ -316,39 +315,6 @@ TEST(video_bus_slots_isolated_and_placeholder) {
     std::vector<uint8_t> big(3840 * 2160 * 3 / 2, 128);
     CHECK(host.publish(2, lv::VideoBusFormat::kNV12, 3840, 2160, big.data(), 0, 1));
     CHECK(!host.publish(2, lv::VideoBusFormat::kBGRA, 3840, 2160, big.data(), 0, 1));
-}
-
-TEST(video_config_slots_iso_vcam_persist) {
-    const std::string dir = tmp_dir("cfg");
-    const std::string path = dir + "/lanvid_video_config.json";
-    lv::apps::LanVidVideoService a(path);
-    a.config().max_slots = 6;
-    a.config().port_mode = 1;
-    a.config().multiview_layout = 3;
-    a.config().slot_labels = {"CAM 1 • Wide", "CAM 2 \"Close\"", "CAM 3"};
-    a.config().slot_ips = {"192.168.1.20", "", "192.168.1.22"};
-    a.config().iso_output_dir = dir + "/Recordings";
-    a.config().iso_session_name = "Concert";
-    a.config().iso_container = 2;
-    a.config().iso_record_program = true;
-    a.config().iso_slot_mask = 0x5;
-    a.config().vcam_count = 3;
-    a.config().vcam_placeholder = false;
-    REQUIRE(a.save_config());
-
-    lv::apps::LanVidVideoService b(path);
-    REQUIRE(b.load_config());
-    CHECK(b.config().max_slots == 6 && b.config().port_mode == 1 && b.config().multiview_layout == 3);
-    REQUIRE(b.config().slot_labels.size() == 3);
-    CHECK(b.config().slot_labels[0] == "CAM 1 • Wide");
-    CHECK(b.config().slot_labels[1] == "CAM 2 \"Close\"");
-    REQUIRE(b.config().slot_ips.size() == 3);
-    CHECK(b.config().slot_ips[0] == "192.168.1.20" && b.config().slot_ips[1].empty() && b.config().slot_ips[2] == "192.168.1.22");
-    CHECK(b.config().iso_output_dir == a.config().iso_output_dir && b.config().iso_session_name == "Concert");
-    CHECK(b.config().iso_container == 2 && b.config().iso_record_program && b.config().iso_slot_mask == 0x5);
-    CHECK(b.config().vcam_count == 3 && !b.config().vcam_placeholder);
-    std::error_code ec;
-    fs::remove_all(dir, ec);
 }
 
 // Remote phone control from LanVid Video (lens / focus / quality preset) over the Tally channel:

@@ -19,7 +19,6 @@
 #include "grid/grid_node.hpp"
 #include "grid/l2_protocol.hpp"
 #include "grid/l2_transport.hpp"
-#include "common_ui/json_config.hpp"
 
 using namespace lv::grid;
 
@@ -398,67 +397,3 @@ TEST(grid_dsp_server_offload_and_hot_failover_redundancy) {
     CHECK(bak_wet_rms > dry_rms * 0.42f && bak_wet_rms < dry_rms * 0.58f);  // identical mirrored DSP state!
 }
 
-// =============================================================================
-// 4. Dual-Engine Mode Switch (Classic UDP <-> Grid L2 <-> Hybrid) Persistence
-// =============================================================================
-TEST(grid_engine_mode_switch_preserves_classic_config) {
-    namespace fs = std::filesystem;
-    const std::string cfg_path = (fs::temp_directory_path() / "lanvid_grid_l2_test_cfg.json").string();
-
-    // 4a. Default JSON config values
-    lv::ui::JsonConfig def;
-    CHECK(def.empty());
-
-    // 4b. Save Classic + Grid L2 settings (mode = 1) and reload
-    lv::ui::JsonConfig saved;
-    saved.set_string("dest_ip", "192.168.50.109");
-    saved.set_int("dest_port", 5004);
-    saved.set_int("aoip_channels", 64);
-    saved.set_int("aoip_latency_ms", 20);
-    saved.set_int("network_engine_mode", 1);  // Grid L2
-    saved.set_string("grid_nic_name", "Ethernet-Test-NIC");
-    saved.set_bool("grid_vlan_enabled", true);
-    saved.set_int("grid_vlan_id", 42);
-    saved.set_int("grid_vlan_pcp", 6);
-    saved.set_int("grid_channels", 256);
-    saved.set_bool("grid_clock_master", true);
-    REQUIRE(saved.save(cfg_path));
-
-    lv::ui::JsonConfig loaded;
-    REQUIRE(loaded.load(cfg_path));
-    int i_val = -1;
-    bool b_val = false;
-    std::string s_val;
-    CHECK(loaded.get_int("network_engine_mode", i_val) && i_val == 1);
-    CHECK(loaded.get_string("grid_nic_name", s_val) && s_val == "Ethernet-Test-NIC");
-    CHECK(loaded.get_bool("grid_vlan_enabled", b_val) && b_val == true);
-    CHECK(loaded.get_int("grid_vlan_id", i_val) && i_val == 42);
-    CHECK(loaded.get_int("grid_vlan_pcp", i_val) && i_val == 6);
-    CHECK(loaded.get_int("grid_channels", i_val) && i_val == 256);
-    CHECK(loaded.get_bool("grid_clock_master", b_val) && b_val == true);
-    // Classic UDP fields must be 100% preserved!
-    CHECK(loaded.get_string("dest_ip", s_val) && s_val == "192.168.50.109");
-    CHECK(loaded.get_int("dest_port", i_val) && i_val == 5004);
-    CHECK(loaded.get_int("aoip_channels", i_val) && i_val == 64);
-    CHECK(loaded.get_int("aoip_latency_ms", i_val) && i_val == 20);
-
-    // 4c. Switch to Hybrid (mode = 2) and then back to Classic (mode = 0)
-    loaded.set_int("network_engine_mode", 2);
-    REQUIRE(loaded.save(cfg_path));
-    lv::ui::JsonConfig hybrid;
-    REQUIRE(hybrid.load(cfg_path));
-    CHECK(hybrid.get_int("network_engine_mode", i_val) && i_val == 2);
-    CHECK(hybrid.get_int("grid_channels", i_val) && i_val == 256);
-    CHECK(hybrid.get_string("dest_ip", s_val) && s_val == "192.168.50.109");
-
-    hybrid.set_int("network_engine_mode", 0);
-    REQUIRE(hybrid.save(cfg_path));
-    lv::ui::JsonConfig back_to_classic;
-    REQUIRE(back_to_classic.load(cfg_path));
-    CHECK(back_to_classic.get_int("network_engine_mode", i_val) && i_val == 0);
-    CHECK(back_to_classic.get_string("grid_nic_name", s_val) && s_val == "Ethernet-Test-NIC");
-    CHECK(back_to_classic.get_int("aoip_channels", i_val) && i_val == 64);
-
-    std::error_code ec;
-    fs::remove(cfg_path, ec);
-}

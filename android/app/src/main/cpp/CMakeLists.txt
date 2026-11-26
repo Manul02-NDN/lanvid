@@ -4,12 +4,11 @@ project(lanvid_android LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Build shared lanvid_core (liblanvid_core.so) with ARM64 NEON enabled on arm64-v8a
+# Build only the shared SDK core (liblanvid_core.so, ARM64 NEON on arm64-v8a) from the repo root;
+# it compiles src/{core,net,codec,audio,midi,grid,common,parallel,platform,video,app} only.
 set(LANVID_ENABLE_NEON  ON  CACHE BOOL "" FORCE)
 set(LANVID_ENABLE_AVX2  OFF CACHE BOOL "" FORCE)
 set(LANVID_BUILD_SHARED ON  CACHE BOOL "" FORCE)
-set(LANVID_BUILD_GUI    OFF CACHE BOOL "" FORCE)
-set(LANVID_BUILD_CLI    OFF CACHE BOOL "" FORCE)
 set(LANVID_BUILD_TESTS  OFF CACHE BOOL "" FORCE)
 
 get_filename_component(LANVID_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)

@@ -1,5 +1,0 @@
-v2.7.0:
-• Studio-grade Opus CELT 48 kHz Fullband (128 / 192 / 256 kbps) + Lossless 24-bit PCM
-• Personal 64-to-Stereo Monitor Bus with server-side HPF, 3-band EQ, Compressor & -0.5 dBFS Brickwall Limiter
-• Automatic mDNS (_lanvid._udp) discovery & Demo Studio Preview mode
-• Native low-latency AAudio output with background playback

@@ -61,17 +61,13 @@ option(LANVID_SDK_CORE_ONLY "Build pure C ABI SDK core without OS capture/GUI de
 option(LANVID_ENABLE_AVX2   "Enable runtime-dispatched x86_64 AVX2 codec kernels" ON)
 option(LANVID_ENABLE_NEON   "Enable ARM64/Apple Silicon NEON codec kernels" ON)
 option(LANVID_BUILD_SHARED  "Build lanvid_core shared C ABI library (DLL/.so/.dylib)" ON)
-option(LANVID_BUILD_GUI     "Build LanVid Studio Desktop GUI (Dear ImGui)" ON)
-option(LANVID_BUILD_CLI     "Build CLI sender/receiver executables" ON)
-option(LANVID_BUILD_TESTS   "Build unit tests and benchmark" ON)
-option(LANVID_BUILD_DRIVERS "Build OS virtual audio devices (ASIO DLL / CoreAudio HAL / JACK bridge)" ON)
-# macOS: LanVidVideoBus_v1 shared memory must live inside the App Group of the sandboxed CoreMediaIO
-# Camera Extension (drivers/macos_vcam), so the host publishes to "<group>/vbus1" (POSIX name <= 31 chars).
+option(LANVID_BUILD_TESTS   "Build lanvid_tests (SDK core unit tests)" ON)
+# macOS: name of the LanVidVideoBus_v1 shared memory segment published by the core ("<group>/vbus1",
+# POSIX name <= 31 chars) so external macOS camera extensions in that App Group can read it.
 set(LANVID_MACOS_APP_GROUP "9SN7V4SC2S.lanvid" CACHE STRING "App Group of the LanVid macOS Camera Extension (<TEAM_ID>.lanvid)")
 if(APPLE AND NOT IOS)
   add_compile_definitions(LANVID_VIDEO_BUS_NAME="${LANVID_MACOS_APP_GROUP}/vbus1")
 endif()
-option(BUILD_OBS_PLUGIN     "Build obs-lanvid plugin for OBS Studio" ON)
 
 set(LV_IS_X86 FALSE)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86|x86)$")
@@ -206,7 +202,6 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
   endif()
 endif()
 set(LV_PLATFORM_INCLUDES "")
-set(LV_HAVE_SDL2 FALSE)
 set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread")
 
 if(WIN32)
@@ -276,25 +271,7 @@ else()
   endif()
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES src/platform/platform_stubs_unix.cpp)
-    if(ANDROID OR IOS)
-      list(APPEND LV_CORE_SOURCES src/platform/preview_window_stub.cpp)
-    else()
-      find_package(SDL2 QUIET)
-      if(SDL2_FOUND)
-        set(LV_HAVE_SDL2 TRUE)
-        message(STATUS "lanvid: SDL2 found -> enabling SDL2 preview & GUI backend")
-        list(APPEND LV_CORE_SOURCES src/platform/preview_window_sdl2.cpp)
-        if(TARGET SDL2::SDL2)
-          list(APPEND LV_PLATFORM_LIBS SDL2::SDL2)
-        else()
-          list(APPEND LV_PLATFORM_INCLUDES ${SDL2_INCLUDE_DIRS})
-          list(APPEND LV_PLATFORM_LIBS ${SDL2_LIBRARIES})
-        endif()
-      else()
-        message(STATUS "lanvid: SDL2 not found -> building UNIX headless preview stub")
-        list(APPEND LV_CORE_SOURCES src/platform/preview_window_stub.cpp)
-      endif()
-    endif()
+    list(APPEND LV_CORE_SOURCES src/platform/preview_window_stub.cpp)  # headless (no SDL2 / GUI)
   endif()
 endif()
 
@@ -345,106 +322,7 @@ if(LANVID_BUILD_SHARED)
   lanvid_set_flags(lanvid_core_shared)
 endif()
 
-# ---------------------------------------------------------------- Modular Desktop Apps (apps/)
-set(LV_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
-if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
-  add_subdirectory(apps/common_ui)
-  add_subdirectory(apps/lanvid_audio)
-  add_subdirectory(apps/lanvid_video)
-  add_subdirectory(apps/lanvid_intercom)
-endif()
-
-# ---------------------------------------------------------------- CLI executables
-if(LANVID_BUILD_CLI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
-  add_executable(sender src/app/sender_main.cpp src/app/duplex_cli.cpp)
-  target_link_libraries(sender PRIVATE lanvid_core)
-  lanvid_set_flags(sender)
-
-  add_executable(receiver src/app/receiver_main.cpp)
-  target_link_libraries(receiver PRIVATE lanvid_core)
-  lanvid_set_flags(receiver)
-
-  add_executable(lanvid_dsp_server src/app/dsp_server_main.cpp)
-  target_link_libraries(lanvid_dsp_server PRIVATE lanvid_core)
-  lanvid_set_flags(lanvid_dsp_server)
-endif()
-
-# ---------------------------------------------------------------- tests & benchmark
-
-# ---------------------------------------------------------------- virtual 64ch OS audio devices
-# Each driver compiles the self-contained shared-memory bus directly (no lanvid_core dependency),
-# because it is loaded into foreign processes (DAWs / coreaudiod).
-if(LANVID_BUILD_DRIVERS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
-  if(APPLE)
-    add_library(LanVidAudio MODULE
-      drivers/macos/hal/LanVidAudioDriver.cpp
-      src/audio/shm_audio_bridge.cpp)
-    set_target_properties(LanVidAudio PROPERTIES
-      BUNDLE TRUE
-      BUNDLE_EXTENSION driver
-      OUTPUT_NAME LanVidAudio
-      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/drivers/macos/hal/Info.plist.in"
-      OSX_ARCHITECTURES "arm64;x86_64"
-      CXX_VISIBILITY_PRESET hidden
-      VISIBILITY_INLINES_HIDDEN ON)
-    target_include_directories(LanVidAudio PRIVATE src)
-    target_compile_options(LanVidAudio PRIVATE -Wall -Wextra -O2)
-    target_link_libraries(LanVidAudio PRIVATE "-framework CoreAudio" "-framework CoreFoundation")
-  elseif(WIN32)
-    add_library(LanVidASIO SHARED
-      drivers/windows/asio/lanvid_asio.cpp
-      drivers/windows/asio/lanvid_asio.def
-      src/audio/shm_audio_bridge.cpp)
-    target_include_directories(LanVidASIO PRIVATE src drivers/windows/asio)
-    target_link_libraries(LanVidASIO PRIVATE winmm advapi32 ole32 user32)
-    # Static CRT: the DLL is loaded into arbitrary DAW processes.
-    set_target_properties(LanVidASIO PROPERTIES OUTPUT_NAME LanVidASIO
-      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-
-    # DirectShow virtual cameras "LanVid Cam 1..8" + "LanVid Program Out" (LanVidVideoBus_v1 reader).
-    # Self-contained (no lanvid_core): loaded into OBS / Zoom / Teams / browsers.
-    add_library(LanVidVCam SHARED
-      drivers/windows_vcam/lanvid_vcam.cpp
-      drivers/windows_vcam/lanvid_vcam.def
-      src/video/video_bus.cpp)
-    target_include_directories(LanVidVCam PRIVATE src drivers/windows_vcam)
-    target_link_libraries(LanVidVCam PRIVATE strmiids ole32 oleaut32 advapi32 winmm uuid)
-    set_target_properties(LanVidVCam PROPERTIES OUTPUT_NAME LanVidVCam
-      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    # End-to-end DirectShow client check (enumerate, connect, validate pixels / formats / placeholder).
-    add_executable(lanvid_vcam_probe
-      drivers/windows_vcam/vcam_probe.cpp
-      src/video/video_bus.cpp)
-    target_include_directories(lanvid_vcam_probe PRIVATE src)
-    target_link_libraries(lanvid_vcam_probe PRIVATE strmiids ole32 oleaut32 uuid)
-  else()
-    add_executable(lanvid-audio-bridge
-      drivers/linux/jack_pw/lanvid_audio_bridge.cpp
-      src/audio/shm_audio_bridge.cpp)
-    target_include_directories(lanvid-audio-bridge PRIVATE src)
-    target_link_libraries(lanvid-audio-bridge PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
-    find_library(LV_RT_LIB rt)
-    if(LV_RT_LIB)
-      target_link_libraries(lanvid-audio-bridge PRIVATE ${LV_RT_LIB})
-    endif()
-    # Virtual cameras "LanVid Cam 1..8" + "LanVid Program Out": LanVidVideoBus_v1 -> v4l2loopback
-    add_executable(lanvid-vcam-bridge
-      drivers/linux_vcam/lanvid_v4l2_bridge.cpp
-      drivers/common_vcam/lanvid_vbus_c.cpp
-      src/video/video_bus.cpp)
-    target_include_directories(lanvid-vcam-bridge PRIVATE src drivers/common_vcam)
-    target_link_libraries(lanvid-vcam-bridge PRIVATE Threads::Threads)
-    if(LV_RT_LIB)
-      target_link_libraries(lanvid-vcam-bridge PRIVATE ${LV_RT_LIB})
-    endif()
-  endif()
-endif()
-
-# ---------------------------------------------------------------- OBS Studio Plugin (obs-lanvid)
-if(BUILD_OBS_PLUGIN AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/plugins/obs-lanvid/CMakeLists.txt")
-  add_subdirectory(plugins/obs-lanvid)
-endif()
-
+# ---------------------------------------------------------------- SDK core unit tests
 if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
   enable_testing()
   add_executable(lanvid_tests
@@ -459,7 +337,6 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_audio.cpp
     tests/test_audio_64ch.cpp
     tests/test_shm_audio_bus.cpp
-    tests/test_hal_driver.cpp
     tests/test_c_api.cpp
     tests/test_video_codecs.cpp
     tests/test_audio_duplex.cpp
@@ -471,42 +348,17 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_latency_mode.cpp
     tests/test_rate_integrity.cpp
     tests/test_audio_only_toggle.cpp
-    tests/test_monitor_mobile.cpp
     tests/test_lanvid_grid_l2.cpp
-    tests/test_installer_packaging.cpp
     tests/test_network_interfaces.cpp
     tests/test_multicam_iso_vcam.cpp
-    tests/test_studio_split.cpp
-    tests/test_video_hub.cpp
   )
   target_compile_definitions(lanvid_tests PRIVATE LV_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
-  if(TARGET lanvid_json_config)
-    target_link_libraries(lanvid_tests PRIVATE
-      lanvid_json_config
-      lanvid_audio_service
-      lanvid_video_service
-      lanvid_intercom_service
-    )
-  endif()
-  if(TARGET obs_lanvid_core)
-    target_sources(lanvid_tests PRIVATE tests/test_obs_plugin.cpp)
-    target_link_libraries(lanvid_tests PRIVATE obs_lanvid_core)
-  endif()
   if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     target_compile_definitions(lanvid_tests PRIVATE LV_HAVE_SHM_BUS=1)
   endif()
-  if(TARGET LanVidAudio)
-    add_dependencies(lanvid_tests LanVidAudio)
-    target_compile_definitions(lanvid_tests PRIVATE
-      LV_HAL_DRIVER_BINARY="$<TARGET_FILE:LanVidAudio>")
-  endif()
   lanvid_set_flags(lanvid_tests)
   add_test(NAME lanvid_tests COMMAND lanvid_tests WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-
-  add_executable(bench_codec bench/bench_codec.cpp)
-  target_link_libraries(bench_codec PRIVATE lanvid_core)
-  lanvid_set_flags(bench_codec)
 endif()
 
 # ---------------------------------------------------------------- SDK CMake Install & pkg-config

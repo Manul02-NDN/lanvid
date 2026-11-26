@@ -1,5 +1,8 @@
 name: CI Build & Test
 
+# LanVid Core SDK (lanvid_core static + shared, lanvid_tests) on Windows / Linux / macOS
+# and the LanVid Camera mobile app (iOS: mobile/ios_camera, Android: android/).
+
 on:
   push:
     branches: [ main ]
@@ -12,181 +15,104 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-test-windows:
-    name: Windows (x64 AVX2 + D3D11 + Setup.exe)
+  core-windows:
+    name: Core SDK - Windows (x64 AVX2)
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup MSVC x64 Developer Environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Configure & Build (CMake + Ninja Release)
         shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
-      - name: Run Unit Tests (44 tests) & 4K Codec Benchmark
+      - name: Run lanvid_tests
         shell: pwsh
         run: |
           .\build\lanvid_tests.exe
           if ($LASTEXITCODE -ne 0) { throw "lanvid_tests.exe failed (exit $LASTEXITCODE)" }
-          .\build\bench_codec.exe --width 3840 --height 2160 --frames 10 --quality 80
-
-      - name: Verify LanVidASIO.dll (64-bit COM exports)
-        shell: pwsh
-        run: |
-          if (-not (Test-Path build\LanVidASIO.dll)) { throw "LanVidASIO.dll was not built" }
-          $exp = dumpbin /nologo /exports build\LanVidASIO.dll | Out-String
-          foreach ($sym in 'DllGetClassObject','DllCanUnloadNow','DllRegisterServer','DllUnregisterServer') {
-            if ($exp -notmatch $sym) { throw "Missing export $sym" }
-          }
-          dumpbin /nologo /headers build\LanVidASIO.dll | Select-String 'machine \(x64\)'
 
       - name: Build & Verify External C++ SDK Client
         shell: pwsh
         run: python sdk/build_sdk.py --verify-client
 
-      - name: Build & Verify Windows One-Click Installer (LanVid_Setup.exe)
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File installer/windows/build_windows_setup.ps1
-          .\installer\windows\LanVid_Setup.exe --check-only | Out-String
-
-      - name: Upload Windows Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: lanvid-windows-x64
-          path: |
-            installer/windows/LanVid_Setup.exe
-            build/lanvid_app.exe
-            build/lanvid_core.dll
-            build/sender.exe
-            build/receiver.exe
-            dist/LanVidSDK-v2.7.0/
-          if-no-files-found: error
-
-  build-and-test-linux:
-    name: Linux (Ubuntu 24.04 x86_64 + SDL2 + .run)
+  core-linux:
+    name: Core SDK - Linux (Ubuntu 24.04 x86_64)
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Linux Build & GUI Dependencies
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config \
-            libsdl2-dev libgl1-mesa-dev libx11-dev libxrandr-dev libpipewire-0.3-dev \
-            libavcodec-dev libavutil-dev
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libavcodec-dev libavutil-dev
 
       - name: Configure & Build (CMake + Ninja Release)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_OBS_PLUGIN=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel "$(nproc)"
 
-      - name: Run Unit Tests & Codec Benchmark
-        run: |
-          ./build/lanvid_tests
-          ./build/bench_codec --width 1920 --height 1080 --frames 10 --quality 80
-
-      - name: Verify lanvid-audio-bridge (JACK / PipeWire, dlopen)
-        run: |
-          ./build/lanvid-audio-bridge --help
-          set +e; ./build/lanvid-audio-bridge; rc=$?; set -e
-          echo "bridge exit code without a JACK server: $rc"
-          if [ "$rc" -ne 3 ] && [ "$rc" -ne 5 ]; then exit 1; fi
+      - name: Run lanvid_tests
+        run: ./build/lanvid_tests
 
       - name: Build & Verify External C++ SDK Client
         run: python3 sdk/build_sdk.py --verify-client
 
-      - name: Build Linux One-Click Installer (.run + .deb)
-        run: |
-          chmod +x installer/linux/build_linux_packages.sh installer/linux/install_lanvid.sh
-          ./installer/linux/build_linux_packages.sh
-
-      - name: Upload Linux Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: lanvid-linux-x86_64
-          path: |
-            installer/linux/LanVid-Linux-x86_64.run
-            installer/linux/*.deb
-            build/lanvid_app
-            build/liblanvid_core.so
-            dist/LanVidSDK-v2.7.0/
-          if-no-files-found: error
-
-  build-and-test-macos-ios:
-    name: macOS & iOS (Apple Silicon NEON + .pkg + XCFramework + SwiftPM)
+  core-macos-and-camera-ios:
+    name: Core SDK - macOS + LanVid Camera iOS
     runs-on: macos-26
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Build Tools
-        run: brew install cmake ninja
+      - name: Install build tools
+        run: brew install cmake ninja xcodegen
 
-      - name: Configure, Build & Run Core Unit Tests (arm64 NEON)
+      - name: Configure, Build & Run lanvid_tests (arm64 NEON)
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLANVID_BUILD_GUI=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel "$(sysctl -n hw.ncpu)"
           ./build/lanvid_tests
 
-      - name: Verify LanVidAudio.driver (CoreAudio HAL bundle)
+      - name: Build LanVidCore.xcframework (SDK)
         run: |
-          B=build/LanVidAudio.driver
-          plutil -lint "$B/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFPlugInTypes:443ABAB8-E7B3-491A-B985-BEB9187030DB" "$B/Contents/Info.plist"
-          lipo "$B/Contents/MacOS/LanVidAudio" -verify_arch arm64 x86_64
-          nm -gU "$B/Contents/MacOS/LanVidAudio" | grep -q '_LanVidAudioDriverFactory'
-
-      - name: Build Universal macOS .pkg, .dmg & LanVidCore.xcframework
-        run: |
-          chmod +x sdk/apple/build_xcframework.sh sdk/apple/build_macos_pkg.sh \
-                   sdk/apple/installer/scripts/preinstall sdk/apple/installer/scripts/postinstall
-          ./sdk/apple/build_macos_pkg.sh
+          chmod +x sdk/apple/build_xcframework.sh
+          ./sdk/apple/build_xcframework.sh
 
       - name: Verify Swift Package (LanVidKit) Compilation
         run: |
           cd sdk/apple
           swift build
 
-      - name: Build LanVid Monitor (mobile/ios, SwiftUI + AVAudioEngine) for iOS Simulator
+      - name: Build LanVid Camera (mobile/ios_camera) for iOS
         run: |
-          brew install xcodegen
-          ./mobile/ios/scripts/build_core.sh
-          cd mobile/ios
+          cd mobile/ios_camera
+          ./scripts/build_core.sh
           xcodegen generate
-          xcodebuild -project LanVidMonitor.xcodeproj -scheme LanVidMonitor -sdk iphonesimulator \
-            -configuration Debug -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project LanVidCamera.xcodeproj -scheme LanVidCamera -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO build
 
-      - name: Upload macOS & iOS Artifacts
+      - name: Upload Apple Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lanvid-macos-ios
-          path: |
-            dist/apple/LanVidSDK-v2.7.0-macOS.pkg
-            dist/apple/LanVidSDK-v2.7.0-macOS.dmg
-            dist/apple/LanVidCore.xcframework/
+          name: lanvid-apple
+          path: dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
-  build-android:
-    name: Android (ARM64 NEON + ARMv7 + x86_64 AAR & APK)
+  camera-android:
+    name: LanVid Camera Android + SDK AAR (ARM64 NEON)
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup JDK 21
         uses: actions/setup-java@v4
@@ -220,25 +146,18 @@ jobs:
           cd sdk/android
           gradle --no-daemon exportAar
 
-      - name: Build Android Universal App (.apk)
+      - name: Build LanVid Camera Android (.apk)
         run: |
           cd android
           gradle --no-daemon exportUniversalApk
           mkdir -p ../dist/android
-          cp LanVid-Android-universal.apk ../dist/android/LanVid-Android-v2.7.0.apk
-
-      - name: Build LanVid Monitor (mobile/android, Compose + AAudio JNI)
-        run: |
-          cd mobile/android
-          gradle --no-daemon :app:assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../../dist/android/LanVid-Monitor-v2.7.0-debug.apk
+          cp LanVid-Android-universal.apk ../dist/android/LanVid-Camera-Android.apk
 
       - name: Upload Android Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lanvid-android
           path: |
-            dist/android/lanvid-sdk-2.7.0.aar
-            dist/android/LanVid-Android-v2.7.0.apk
-            dist/android/LanVid-Monitor-v2.7.0-debug.apk
+            dist/android/lanvid-sdk-*.aar
+            dist/android/LanVid-Camera-Android.apk
           if-no-files-found: error

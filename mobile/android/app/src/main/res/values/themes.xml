@@ -1,5 +1,0 @@
-<resources>
-    <style name="Theme.LanVidMonitor" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">#12101F</item>
-    </style>
-</resources>

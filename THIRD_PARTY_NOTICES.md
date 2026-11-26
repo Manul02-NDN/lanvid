@@ -2,25 +2,20 @@
 
 **LanVid** is licensed under the **MIT License** (see [LICENSE](LICENSE)). The core C++20 video/audio codec, UDP transport, XOR FEC, AIMD controller, lock-free audio jitter buffer, LAN discovery, C ABI, C++17 wrapper, Swift wrapper, and Python bindings are written from scratch with zero third-party runtime dependencies.
 
-Below is the complete audit of bundled third-party code and optional/platform SDKs used across the desktop, mobile, and SDK targets:
+Below is the complete audit of bundled third-party code and optional/platform SDKs used across the SDK core and the LanVid Camera mobile apps:
 
 ---
 
 ## 1. Bundled Third-Party Source Code
 
-### Dear ImGui (v1.91.8)
-- **Location:** `third_party/imgui/`
-- **Used by:** `lanvid_app` (`LanVid Studio` Desktop GUI on Windows and Linux; excluded when building `LANVID_SDK_CORE_ONLY=ON`)
-- **License:** MIT License
-- **Copyright:** Copyright (c) 2014–2025 Omar Cornut
-- **License Text:** See `third_party/imgui/LICENSE.txt`
+None. (`libopus` is fetched at configure time by CMake `FetchContent` when not installed on the system.)
 
 ---
 
 ## 2. Internal Test Harness
 
 ### `tests/mini_test.hpp`
-- **Used by:** `lanvid_tests` (31 unit and loopback integration tests)
+- **Used by:** `lanvid_tests` (77 SDK core unit and loopback integration tests)
 - **License:** MIT License (in-repo lightweight C++20 test runner; no external GoogleTest/Catch2 dependency required)
 
 ---

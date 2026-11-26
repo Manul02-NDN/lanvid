@@ -7,7 +7,6 @@
 #include <vector>
 
 #include "audio/multi_device_matrix.hpp"
-#include "common_ui/json_config.hpp"
 
 TEST(multi_device_matrix_routing_and_summing) {
     using namespace lv;
@@ -74,42 +73,7 @@ TEST(multi_device_matrix_routing_and_summing) {
     mx.apply_preset(0, 1, 0, 3);
     CHECK(mx.crosspoints().size() == size_t(66));
 
-    // 4. JsonConfig persistence roundtrip
-    namespace fs = std::filesystem;
-    const fs::path cfg_path = fs::temp_directory_path() / "lanvid_matrix_test_cfg.json";
-
-    lv::ui::JsonConfig saved;
-    saved.set_bool("audio_only", true);
-    saved.set_int("active_tab", 3);
-    saved.set_int("matrix_buffer_size", 128);
-    saved.set_bool("matrix_feedback_guard", true);
-    saved.set_int("adaptive_jitter", 0);  // Fixed (Ethernet) must survive a restart
-    std::vector<std::string> slot_names;
-    for (const auto& s : mx.slots()) slot_names.push_back(s.name);
-    std::vector<int> cp_src;
-    for (const auto& cp : mx.crosspoints()) cp_src.push_back(cp.src_slot);
-    saved.set_string_list("matrix_slot_names", slot_names);
-    saved.set_int_list("matrix_cp_src", cp_src);
-    CHECK(saved.save(cfg_path.string()));
-
-    lv::ui::JsonConfig loaded;
-    CHECK(loaded.load(cfg_path.string()));
-    bool b_val = false;
-    int i_val = -1;
-    std::vector<std::string> out_slots;
-    std::vector<int> out_cps;
-    CHECK(loaded.get_bool("audio_only", b_val) && b_val);
-    CHECK(loaded.get_int("active_tab", i_val) && i_val == 3);
-    CHECK(loaded.get_int("matrix_buffer_size", i_val) && i_val == 128);
-    CHECK(loaded.get_int("adaptive_jitter", i_val) && i_val == 0);
-    CHECK(loaded.get_string_list("matrix_slot_names", out_slots) && out_slots.size() == size_t(4));
-    CHECK(loaded.get_int_list("matrix_cp_src", out_cps) && out_cps.size() == size_t(66));
-    CHECK(out_slots[3] == "Headphones");
-
-    std::error_code ec;
-    fs::remove(cfg_path, ec);
-
-    std::printf("    [matrix] 1-to-many + many-to-1 summing (0.30+0.20=0.50) + mute + feedback guard + config persistence OK\n");
+    std::printf("    [matrix] 1-to-many + many-to-1 summing (0.30+0.20=0.50) + mute + feedback guard OK\n");
 }
 
 TEST(patchbay_visual_sync_with_64x64_matrix_and_feedback_loop_guard) {

@@ -21,7 +21,6 @@
 #include "audio/personal_monitor_bus.hpp"
 #include "common/clock.hpp"
 #include "common/rt_thread.hpp"
-#include "common_ui/json_config.hpp"
 #include "lanvid/lanvid_sdk.h"
 #include "net/network_interfaces.hpp"
 #include "net/packet.hpp"
@@ -96,20 +95,6 @@ TEST(network_interfaces_enumerate_ethernet_and_wifi) {
         lo.close();
     }
 
-    // JsonConfig Dual-NIC configuration fields persistence.
-    {
-        lv::ui::JsonConfig cfg;
-        std::string s_out;
-        bool b_out = true;
-        CHECK(!cfg.get_string("primary_nic_ip", s_out));
-        CHECK(!cfg.get_bool("dual_nic_enabled", b_out));
-        cfg.set_string("primary_nic_ip", "192.168.50.10");
-        cfg.set_string("secondary_nic_ip", "192.168.51.20");
-        cfg.set_bool("dual_nic_enabled", true);
-        CHECK(cfg.get_string("primary_nic_ip", s_out) && s_out == "192.168.50.10");
-        CHECK(cfg.get_string("secondary_nic_ip", s_out) && s_out == "192.168.51.20");
-        CHECK(cfg.get_bool("dual_nic_enabled", b_out) && b_out);
-    }
 }
 
 TEST(network_dual_nic_1plus1_failover_zero_dropouts) {

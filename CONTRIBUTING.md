@@ -6,13 +6,12 @@ Thank you for your interest in contributing to **LanVid**! We welcome bug report
 
 ## Local Development Setup
 
-### Build & Run All 31 Unit Tests
+### Build & Run All 77 SDK Core Unit Tests
 **Windows (MSVC 2022 + Ninja):**
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 .\build\lanvid_tests.exe
-.\build\bench_codec.exe
 ```
 
 **Linux (Ubuntu/Debian/Arch/Fedora):**
@@ -20,7 +19,6 @@ cmake --build build
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel "$(nproc)"
 ./build/lanvid_tests
-./build/bench_codec
 ```
 
 **macOS (Apple Silicon / Intel):**
@@ -58,8 +56,7 @@ python3 sdk/build_sdk.py --verify-client
 
 ## Pull Request Checklist
 
-- [ ] All **31 / 31 unit tests** in `lanvid_tests` pass (`0 failed`).
+- [ ] All **77 / 77 unit tests** in `lanvid_tests` pass (`0 failed`).
 - [ ] New features or bug fixes include targeted tests in `tests/`.
 - [ ] `python3 sdk/build_sdk.py --verify-client` compiles and passes if C ABI or CMake packaging changed.
-- [ ] 4K60 codec performance (`bench_codec`) has no regressions (`< 1.5 ms` encode/decode on modern multi-core AVX2/NEON CPUs).
 - [ ] Documentation (`README.md`, `sdk/README.md`, or `docs/PROTOCOL.md`) updated where applicable.

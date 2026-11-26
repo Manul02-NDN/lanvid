@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=LanVid Video
-Comment=Multi-Camera Preview, Tally (STBY/PVW/PGM), Director Intercom/IFB & OBS Output
-Exec=/usr/local/bin/lanvid_video_studio
-Icon=lanvid
-Terminal=false
-Type=Application
-Categories=AudioVideo;Video;
