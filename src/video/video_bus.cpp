@@ -36,6 +36,10 @@ uint64_t video_bus_now_ms() {
 
 bool VideoBus::open(const char* name) {
     close();
+#if defined(__ANDROID__)
+    (void)name;
+    return false;  // no OS virtual cameras on Android (bionic has no POSIX shm_open)
+#else
     const char* nm = name ? name : kVideoBusName;
     const size_t size = layout_size();
     bool created = false;
@@ -97,6 +101,7 @@ bool VideoBus::open(const char* name) {
         hdr_->magic.store(kVideoBusMagic, std::memory_order_release);
     }
     return hdr_->version == kVideoBusVersion;
+#endif
 }
 
 void VideoBus::close() {

@@ -9,6 +9,7 @@
 #include <aaudio/AAudio.h>
 #include <android/log.h>
 #include <jni.h>
+#include <sys/resource.h>  // setpriority / PRIO_PROCESS
 
 #include <algorithm>
 #include <atomic>
