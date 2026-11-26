@@ -65,7 +65,7 @@ jobs:
       - name: Restore App Store Connect API key (.p8)
         run: |
           KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
-          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY"
+          python3 -c 'import base64, os, sys; open(sys.argv[1], "wb").write(base64.b64decode(os.environ["APP_STORE_CONNECT_API_KEY_BASE64"]))' "$KEY"
           chmod 600 "$KEY"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
@@ -116,7 +116,7 @@ jobs:
       - name: Restore App Store Connect API key (.p8)
         run: |
           KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
-          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY"
+          python3 -c 'import base64, os, sys; open(sys.argv[1], "wb").write(base64.b64decode(os.environ["APP_STORE_CONNECT_API_KEY_BASE64"]))' "$KEY"
           chmod 600 "$KEY"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
