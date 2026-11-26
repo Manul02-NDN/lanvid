@@ -785,12 +785,18 @@ void LanVidVideoStudioApp::draw_discovery() {
 
     ImGui::SameLine();
     ImGui::BeginChild("##disc_qr", ImVec2(0.0f, 0.0f), true);
-    ImGui::TextColored(p.text_main, "QR-код швидкого підключення");
-    ImGui::TextColored(p.text_muted, "Відскануйте камерою смартфона або в LanVid Camera");
-    const std::string url = quick_connect_url();
+    static int qr_mode = 0;
+    ImGui::TextColored(p.text_main, qr_mode == 0 ? "QR-код швидкого підключення" : "Завантажити LanVid Camera (iOS)");
+    if (ImGui::SmallButton(qr_mode == 0 ? "[Підключення]" : "Підключення")) qr_mode = 0;
+    ImGui::SameLine();
+    if (ImGui::SmallButton(qr_mode == 1 ? "[App Store iOS]" : "App Store iOS")) qr_mode = 1;
+    ImGui::TextColored(p.text_muted, qr_mode == 0 ? "Відскануйте камерою смартфона або в LanVid Camera"
+                                                  : "Відскануйте камерою iPhone, щоб встановити LanVid Camera");
+    static constexpr const char* kAppStoreUrl = "https://apps.apple.com/us/app/lanvid-camera/id6839672027";
+    const std::string url = (qr_mode == 0) ? quick_connect_url() : std::string(kAppStoreUrl);
     const auto qr = qr_encode(url);
     if (qr.size > 0) {
-        const float avail = std::min(ImGui::GetContentRegionAvail().x, 320.0f);
+        const float avail = std::min(ImGui::GetContentRegionAvail().x, 300.0f);
         const float quiet = 4.0f;
         const float module = std::floor(avail / (float(qr.size) + 2.0f * quiet));
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -806,6 +812,7 @@ void LanVidVideoStudioApp::draw_discovery() {
         ImGui::Dummy(ImVec2(side, side));
     }
     ImGui::TextWrapped("%s", url.c_str());
+    if (ImGui::SmallButton("Копіювати посилання")) ImGui::SetClipboardText(url.c_str());
     ImGui::EndChild();
 }
 

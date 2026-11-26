@@ -2,6 +2,7 @@
 
 [![CI Build & Test](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml)
 [![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
+[![App Store — LanVid Camera](https://img.shields.io/badge/App%20Store-LanVid%20Camera-0D96F6?logo=apple&logoColor=white)](https://apps.apple.com/us/app/lanvid-camera/id6839672027)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Ultra-Low Latency Multi-Codec LAN Video & Audio Streaming Protocol (`LanVid DCT` / `H.264` / `H.265`), Cross-Platform Apps (`LanVid Studio`) & Multi-Platform SDK (`C++20 / C ABI / Swift / Kotlin / Python`).**
@@ -29,7 +30,7 @@ LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network 
   - **One-Click Installers & Release Artifacts (`v2.7.0`):**
     - **Windows:** `LanVid_Setup.exe` (Setup Wizard + D3D11/firewall pre-flight + Studio GUI + CLI + `lanvid_core.dll` + 64-ch `LanVidASIO.dll`)
     - **Linux:** `LanVid-Linux-x86_64.run` & `.deb` (`SDL2 + OpenGL3` Studio GUI + CLI + `liblanvid_core.so` + `lanvid-audio-bridge`)
-    - **macOS / iOS:** `LanVidSDK-v2.7.0-macOS.pkg` & `.dmg` (Universal `arm64` NEON + `x86_64` AVX2 + `LanVidCore.xcframework` + SwiftPM `LanVidKit` + `LanVidAudio.driver`)
+    - **macOS / iOS:** `LanVidSDK-v2.7.0-macOS.pkg` & `.dmg` (Universal `arm64` NEON + `x86_64` AVX2 + `LanVidCore.xcframework` + SwiftPM `LanVidKit` + `LanVidAudio.driver`), plus [**LanVid Camera** on the iOS App Store](https://apps.apple.com/us/app/lanvid-camera/id6839672027)
     - **Android:** `LanVid-Android-v2.7.0.apk` (Universal `arm64-v8a` + `armeabi-v7a`, also published as `LanVid-Android.apk`) & `lanvid-sdk-2.7.0.aar`
     - **Cross-Platform SDK:** `LanVidSDK-Universal.zip` (`C ABI`, `C++17`, `Swift`, `Kotlin`, `Python`)
 
