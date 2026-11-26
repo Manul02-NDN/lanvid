@@ -64,9 +64,40 @@ jobs:
 
       - name: Restore the App Store Connect API key (.p8)
         run: |
-          KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
-          python3 -c 'import base64, os, sys; open(sys.argv[1], "wb").write(base64.b64decode(os.environ["APP_STORE_CONNECT_API_KEY_BASE64"]))' "$KEY"
+          KEY_ID="${APP_STORE_CONNECT_API_KEY_ID//[[:space:]]/}"
+          KEY="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          python3 - "$KEY" <<'PY'
+          import base64, os, sys, textwrap
+          secret = os.environ["APP_STORE_CONNECT_API_KEY_BASE64"].strip()
+          if "-----BEGIN" in secret and "-----END" in secret:
+              raw = secret.encode("utf-8")
+              kind = "raw-pem"
+          else:
+              raw = base64.b64decode("".join(secret.split()))
+              kind = "decoded"
+          if raw.startswith(b"\xef\xbb\xbf"):
+              raw = raw[3:]
+          if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+              text = raw.decode("utf-16").replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+              pem = text.encode("utf-8")
+              kind += "-utf16-pem"
+          elif b"-----BEGIN" in raw:
+              text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+              pem = text.encode("utf-8")
+              kind += "-pem"
+          else:
+              b64 = base64.b64encode(raw).decode("ascii")
+              pem = ("-----BEGIN PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(b64, 64)) + "\n-----END PRIVATE KEY-----\n").encode("utf-8")
+              kind += "-der-wrapped"
+          with open(sys.argv[1], "wb") as f:
+              f.write(pem)
+          print(f"Restored .p8 key: format={kind}, bytes={len(pem)}, lines={len(pem.splitlines())}")
+          PY
           chmod 600 "$KEY"
+          openssl pkey -in "$KEY" -noout
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          cp "$KEY" "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
       - uses: ruby/setup-ruby@v1
@@ -81,7 +112,7 @@ jobs:
 
       - name: Remove the API key
         if: always()
-        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8
 
   ios:
     if: ${{ inputs.target == 'testflight' || !inputs.skip_build }}
@@ -115,9 +146,40 @@ jobs:
 
       - name: Restore the App Store Connect API key (.p8)
         run: |
-          KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
-          python3 -c 'import base64, os, sys; open(sys.argv[1], "wb").write(base64.b64decode(os.environ["APP_STORE_CONNECT_API_KEY_BASE64"]))' "$KEY"
+          KEY_ID="${APP_STORE_CONNECT_API_KEY_ID//[[:space:]]/}"
+          KEY="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          python3 - "$KEY" <<'PY'
+          import base64, os, sys, textwrap
+          secret = os.environ["APP_STORE_CONNECT_API_KEY_BASE64"].strip()
+          if "-----BEGIN" in secret and "-----END" in secret:
+              raw = secret.encode("utf-8")
+              kind = "raw-pem"
+          else:
+              raw = base64.b64decode("".join(secret.split()))
+              kind = "decoded"
+          if raw.startswith(b"\xef\xbb\xbf"):
+              raw = raw[3:]
+          if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+              text = raw.decode("utf-16").replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+              pem = text.encode("utf-8")
+              kind += "-utf16-pem"
+          elif b"-----BEGIN" in raw:
+              text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+              pem = text.encode("utf-8")
+              kind += "-pem"
+          else:
+              b64 = base64.b64encode(raw).decode("ascii")
+              pem = ("-----BEGIN PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(b64, 64)) + "\n-----END PRIVATE KEY-----\n").encode("utf-8")
+              kind += "-der-wrapped"
+          with open(sys.argv[1], "wb") as f:
+              f.write(pem)
+          print(f"Restored .p8 key: format={kind}, bytes={len(pem)}, lines={len(pem.splitlines())}")
+          PY
           chmod 600 "$KEY"
+          openssl pkey -in "$KEY" -noout
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          cp "$KEY" "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
           echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
 
       - name: Install tools
@@ -150,7 +212,7 @@ jobs:
 
       - name: Remove the API key
         if: always()
-        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8
 
       - name: Keep the signed .ipa
         if: always()

@@ -4,7 +4,7 @@
 #   bundle exec fastlane publish_existing_build            attach latest TestFlight build, upload metadata/screenshots & submit
 #   bundle exec fastlane release                           build + upload .ipa, screenshots & metadata to App Store Connect
 #   bundle exec fastlane release skip_build:true submit:true  attach latest TestFlight build & submit without rebuilding
-#   bundle exec fastlane metadata                          metadata + screenshots only (no new build)
+#   bundle exec fastlane metadata                          metadata + screenshots only (no new binary)
 
 require "base64"
 require "fileutils"
@@ -27,16 +27,30 @@ platform :ios do
   def api_key_path
     return ENV["APP_STORE_CONNECT_API_KEY_PATH"] if ENV["APP_STORE_CONNECT_API_KEY_PATH"].to_s != ""
     require_env!("APP_STORE_CONNECT_API_KEY_BASE64")
-    path = File.join(Dir.tmpdir, "AuthKey_#{ENV['APP_STORE_CONNECT_API_KEY_ID']}.p8")
-    File.write(path, Base64.decode64(ENV["APP_STORE_CONNECT_API_KEY_BASE64"]))
+    key_id = ENV["APP_STORE_CONNECT_API_KEY_ID"].to_s.strip
+    path = File.join(Dir.tmpdir, "AuthKey_#{key_id}.p8")
+    raw_secret = ENV["APP_STORE_CONNECT_API_KEY_BASE64"].to_s.strip
+    if raw_secret.include?("-----BEGIN")
+      pem = raw_secret.gsub("\r\n", "\n").gsub("\r", "\n").strip + "\n"
+    else
+      decoded = Base64.decode64(raw_secret.gsub(/\s+/, ""))
+      if decoded.include?("-----BEGIN")
+        pem = decoded.sub(/\A\xEF\xBB\xBF/, "").gsub("\r\n", "\n").gsub("\r", "\n").strip + "\n"
+      else
+        b64 = Base64.strict_encode64(decoded).scan(/.{1,64}/).join("\n")
+        pem = "-----BEGIN PRIVATE KEY-----\n#{b64}\n-----END PRIVATE KEY-----\n"
+      end
+    end
+    File.write(path, pem)
+    File.chmod(0o600, path)
     path
   end
 
   def connect_api_key
     require_env!("APP_STORE_CONNECT_API_KEY_ID", "APP_STORE_CONNECT_ISSUER_ID")
     app_store_connect_api_key(
-      key_id: ENV["APP_STORE_CONNECT_API_KEY_ID"],
-      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_id: ENV["APP_STORE_CONNECT_API_KEY_ID"].to_s.strip,
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"].to_s.strip,
       key_filepath: api_key_path,
       in_house: false
     )
@@ -56,7 +70,6 @@ platform :ios do
       UI.important("Could not read the team ID from App Store Connect: #{e.message}")
     end
     UI.user_error!("Team ID unknown. Set TEAM_ID / GitHub Secret APPLE_TEAM_ID.") if team.empty?
-    UI.message("Using team #{team}")
     team
   end
 
@@ -74,15 +87,14 @@ platform :ios do
     !s.empty? && !s.start_with?("FILL_IN")
   end
 
-  def find_latest_testflight_build
+  def find_latest_testflight_build(expected_build: nil, max_attempts: 20)
     app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
     if app.nil?
       available = Spaceship::ConnectAPI::App.all.map { |a| "#{a.bundle_id} (#{a.name})" }.join(", ")
       UI.user_error!("App record #{BUNDLE_ID} not found in App Store Connect. Available apps: #{available}")
     end
 
-    explicit_build = ENV["BUILD_NUMBER"].to_s.strip
-    max_attempts = 20
+    explicit_build = (expected_build || ENV["BUILD_NUMBER"]).to_s.strip
     max_attempts.times do |attempt|
       builds = app.get_builds(
         includes: "preReleaseVersion",
@@ -97,13 +109,19 @@ platform :ios do
       chosen = explicit_build.empty? ? valid_builds.first : valid_builds.find { |b| b.version.to_s == explicit_build }
       if chosen
         app_ver = chosen.pre_release_version&.version.to_s
-        UI.success("Selected existing TestFlight build #{chosen.version} (app version: #{app_ver.empty? ? 'default' : app_ver})")
-        return { build_number: chosen.version.to_s, app_version: app_ver.empty? ? nil : app_ver }
+        UI.success("Selected existing TestFlight build #{chosen.version} (id=#{chosen.id}, app version: #{app_ver.empty? ? 'default' : app_ver})")
+        return { build_id: chosen.id, build_number: chosen.version.to_s, app_version: app_ver.empty? ? nil : app_ver }
       end
 
-      processing = active_builds.find { |b| b.processing_state == "PROCESSING" }
-      if processing && attempt < max_attempts - 1
-        UI.message("TestFlight build #{processing.version} is still PROCESSING (attempt #{attempt + 1}/#{max_attempts}); waiting 15s...")
+      processing = if explicit_build.empty?
+                     active_builds.find { |b| b.processing_state == "PROCESSING" }
+                   else
+                     active_builds.find { |b| b.version.to_s == explicit_build && b.processing_state == "PROCESSING" }
+                   end
+      waiting_for_expected = !explicit_build.empty? && active_builds.none? { |b| b.version.to_s == explicit_build }
+      if (processing || waiting_for_expected) && attempt < max_attempts - 1
+        reason = processing ? "build #{processing.version} is still PROCESSING" : "waiting for build #{explicit_build} to appear in App Store Connect"
+        UI.message("#{reason} (attempt #{attempt + 1}/#{max_attempts}); waiting 15s...")
         sleep(15)
         next
       end
@@ -112,6 +130,29 @@ platform :ios do
     end
 
     nil
+  end
+
+  def attach_build_to_edit_version(build_id:, build_number: nil)
+    return if build_id.to_s.empty?
+    app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    return if app.nil?
+    edit_ver = app.get_edit_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+    return if edit_ver.nil?
+    edit_ver.select_build(build_id: build_id)
+    UI.success("Attached build #{build_number || build_id} to App Store version #{edit_ver.version_string} (state=#{edit_ver.app_store_state})")
+  rescue StandardError => e
+    UI.important("Could not attach build #{build_number || build_id} to App Store version: #{e.message}")
+  end
+
+  def log_app_store_version_status
+    app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    return if app.nil?
+    versions = app.get_app_store_versions(platform: Spaceship::ConnectAPI::Platform::IOS, includes: "build")
+    versions.first(3).each do |v|
+      UI.message("App Store version #{v.version_string}: state=#{v.app_store_state}, build=#{v.build&.version || 'none'}")
+    end
+  rescue StandardError => e
+    UI.message("Could not read App Store version status: #{e.message}")
   end
 
   def resolve_review_information
@@ -145,7 +186,9 @@ platform :ios do
             UI.message("Could not read appStoreReviewDetail: #{e.message}")
           end
           begin
-            sources << app.fetch_beta_app_review_detail
+            if defined?(Spaceship::ConnectAPI::BetaAppReviewDetail) && Spaceship::ConnectAPI::BetaAppReviewDetail.respond_to?(:find)
+              sources << Spaceship::ConnectAPI::BetaAppReviewDetail.find(app_id: app.id)
+            end
           rescue StandardError => e
             UI.message("Could not read betaAppReviewDetail: #{e.message}")
           end
@@ -188,8 +231,9 @@ platform :ios do
     end
   end
 
-  desc "Build a signed App Store .ipa (automatic signing through the App Store Connect API key)"
+  desc "Build a signed App Store .ipa (automatic signing via App Store Connect API key)"
   lane :build_ipa do
+    setup_ci if ENV["CI"].to_s == "true"
     key = connect_api_key
     team = resolve_team_id
     auth = ["-allowProvisioningUpdates",
@@ -236,7 +280,7 @@ platform :ios do
       deliver_to_store(key, nil, false)
       UI.user_error!("Metadata & screenshots uploaded for #{BUNDLE_ID}, but no VALID TestFlight build exists yet in App Store Connect. Run with skip_build=false to build & upload the .ipa.")
     else
-      deliver_to_store(key, nil, submit, build_number: tf[:build_number], app_version: tf[:app_version])
+      deliver_to_store(key, nil, submit, build_id: tf[:build_id], build_number: tf[:build_number], app_version: tf[:app_version])
     end
   end
 
@@ -248,7 +292,7 @@ platform :ios do
       publish_existing_build(submit: submit)
     else
       key = build_ipa
-      deliver_to_store(key, lane_context[SharedValues::IPA_OUTPUT_PATH], submit)
+      deliver_to_store(key, lane_context[SharedValues::IPA_OUTPUT_PATH], submit, build_number: build_number)
     end
   end
 
@@ -258,13 +302,13 @@ platform :ios do
     deliver_to_store(connect_api_key, nil, submit)
   end
 
-  def deliver_to_store(key, ipa, submit, build_number: nil, app_version: nil)
+  def deliver_to_store(key, ipa, submit, build_id: nil, build_number: nil, app_version: nil)
     info = resolve_review_information
     missing_contact = [:first_name, :last_name, :email_address, :phone_number].select { |k| info[k].empty? }
     can_submit = submit && missing_contact.empty?
     if submit && !missing_contact.empty?
       UI.important("App Review contact fields missing (#{missing_contact.join(', ')}). " \
-                   "Uploading metadata, screenshots and attaching TestFlight build first (submit_for_review deferred until contact is provided).")
+                   "Uploading metadata, screenshots and attaching build first (submit_for_review deferred until contact is provided).")
     end
 
     filtered_review_info = info.reject { |k, v| [:first_name, :last_name, :email_address, :phone_number].include?(k) && v.empty? }
@@ -291,13 +335,25 @@ platform :ios do
         reject_if_possible: false
       }
       opts[:ipa] = ipa unless ipa.nil?
-      opts[:build_number] = build_number unless build_number.to_s.empty?
+      opts[:build_number] = build_number unless build_number.to_s.empty? || !ipa.nil?
       opts[:app_version] = app_version unless app_version.to_s.empty?
       upload_to_app_store(**opts)
     end
 
+    if !can_submit
+      if !build_id.to_s.empty?
+        attach_build_to_edit_version(build_id: build_id, build_number: build_number)
+      elsif !ipa.nil?
+        UI.message("Waiting for newly uploaded build #{build_number} to finish processing so we can attach it to the App Store version...")
+        tf = find_latest_testflight_build(expected_build: build_number, max_attempts: 48)
+        attach_build_to_edit_version(build_id: tf[:build_id], build_number: tf[:build_number]) if tf
+      end
+    end
+
+    log_app_store_version_status
+
     if submit && !missing_contact.empty?
-      UI.user_error!("Metadata, screenshots & TestFlight build #{build_number} were uploaded, " \
+      UI.user_error!("Metadata, screenshots & build #{build_number} were uploaded and attached, " \
                      "but final submission needs App Review contact (#{missing_contact.join(', ')}). " \
                      "Add REVIEW_FIRST_NAME / REVIEW_LAST_NAME / REVIEW_EMAIL / REVIEW_PHONE in GitHub Secrets or App Store Connect.")
     end
