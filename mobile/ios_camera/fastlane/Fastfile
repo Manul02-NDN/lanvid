@@ -278,8 +278,6 @@ platform :ios do
       team_id: team,
       app_identifier: BUNDLE_ID,
       cert_id: cert_id,
-      development: false,
-      adhoc: false,
       force: true,
       output_path: "build/profiles"
     )
