@@ -55,8 +55,18 @@ public:
     ~UdpReceiver();
 
     void set_audio_callback(AudioCallback cb) { audio_cb_ = std::move(cb); }
+    // Raw H.264 / H.265 access units (Annex-B) before decoding, for zero-transcode recording.
+    void set_video_bitstream_callback(FrameAssembler::BitstreamCallback cb) {
+        assembler_.set_bitstream_callback(std::move(cb));
+    }
 
     bool init();
+    // Shared-socket mode (MultiCamManager demux on one port): no own socket is bound; replies
+    // (PONG / NACK / PLI / feedback) go out through `shared_socket`, datagrams are fed by the owner.
+    bool init_external(UdpSocket* shared_socket);
+    void ingest_datagram(const uint8_t* data, size_t len, const Endpoint& src, uint64_t now);
+    // Periodic housekeeping (assembler timeouts, NACK, MIDI, ping, feedback); step_once() calls it.
+    void service(uint64_t now);
     uint16_t local_port() const { return sock_.local_port(); }
 
     void step_once();
@@ -66,6 +76,14 @@ public:
     double estimate_latency_ms(uint64_t recv_complete_us, uint32_t sender_ts_us) const;
 
     const AssemblerStats& assembler_stats() const { return assembler_.stats(); }
+    // Asks the sender for an IDR now (e.g. so an ISO recording starts immediately, not at the next GOP).
+    void request_keyframe() { send_pli_now(now_us()); }
+    // Current sender (set by the first datagram); false before anything arrived.
+    bool sender_endpoint(Endpoint& out) const {
+        if (!has_sender_) return false;
+        out = sender_ep_;
+        return true;
+    }
     const SeqLossTracker& seq_tracker() const { return assembler_.seq_tracker(); }
     VideoCodecId active_codec() const { return assembler_.active_codec(); }
     std::string decoder_backend_name() const { return assembler_.decoder_backend_name(); }
@@ -165,6 +183,9 @@ private:
     FrameCallback user_on_frame_;
     AudioCallback audio_cb_;
     UdpSocket sock_;
+    UdpSocket* ext_sock_ = nullptr;
+    UdpSocket& tx() { return ext_sock_ ? *ext_sock_ : sock_; }
+    void handle_datagram(const uint8_t* dgram, size_t n, const Endpoint& src, uint64_t now);
     ThreadPool pool_;
     FrameAssembler assembler_;
     AudioJitterBuffer audio_buf_;

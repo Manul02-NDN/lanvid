@@ -118,6 +118,9 @@ set(LV_CORE_SOURCES
   src/audio/multi_device_matrix.cpp
   src/audio/personal_monitor_bus.cpp
   src/audio/intercom_engine.cpp
+  src/video/video_bus.cpp
+  src/video/iso_recorder.cpp
+  src/video/multicam_manager.cpp
   src/net/mdns_advertiser.cpp
   src/midi/midi_sync_engine.cpp
   src/midi/midi_dejitter_queue.cpp
@@ -556,6 +559,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_lanvid_grid_l2.cpp
     tests/test_installer_packaging.cpp
     tests/test_network_interfaces.cpp
+    tests/test_multicam_iso_vcam.cpp
     tests/test_studio_split.cpp
     src/gui/app_config.cpp
     src/gui/studio_common.cpp

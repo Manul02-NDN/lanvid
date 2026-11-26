@@ -10,6 +10,15 @@ namespace lv::gui {
 
 namespace {
 
+std::string join_bar(const std::vector<std::string>& v) {
+    std::string out;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) out += '|';
+        for (char c : v[i]) out += (c == '|') ? '/' : c;
+    }
+    return out;
+}
+
 std::string json_esc(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 4);
@@ -364,6 +373,40 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
     read_flt(j, "intercom_ducking_db", cfg.intercom_ducking_db);
     cfg.intercom_ducking_db = std::clamp(cfg.intercom_ducking_db, -36.0f, 0.0f);
     read_bool(j, "video_dscp_af41", cfg.video_dscp_af41);
+    read_int(j, "video_max_slots", cfg.video_max_slots);
+    cfg.video_max_slots = std::clamp(cfg.video_max_slots, 1, 16);
+    read_int(j, "video_port_mode", cfg.video_port_mode);
+    cfg.video_port_mode = std::clamp(cfg.video_port_mode, 0, 1);
+    read_int(j, "video_multiview_layout", cfg.video_multiview_layout);
+    cfg.video_multiview_layout = std::clamp(cfg.video_multiview_layout, 1, 3);
+    {
+        auto split = [](const std::string& s) {
+            std::vector<std::string> out;
+            if (s.empty()) return out;
+            size_t a = 0;
+            for (;;) {
+                const size_t b = s.find('|', a);
+                out.push_back(s.substr(a, b == std::string::npos ? std::string::npos : b - a));
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
+            return out;
+        };
+        std::string labels, ips;
+        read_str(j, "video_slot_labels", labels);
+        read_str(j, "video_slot_ips", ips);
+        if (!labels.empty()) cfg.video_slot_labels = split(labels);
+        if (!ips.empty()) cfg.video_slot_ips = split(ips);
+    }
+    read_str(j, "iso_output_dir", cfg.iso_output_dir);
+    read_str(j, "iso_session_name", cfg.iso_session_name);
+    read_int(j, "iso_container", cfg.iso_container);
+    cfg.iso_container = std::clamp(cfg.iso_container, 0, 2);
+    read_bool(j, "iso_record_program", cfg.iso_record_program);
+    read_int(j, "iso_slot_mask", cfg.iso_slot_mask);
+    read_int(j, "vcam_count", cfg.vcam_count);
+    cfg.vcam_count = std::clamp(cfg.vcam_count, 0, 8);
+    read_bool(j, "vcam_placeholder", cfg.vcam_placeholder);
     read_bool(j, "tally_dscp_ef", cfg.tally_dscp_ef);
     return true;
 }
@@ -451,7 +494,19 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
         << "  \"video_obs_output_enabled\": " << (cfg.video_obs_output_enabled ? "true" : "false") << ",\n"
         << "  \"intercom_ducking_db\": " << cfg.intercom_ducking_db << ",\n"
         << "  \"video_dscp_af41\": " << (cfg.video_dscp_af41 ? "true" : "false") << ",\n"
-        << "  \"tally_dscp_ef\": " << (cfg.tally_dscp_ef ? "true" : "false") << "\n"
+        << "  \"tally_dscp_ef\": " << (cfg.tally_dscp_ef ? "true" : "false") << ",\n"
+        << "  \"video_max_slots\": " << cfg.video_max_slots << ",\n"
+        << "  \"video_port_mode\": " << cfg.video_port_mode << ",\n"
+        << "  \"video_multiview_layout\": " << cfg.video_multiview_layout << ",\n"
+        << "  \"video_slot_labels\": \"" << json_esc(join_bar(cfg.video_slot_labels)) << "\",\n"
+        << "  \"video_slot_ips\": \"" << json_esc(join_bar(cfg.video_slot_ips)) << "\",\n"
+        << "  \"iso_output_dir\": \"" << json_esc(cfg.iso_output_dir) << "\",\n"
+        << "  \"iso_session_name\": \"" << json_esc(cfg.iso_session_name) << "\",\n"
+        << "  \"iso_container\": " << cfg.iso_container << ",\n"
+        << "  \"iso_record_program\": " << (cfg.iso_record_program ? "true" : "false") << ",\n"
+        << "  \"iso_slot_mask\": " << cfg.iso_slot_mask << ",\n"
+        << "  \"vcam_count\": " << cfg.vcam_count << ",\n"
+        << "  \"vcam_placeholder\": " << (cfg.vcam_placeholder ? "true" : "false") << "\n"
         << "}\n";
     return out.good();
 }

@@ -30,6 +30,7 @@
 #include "audio/channel_patchbay.hpp"
 #include "audio/intercom_engine.hpp"
 #include "audio/personal_monitor_bus.hpp"
+#include "video/multicam_manager.hpp"
 #ifdef LV_HAVE_SHM_BUS
 #include "audio/shm_audio_host.hpp"
 #endif
@@ -2752,3 +2753,160 @@ int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out) {
 #endif  // !LANVID_SDK_CORE_ONLY
 
 }  // extern "C"
+
+// ---------------------------------------------------------------------------------------------------
+// Multi-Cam (LanVid Video)
+// ---------------------------------------------------------------------------------------------------
+struct LvMultiCamHandle {
+    lv::MultiCamManager mgr;
+};
+
+namespace {
+template <size_t N>
+void lv_copy_str(char (&dst)[N], const std::string& s) {
+    std::snprintf(dst, N, "%s", s.c_str());
+}
+}  // namespace
+
+void lv_multicam_config_default(LV_MultiCamConfig* cfg) {
+    if (!cfg) return;
+    *cfg = LV_MultiCamConfig{};
+    std::snprintf(cfg->bind_ip, sizeof(cfg->bind_ip), "0.0.0.0");
+    cfg->base_port = 5006;
+    cfg->port_mode = 0;
+    cfg->max_slots = 8;
+    cfg->auto_assign = 1;
+    cfg->publish_video_bus = 1;
+    cfg->vcam_count = 8;
+    cfg->vcam_placeholder = 1;
+}
+
+LvMultiCamHandle* lv_multicam_create(void) { return new (std::nothrow) LvMultiCamHandle(); }
+void lv_multicam_destroy(LvMultiCamHandle* mc) { delete mc; }
+
+int lv_multicam_start(LvMultiCamHandle* mc, const LV_MultiCamConfig* c) {
+    if (!mc) return LV_ERR_INVALID_ARG;
+    LV_MultiCamConfig d;
+    lv_multicam_config_default(&d);
+    if (!c) c = &d;
+    lv::MultiCamConfig cfg;
+    cfg.bind_ip = c->bind_ip[0] ? c->bind_ip : "0.0.0.0";
+    cfg.base_port = c->base_port ? c->base_port : 5006;
+    cfg.port_mode = c->port_mode == 1 ? lv::MultiCamPortMode::kSequentialPorts : lv::MultiCamPortMode::kSingleDemux;
+    cfg.max_slots = c->max_slots ? c->max_slots : 8;
+    cfg.auto_assign = c->auto_assign != 0;
+    cfg.publish_video_bus = c->publish_video_bus != 0;
+    cfg.vcam_count = c->vcam_count;
+    cfg.vcam_placeholder = c->vcam_placeholder != 0;
+    cfg.video_bus_name = c->video_bus_name;
+    return mc->mgr.start(cfg) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_multicam_stop(LvMultiCamHandle* mc) {
+    if (mc) mc->mgr.stop();
+}
+
+uint32_t lv_multicam_slot_count(LvMultiCamHandle* mc) { return mc ? mc->mgr.slot_count() : 0; }
+
+int lv_multicam_get_slot_info(LvMultiCamHandle* mc, uint32_t slot, LV_MultiCamSlotInfo* out) {
+    if (!mc || !out || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    const auto i = mc->mgr.slot_info(slot);
+    *out = LV_MultiCamSlotInfo{};
+    out->index = i.index;
+    out->camera_id = i.camera_id;
+    lv_copy_str(out->label, i.label);
+    lv_copy_str(out->source_name, i.source_name);
+    lv_copy_str(out->sender_ip, i.sender_ip);
+    out->listen_port = i.listen_port;
+    out->bound = i.bound;
+    out->streaming = i.streaming;
+    out->width = i.width;
+    out->height = i.height;
+    out->fps = i.fps;
+    lv_copy_str(out->codec, i.codec);
+    out->bitrate_mbps = i.bitrate_mbps;
+    out->latency_ms = i.latency_ms;
+    out->battery_pct = i.battery_pct;
+    out->temp_c = i.temp_c;
+    out->audio_peak_dbfs = i.audio_peak_dbfs;
+    out->tally = i.tally;
+    out->recording = i.recording;
+    out->vcam_active = i.vcam_active;
+    out->frames = i.frames;
+    return LV_OK;
+}
+
+int lv_multicam_set_slot_label(LvMultiCamHandle* mc, uint32_t slot, const char* label) {
+    return (mc && mc->mgr.set_slot_label(slot, label ? label : "")) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+int lv_multicam_pin_slot(LvMultiCamHandle* mc, uint32_t slot, const char* ip) {
+    return (mc && mc->mgr.pin_slot(slot, ip ? ip : "")) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+void lv_multicam_release_slot(LvMultiCamHandle* mc, uint32_t slot) {
+    if (mc) mc->mgr.release_slot(slot);
+}
+
+int lv_multicam_get_latest_frame_bgra(LvMultiCamHandle* mc, uint32_t slot, uint8_t* buf, size_t cap, int* width,
+                                      int* height, uint64_t* seq) {
+    if (!mc || !seq) return LV_ERR_INVALID_ARG;
+    lv::Image img;
+    uint64_t s = *seq;
+    if (!mc->mgr.latest_frame(slot, img, s)) return 0;
+    if (width) *width = img.width;
+    if (height) *height = img.height;
+    const size_t need = size_t(img.width) * size_t(img.height) * 4;
+    if (!buf || cap < need) return LV_ERR_BUFFER_TOO_SMALL;
+    for (int y = 0; y < img.height; ++y)
+        std::memcpy(buf + size_t(y) * size_t(img.width) * 4, img.data.data() + size_t(y) * img.stride, size_t(img.width) * 4);
+    *seq = s;
+    return 1;
+}
+
+int lv_multicam_set_program(LvMultiCamHandle* mc, int slot) {
+    if (!mc) return LV_ERR_INVALID_ARG;
+    mc->mgr.set_program_slot(slot);
+    return LV_OK;
+}
+
+int lv_multicam_rec_start_all(LvMultiCamHandle* mc, const LV_IsoSessionConfig* session) {
+    if (!mc) return LV_ERR_INVALID_ARG;
+    lv::IsoSessionConfig sc;
+    if (session) {
+        sc.output_dir = session->output_dir;
+        if (session->session_name[0]) sc.session_name = session->session_name;
+        sc.container = session->container == 1 ? lv::IsoContainer::kMkv
+                       : session->container == 2 ? lv::IsoContainer::kMov
+                                                 : lv::IsoContainer::kMp4;
+        sc.record_program = session->record_program != 0;
+        sc.slot_mask = session->slot_mask;
+    }
+    return mc->mgr.rec_start_all(sc) ? LV_OK : LV_ERR_INTERNAL;
+}
+
+void lv_multicam_rec_stop_all(LvMultiCamHandle* mc) {
+    if (mc) mc->mgr.rec_stop_all();
+}
+
+int lv_multicam_rec_slot(LvMultiCamHandle* mc, uint32_t slot, int on) {
+    return (mc && mc->mgr.rec_slot(slot, on != 0)) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+int lv_multicam_get_rec_stats(LvMultiCamHandle* mc, uint32_t slot, LV_IsoSlotStats* out) {
+    if (!mc || !out || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    const auto st = mc->mgr.rec_stats(slot);
+    *out = LV_IsoSlotStats{};
+    out->recording = st.recording;
+    out->waiting_for_keyframe = st.waiting_for_keyframe;
+    lv_copy_str(out->path, st.path);
+    out->bytes = st.bytes;
+    out->duration_us = st.duration_us;
+    out->frames = st.frames;
+    out->write_mbps = st.write_mbps;
+    return LV_OK;
+}
+
+void lv_multicam_set_vcam(LvMultiCamHandle* mc, uint32_t count, int placeholder) {
+    if (mc) mc->mgr.set_vcam(count, placeholder != 0);
+}

@@ -462,6 +462,75 @@ LV_API int lv_receiver_set_adaptive_jitter(LvReceiverHandle* handle, int enabled
 LV_API double lv_receiver_get_effective_latency_ms(LvReceiverHandle* handle);
 LV_API int lv_duplex_set_adaptive_jitter(LvDuplexHandle* handle, int enabled);
 
+/* ---- Multi-Cam (LanVid Video): up to 16 cameras, per-camera ISO recording, OS virtual cameras ---- */
+typedef struct LvMultiCamHandle LvMultiCamHandle;
+
+typedef struct LV_MultiCamConfig {
+    char bind_ip[64];          /* "0.0.0.0" */
+    uint16_t base_port;        /* 5006 */
+    int32_t port_mode;         /* 0 = all phones on base_port (demux by sender), 1 = base_port + 2*slot */
+    uint32_t max_slots;        /* 1..16 */
+    int32_t auto_assign;       /* bind new senders to the first free slot */
+    int32_t publish_video_bus; /* feed LanVidVideoBus_v1 ("LanVid Cam 1..8" + "LanVid Program Out") */
+    uint32_t vcam_count;       /* virtual cameras exposed to the OS (0..8) */
+    int32_t vcam_placeholder;  /* lavender "No Signal / Standby" card when a camera is gone */
+    char video_bus_name[64];   /* "" = LanVidVideoBus_v1 */
+} LV_MultiCamConfig;
+
+typedef struct LV_MultiCamSlotInfo {
+    int32_t index;             /* 0-based ("Cam index+1") */
+    uint32_t camera_id;
+    char label[64];
+    char source_name[64];
+    char sender_ip[48];
+    uint16_t listen_port;
+    int32_t bound, streaming, width, height;
+    double fps;
+    char codec[16];            /* "H.264" / "H.265" / "DCT" */
+    double bitrate_mbps, latency_ms;
+    int32_t battery_pct, temp_c;
+    float audio_peak_dbfs;
+    uint8_t tally;             /* 0 = STBY, 1 = PVW, 2 = PGM */
+    int32_t recording, vcam_active;
+    uint64_t frames;
+} LV_MultiCamSlotInfo;
+
+typedef struct LV_IsoSessionConfig {
+    char output_dir[512];      /* "" = ~/Movies/LanVid, %USERPROFILE%\Videos\LanVid, ~/Videos/LanVid */
+    char session_name[64];
+    int32_t container;         /* 0 = MP4, 1 = MKV, 2 = MOV */
+    int32_t record_program;    /* extra PGM_Master file */
+    uint32_t slot_mask;        /* cameras included in REC ALL */
+} LV_IsoSessionConfig;
+
+typedef struct LV_IsoSlotStats {
+    int32_t recording, waiting_for_keyframe;
+    char path[512];
+    uint64_t bytes, duration_us, frames;
+    double write_mbps;
+} LV_IsoSlotStats;
+
+LV_API void lv_multicam_config_default(LV_MultiCamConfig* cfg);
+LV_API LvMultiCamHandle* lv_multicam_create(void);
+LV_API void lv_multicam_destroy(LvMultiCamHandle* mc);
+LV_API int lv_multicam_start(LvMultiCamHandle* mc, const LV_MultiCamConfig* cfg); /* LV_OK or < 0 */
+LV_API void lv_multicam_stop(LvMultiCamHandle* mc);
+LV_API uint32_t lv_multicam_slot_count(LvMultiCamHandle* mc);
+LV_API int lv_multicam_get_slot_info(LvMultiCamHandle* mc, uint32_t slot, LV_MultiCamSlotInfo* out);
+LV_API int lv_multicam_set_slot_label(LvMultiCamHandle* mc, uint32_t slot, const char* label);
+LV_API int lv_multicam_pin_slot(LvMultiCamHandle* mc, uint32_t slot, const char* ip); /* "" clears */
+LV_API void lv_multicam_release_slot(LvMultiCamHandle* mc, uint32_t slot);
+/* Latest decoded frame as BGRA (width*4 stride). Returns 1 = new frame copied, 0 = nothing new since *seq,
+ * LV_ERR_BUFFER_TOO_SMALL (width/height filled) when `cap` is too small. */
+LV_API int lv_multicam_get_latest_frame_bgra(LvMultiCamHandle* mc, uint32_t slot, uint8_t* buf, size_t cap,
+                                             int* width, int* height, uint64_t* seq);
+LV_API int lv_multicam_set_program(LvMultiCamHandle* mc, int slot);
+LV_API int lv_multicam_rec_start_all(LvMultiCamHandle* mc, const LV_IsoSessionConfig* session);
+LV_API void lv_multicam_rec_stop_all(LvMultiCamHandle* mc);
+LV_API int lv_multicam_rec_slot(LvMultiCamHandle* mc, uint32_t slot, int on);
+LV_API int lv_multicam_get_rec_stats(LvMultiCamHandle* mc, uint32_t slot, LV_IsoSlotStats* out);
+LV_API void lv_multicam_set_vcam(LvMultiCamHandle* mc, uint32_t count, int placeholder);
+
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active receivers and populates `out_peers` (up to `max_peers`).
  * Returns number of discovered peers (>= 0). Pass discovery_port=0 for default (5099). */

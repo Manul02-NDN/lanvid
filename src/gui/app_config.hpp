@@ -98,6 +98,20 @@ struct AppConfig {
     float intercom_ducking_db = -12.0f;   // Program audio ducking when director speaks
     bool video_dscp_af41 = true;          // DSCP AF41 (34) for video streams
     bool tally_dscp_ef = true;            // DSCP EF/CS7 (46) for Tally & Intercom
+
+    // Multi-Cam (MultiCamManager), ISO recording and OS virtual cameras (LanVid Video)
+    int video_max_slots = 8;              // 1..16 camera slots
+    int video_port_mode = 0;              // 0 = one port (5006) demultiplexed by sender, 1 = 5006/5008/5010...
+    int video_multiview_layout = 2;       // 1 = 1x1, 2 = 2x2, 3 = 3x3
+    std::vector<std::string> video_slot_labels;  // "CAM 1 • Wide", ... (index = slot)
+    std::vector<std::string> video_slot_ips;     // pinned phone IP per slot ("" = auto)
+    std::string iso_output_dir;           // "" = ~/Movies/LanVid (macOS) / Videos\LanVid (Windows)
+    std::string iso_session_name = "LanVid";
+    int iso_container = 0;                // 0 = MP4, 1 = MKV, 2 = MOV
+    bool iso_record_program = false;      // extra "PGM Master Mix" file
+    int iso_slot_mask = 0xFFFF;           // slots included in REC ALL
+    int vcam_count = 8;                   // "LanVid Cam 1..N" exposed to the OS (0..8) + Program Out
+    bool vcam_placeholder = true;         // lavender "No Signal / Standby" card when a camera is gone
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\<filename> or ~/.config/lanvid/<filename>).

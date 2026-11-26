@@ -263,6 +263,11 @@ void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us)
         return;
     }
 
+    if (on_bitstream_) {
+        const SliceSlot& bs = slot.slices[0];
+        on_bitstream_(slot.codec, bs.buf.data(), bs.total_size, slot.is_keyframe, slot.frame_id,
+                      slot.first_arrival_us);
+    }
     InterJob job;
     job.frame_id = slot.frame_id;
     job.sender_ts_us = slot.sender_ts_us;
@@ -453,6 +458,10 @@ void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
     }
 
     const SliceSlot& ss = slot.slices[0];
+    if (on_bitstream_) {
+        on_bitstream_(slot.codec, ss.buf.data(), ss.total_size, slot.is_keyframe, slot.frame_id,
+                      slot.first_arrival_us);
+    }
     const uint64_t t0 = lv::now_us();
     const bool decoded = video_decoder_->decode(ss.buf.data(), ss.total_size, cfg_.output_order, slot.frame);
     const uint64_t dt = lv::now_us() - t0;

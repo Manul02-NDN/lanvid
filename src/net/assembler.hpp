@@ -111,6 +111,11 @@ public:
     ~FrameAssembler();
 
     void set_pli_callback(PliCallback cb) { on_pli_ = std::move(cb); }
+    // Complete H.264 / H.265 access units exactly as received (Annex-B), before decoding - for
+    // zero-transcode ISO recording. Called on the ingest thread; the data is valid during the call only.
+    using BitstreamCallback = std::function<void(VideoCodecId codec, const uint8_t* annexb, size_t size,
+                                                 bool is_keyframe, uint32_t frame_id, uint64_t arrival_us)>;
+    void set_bitstream_callback(BitstreamCallback cb) { on_bitstream_ = std::move(cb); }
 
     PacketParseStatus ingest_datagram(const uint8_t* dgram, size_t len, uint64_t now_us);
 
@@ -238,6 +243,7 @@ private:
     std::atomic<uint8_t> conceal_mode_{0};
     FrameCallback on_frame_;
     PliCallback on_pli_;
+    BitstreamCallback on_bitstream_;
     ThreadPool* pool_ = nullptr;
 
     struct alignas(64) WorkerScratch {

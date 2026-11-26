@@ -22,7 +22,7 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms),
       matrix_(cfg.audio_sample_rate),
       arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
-          return has_sender_ && sock_.send_to_qos(d, n, sender_ep_, QosTrafficClass::kSyncControl) == int(n);
+          return has_sender_ && tx().send_to_qos(d, n, sender_ep_, QosTrafficClass::kSyncControl) == int(n);
       }),
       midi_dejitter_(cfg.audio_sample_rate) {
     arx_.set_latency_ms(cfg.audio_latency_ms);
@@ -86,7 +86,7 @@ void UdpReceiver::maybe_send_ping(uint64_t now) {
     h.timestamp_us = pp.t1_client_send_us;
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, pp_bytes, sizeof(pp_bytes));
-    if (n) sock_.send_to_qos(dgram, n, sender_ep_, QosTrafficClass::kSyncControl);
+    if (n) tx().send_to_qos(dgram, n, sender_ep_, QosTrafficClass::kSyncControl);
 }
 
 void UdpReceiver::maybe_send_feedback(uint64_t now) {
@@ -142,7 +142,7 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
     h.timestamp_us = uint32_t(now);
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
-    if (n && sock_.send_to(dgram, n, sender_ep_) == int(n)) {
+    if (n && tx().send_to(dgram, n, sender_ep_) == int(n)) {
         ++feedbacks_sent_;
     }
 }
@@ -170,7 +170,7 @@ void UdpReceiver::send_pli_now(uint64_t now) {
     h.timestamp_us = uint32_t(now);
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
-    if (n && sock_.send_to(dgram, n, sender_ep_) == int(n)) {
+    if (n && tx().send_to(dgram, n, sender_ep_) == int(n)) {
         ++feedbacks_sent_;
         ++plis_sent_;
     }
@@ -213,10 +213,30 @@ void UdpReceiver::step_once() {
 
     const int got = sock_.recv_batch(batch, kRecvBatchSize);
     const uint64_t now = now_us();
-
     for (int i = 0; i < got; ++i) {
-        const size_t n = batch[i].len;
-        if (n == 0) continue;
+        if (batch[i].len) handle_datagram(batch[i].data, batch[i].len, batch[i].src, now);
+    }
+    service(now);
+}
+
+bool UdpReceiver::init_external(UdpSocket* shared_socket) {
+    if (!shared_socket || !shared_socket->is_open()) return false;
+    ext_sock_ = shared_socket;
+    return true;
+}
+
+void UdpReceiver::ingest_datagram(const uint8_t* data, size_t len, const Endpoint& src, uint64_t now) {
+    if (data && len) handle_datagram(data, len, src, now);
+}
+
+void UdpReceiver::handle_datagram(const uint8_t* dgram, size_t n, const Endpoint& src, uint64_t now) {
+    struct One {
+        const uint8_t* data;
+        size_t len;
+        Endpoint src;
+    } one{dgram, n, src};
+    One* batch = &one;
+    for (int i = 0; i < 1; ++i) {
 
         PacketHeader h;
         const uint8_t* payload = nullptr;
@@ -288,7 +308,9 @@ void UdpReceiver::step_once() {
             assembler_.record_bad_packet(st, n);
         }
     }
+}
 
+void UdpReceiver::service(uint64_t now) {
     assembler_.poll(now);
     arx_.service(now);
     // MIDI without an audio consumer (no pop_audio_* for 50 ms) OR in MIDI Only ultra-low latency mode:
@@ -461,7 +483,7 @@ bool UdpReceiver::send_control_sync(const ControlSyncPayload& cs) {
     if (!n) return false;
     int ok = 0;
     for (int rep = 0; rep < 3; ++rep) {
-        if (sock_.send_to(out, n, sender_ep_) == int(n)) ++ok;
+        if (tx().send_to(out, n, sender_ep_) == int(n)) ++ok;
     }
     if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
     return ok > 0;
