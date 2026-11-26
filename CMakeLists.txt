@@ -454,6 +454,9 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
         set_target_properties(lanvid_app PROPERTIES
           MACOSX_BUNDLE TRUE
           OUTPUT_NAME "LanVid Studio"
+          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Studio"
+          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Studio"
+          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.studio"
           MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
         target_compile_definitions(lanvid_app PRIVATE GL_SILENCE_DEPRECATION=1)
         target_link_libraries(lanvid_app PRIVATE "-framework CoreGraphics")
@@ -461,12 +464,18 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
         set_target_properties(lanvid_audio_studio PROPERTIES
           MACOSX_BUNDLE TRUE
           OUTPUT_NAME "LanVid Audio"
+          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Audio"
+          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Audio"
+          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.audio"
           MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
         target_compile_definitions(lanvid_audio_studio PRIVATE GL_SILENCE_DEPRECATION=1)
 
         set_target_properties(lanvid_video_studio PROPERTIES
           MACOSX_BUNDLE TRUE
           OUTPUT_NAME "LanVid Video"
+          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Video"
+          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Video"
+          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.video"
           MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
         target_compile_definitions(lanvid_video_studio PRIVATE GL_SILENCE_DEPRECATION=1)
         target_link_libraries(lanvid_video_studio PRIVATE "-framework CoreGraphics")

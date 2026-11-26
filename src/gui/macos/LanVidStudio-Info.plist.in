@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>uk</string>
     <key>CFBundleDisplayName</key>
-    <string>LanVid Studio</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundleExecutable</key>
-    <string>LanVid Studio</string>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lanvid.studio</string>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>LanVid Studio</string>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
