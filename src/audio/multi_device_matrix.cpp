@@ -41,7 +41,7 @@
 #include <objbase.h>
 #include <functiondiscoverykeys_devpkey.h>
 
-#include "../drivers/windows/asio/iasio_minimal.h"
+#include "audio/iasio_minimal.h"  // self-written IASIO declarations (host side of ASIO devices)
 #endif
 
 namespace lv {
