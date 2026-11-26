@@ -345,162 +345,13 @@ if(LANVID_BUILD_SHARED)
   lanvid_set_flags(lanvid_core_shared)
 endif()
 
-# ---------------------------------------------------------------- Desktop GUI (LanVid Studio)
+# ---------------------------------------------------------------- Modular Desktop Apps (apps/)
 set(LV_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
-if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND EXISTS "${LV_IMGUI_DIR}/imgui.cpp")
-  set(LV_IMGUI_CORE
-    ${LV_IMGUI_DIR}/imgui.cpp
-    ${LV_IMGUI_DIR}/imgui_draw.cpp
-    ${LV_IMGUI_DIR}/imgui_tables.cpp
-    ${LV_IMGUI_DIR}/imgui_widgets.cpp
-  )
-  set(LV_GUI_SOURCES
-    src/gui/app_config.cpp
-    src/gui/lanvid_studio.cpp
-    ${LV_IMGUI_CORE}
-  )
-
-  if(WIN32)
-    add_executable(lanvid_app WIN32
-      src/gui/main_win32.cpp
-      ${LV_GUI_SOURCES}
-      ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
-      ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
-    )
-    target_compile_definitions(lanvid_app PRIVATE LANVID_GUI_WINMAIN=1)
-    target_include_directories(lanvid_app PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-    target_link_libraries(lanvid_app PRIVATE lanvid_core dwmapi)
-    lanvid_set_flags(lanvid_app)
-
-    # Split Desktop App 1: LanVid Audio (AoIP, Patchbay/64x64 Matrix, Personal Monitor, Grid L2 256ch)
-    add_executable(lanvid_audio_studio WIN32
-      src/app/audio_studio_main.cpp
-      src/gui/app_config.cpp
-      src/gui/studio_common.cpp
-      src/gui/studio_host_win32.cpp
-      src/gui/audio_studio_ui.cpp
-      src/gui/qr_code.cpp
-      ${LV_IMGUI_CORE}
-      ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
-      ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
-    )
-    target_compile_definitions(lanvid_audio_studio PRIVATE LANVID_GUI_WINMAIN=1)
-    target_include_directories(lanvid_audio_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-    target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core dwmapi)
-    lanvid_set_flags(lanvid_audio_studio)
-
-    # Split Desktop App 2: LanVid Video Hub (Cameras, Playout Buffer, ISO, Tally, Intercom & OBS)
-    set(LV_VIDEO_HUB_SOURCES
-      src/video_hub/camera_slot.cpp
-      src/video_hub/hub_discovery.cpp
-      src/video_hub/iso_recorder.cpp
-      src/video_hub/vcam_bus.cpp
-      src/video_hub/tally_intercom_hub.cpp
-      src/video_hub/video_hub_engine.cpp
-    )
-    add_executable(lanvid_video_studio WIN32
-      src/app/video_hub_main.cpp
-      src/gui/app_config.cpp
-      src/gui/studio_common.cpp
-      src/gui/studio_host_win32.cpp
-      src/gui/video_hub_ui.cpp
-      src/gui/qr_code.cpp
-      ${LV_VIDEO_HUB_SOURCES}
-      ${LV_IMGUI_CORE}
-      ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
-      ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
-    )
-    target_compile_definitions(lanvid_video_studio PRIVATE LANVID_GUI_WINMAIN=1)
-    target_include_directories(lanvid_video_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-    target_link_libraries(lanvid_video_studio PRIVATE lanvid_core dwmapi)
-    lanvid_set_flags(lanvid_video_studio)
-  elseif(LV_HAVE_SDL2)
-    find_package(OpenGL QUIET)
-    if(OpenGL_FOUND)
-      add_executable(lanvid_app
-        src/gui/main_linux_sdl2.cpp
-        ${LV_GUI_SOURCES}
-        ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-        ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-      )
-      target_include_directories(lanvid_app PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-      target_link_libraries(lanvid_app PRIVATE lanvid_core OpenGL::GL)
-      lanvid_set_flags(lanvid_app)
-
-      # Split Desktop App 1: LanVid Audio (macOS: LanVid Audio.app)
-      add_executable(lanvid_audio_studio
-        src/app/audio_studio_main.cpp
-        src/gui/app_config.cpp
-        src/gui/studio_common.cpp
-        src/gui/studio_host_sdl2.cpp
-        src/gui/audio_studio_ui.cpp
-        src/gui/qr_code.cpp
-        ${LV_IMGUI_CORE}
-        ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-        ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-      )
-      target_include_directories(lanvid_audio_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-      target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core OpenGL::GL)
-      lanvid_set_flags(lanvid_audio_studio)
-
-      # Split Desktop App 2: LanVid Video Hub (macOS: LanVid Video.app)
-      set(LV_VIDEO_HUB_SOURCES
-        src/video_hub/camera_slot.cpp
-        src/video_hub/hub_discovery.cpp
-        src/video_hub/iso_recorder.cpp
-        src/video_hub/vcam_bus.cpp
-        src/video_hub/tally_intercom_hub.cpp
-        src/video_hub/video_hub_engine.cpp
-      )
-      add_executable(lanvid_video_studio
-        src/app/video_hub_main.cpp
-        src/gui/app_config.cpp
-        src/gui/studio_common.cpp
-        src/gui/studio_host_sdl2.cpp
-        src/gui/video_hub_ui.cpp
-        src/gui/qr_code.cpp
-        ${LV_VIDEO_HUB_SOURCES}
-        ${LV_IMGUI_CORE}
-        ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-        ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-      )
-      target_include_directories(lanvid_video_studio PRIVATE ${LV_IMGUI_DIR} ${LV_IMGUI_DIR}/backends)
-      target_link_libraries(lanvid_video_studio PRIVATE lanvid_core OpenGL::GL)
-      lanvid_set_flags(lanvid_video_studio)
-
-      if(APPLE)
-        # macOS: "LanVid Studio.app", "LanVid Audio.app", "LanVid Video.app"
-        set_target_properties(lanvid_app PROPERTIES
-          MACOSX_BUNDLE TRUE
-          OUTPUT_NAME "LanVid Studio"
-          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Studio"
-          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Studio"
-          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.studio"
-          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
-        target_compile_definitions(lanvid_app PRIVATE GL_SILENCE_DEPRECATION=1)
-        target_link_libraries(lanvid_app PRIVATE "-framework CoreGraphics")
-
-        set_target_properties(lanvid_audio_studio PROPERTIES
-          MACOSX_BUNDLE TRUE
-          OUTPUT_NAME "LanVid Audio"
-          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Audio"
-          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Audio"
-          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.audio"
-          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
-        target_compile_definitions(lanvid_audio_studio PRIVATE GL_SILENCE_DEPRECATION=1)
-
-        set_target_properties(lanvid_video_studio PROPERTIES
-          MACOSX_BUNDLE TRUE
-          OUTPUT_NAME "LanVid Video"
-          MACOSX_BUNDLE_BUNDLE_NAME "LanVid Video"
-          MACOSX_BUNDLE_EXECUTABLE_NAME "LanVid Video"
-          MACOSX_BUNDLE_GUI_IDENTIFIER "com.lanvid.video"
-          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/src/gui/macos/LanVidStudio-Info.plist.in")
-        target_compile_definitions(lanvid_video_studio PRIVATE GL_SILENCE_DEPRECATION=1)
-        target_link_libraries(lanvid_video_studio PRIVATE "-framework CoreGraphics")
-      endif()
-    endif()
-  endif()
+if(NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
+  add_subdirectory(apps/common_ui)
+  add_subdirectory(apps/lanvid_audio)
+  add_subdirectory(apps/lanvid_video)
+  add_subdirectory(apps/lanvid_intercom)
 endif()
 
 # ---------------------------------------------------------------- CLI executables
@@ -627,25 +478,17 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_multicam_iso_vcam.cpp
     tests/test_studio_split.cpp
     tests/test_video_hub.cpp
-    src/video_hub/camera_slot.cpp
-    src/video_hub/hub_discovery.cpp
-    src/video_hub/iso_recorder.cpp
-    src/video_hub/vcam_bus.cpp
-    src/video_hub/tally_intercom_hub.cpp
-    src/video_hub/video_hub_engine.cpp
-    src/gui/app_config.cpp
-    src/gui/studio_common.cpp
-    src/gui/audio_studio_ui.cpp
-    src/gui/video_hub_ui.cpp
-    src/gui/qr_code.cpp
-    ${LV_IMGUI_DIR}/imgui.cpp
-    ${LV_IMGUI_DIR}/imgui_draw.cpp
-    ${LV_IMGUI_DIR}/imgui_tables.cpp
-    ${LV_IMGUI_DIR}/imgui_widgets.cpp
   )
-  target_include_directories(lanvid_tests PRIVATE ${LV_IMGUI_DIR})
   target_compile_definitions(lanvid_tests PRIVATE LV_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
   target_link_libraries(lanvid_tests PRIVATE lanvid_core)
+  if(TARGET lanvid_json_config)
+    target_link_libraries(lanvid_tests PRIVATE
+      lanvid_json_config
+      lanvid_audio_service
+      lanvid_video_service
+      lanvid_intercom_service
+    )
+  endif()
   if(TARGET obs_lanvid_core)
     target_sources(lanvid_tests PRIVATE tests/test_obs_plugin.cpp)
     target_link_libraries(lanvid_tests PRIVATE obs_lanvid_core)

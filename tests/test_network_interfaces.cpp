@@ -21,7 +21,7 @@
 #include "audio/personal_monitor_bus.hpp"
 #include "common/clock.hpp"
 #include "common/rt_thread.hpp"
-#include "gui/app_config.hpp"
+#include "common_ui/json_config.hpp"
 #include "lanvid/lanvid_sdk.h"
 #include "net/network_interfaces.hpp"
 #include "net/packet.hpp"
@@ -96,21 +96,19 @@ TEST(network_interfaces_enumerate_ethernet_and_wifi) {
         lo.close();
     }
 
-    // AppConfig defaults & Dual-NIC configuration fields.
+    // JsonConfig Dual-NIC configuration fields persistence.
     {
-        lv::gui::AppConfig cfg{};
-        CHECK(cfg.primary_nic_id.empty());
-        CHECK(cfg.primary_nic_ip.empty());
-        CHECK(cfg.secondary_nic_id.empty());
-        CHECK(cfg.secondary_nic_ip.empty());
-        CHECK(cfg.dual_nic_redundancy_enabled == false);
-        cfg.primary_nic_id = "{TEST-ETH-01}";
-        cfg.primary_nic_ip = "192.168.50.10";
-        cfg.secondary_nic_id = "{TEST-WIFI-02}";
-        cfg.secondary_nic_ip = "192.168.51.20";
-        cfg.dual_nic_redundancy_enabled = true;
-        CHECK(cfg.primary_nic_ip == "192.168.50.10");
-        CHECK(cfg.secondary_nic_ip == "192.168.51.20");
+        lv::ui::JsonConfig cfg;
+        std::string s_out;
+        bool b_out = true;
+        CHECK(!cfg.get_string("primary_nic_ip", s_out));
+        CHECK(!cfg.get_bool("dual_nic_enabled", b_out));
+        cfg.set_string("primary_nic_ip", "192.168.50.10");
+        cfg.set_string("secondary_nic_ip", "192.168.51.20");
+        cfg.set_bool("dual_nic_enabled", true);
+        CHECK(cfg.get_string("primary_nic_ip", s_out) && s_out == "192.168.50.10");
+        CHECK(cfg.get_string("secondary_nic_ip", s_out) && s_out == "192.168.51.20");
+        CHECK(cfg.get_bool("dual_nic_enabled", b_out) && b_out);
     }
 }
 

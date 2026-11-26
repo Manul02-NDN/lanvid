@@ -19,7 +19,7 @@
 #include "grid/grid_node.hpp"
 #include "grid/l2_protocol.hpp"
 #include "grid/l2_transport.hpp"
-#include "gui/app_config.hpp"
+#include "common_ui/json_config.hpp"
 
 using namespace lv::grid;
 
@@ -403,79 +403,62 @@ TEST(grid_dsp_server_offload_and_hot_failover_redundancy) {
 // =============================================================================
 TEST(grid_engine_mode_switch_preserves_classic_config) {
     namespace fs = std::filesystem;
-    const std::string cfg_path = lv::gui::config_file_path();
+    const std::string cfg_path = (fs::temp_directory_path() / "lanvid_grid_l2_test_cfg.json").string();
 
-    // Backup existing user config.json so this test never disturbs real settings
-    bool had_existing = false;
-    std::string backup_contents;
-    if (fs::exists(cfg_path)) {
-        had_existing = true;
-        std::ifstream in(cfg_path, std::ios::binary);
-        backup_contents.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    }
-
-    auto restore_user_config = [&]() {
-        if (had_existing) {
-            std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
-            out.write(backup_contents.data(), std::streamsize(backup_contents.size()));
-        } else if (fs::exists(cfg_path)) {
-            std::error_code ec;
-            fs::remove(cfg_path, ec);
-        }
-    };
-
-    // 4a. Default config starts in Classic UDP mode (0) for 100% backward compatibility
-    lv::gui::AppConfig def{};
-    CHECK(def.network_engine_mode == 0);
-    CHECK(def.grid_channels == 256);
-    CHECK(def.grid_vlan_pcp == 6);
+    // 4a. Default JSON config values
+    lv::ui::JsonConfig def;
+    CHECK(def.empty());
 
     // 4b. Save Classic + Grid L2 settings (mode = 1) and reload
-    lv::gui::AppConfig saved{};
-    saved.dest_ip = "192.168.50.109";
-    saved.dest_port = 5004;
-    saved.aoip_channels = 64;
-    saved.aoip_latency_ms = 20;
-    saved.network_engine_mode = 1;  // Grid L2
-    saved.grid_nic_name = "Ethernet-Test-NIC";
-    saved.grid_vlan_enabled = true;
-    saved.grid_vlan_id = 42;
-    saved.grid_vlan_pcp = 6;
-    saved.grid_channels = 256;
-    saved.grid_clock_master = true;
-    REQUIRE(lv::gui::save_app_config(saved));
+    lv::ui::JsonConfig saved;
+    saved.set_string("dest_ip", "192.168.50.109");
+    saved.set_int("dest_port", 5004);
+    saved.set_int("aoip_channels", 64);
+    saved.set_int("aoip_latency_ms", 20);
+    saved.set_int("network_engine_mode", 1);  // Grid L2
+    saved.set_string("grid_nic_name", "Ethernet-Test-NIC");
+    saved.set_bool("grid_vlan_enabled", true);
+    saved.set_int("grid_vlan_id", 42);
+    saved.set_int("grid_vlan_pcp", 6);
+    saved.set_int("grid_channels", 256);
+    saved.set_bool("grid_clock_master", true);
+    REQUIRE(saved.save(cfg_path));
 
-    lv::gui::AppConfig loaded{};
-    REQUIRE(lv::gui::load_app_config(loaded));
-    CHECK(loaded.network_engine_mode == 1);
-    CHECK(loaded.grid_nic_name == "Ethernet-Test-NIC");
-    CHECK(loaded.grid_vlan_enabled == true);
-    CHECK(loaded.grid_vlan_id == 42);
-    CHECK(loaded.grid_vlan_pcp == 6);
-    CHECK(loaded.grid_channels == 256);
-    CHECK(loaded.grid_clock_master == true);
+    lv::ui::JsonConfig loaded;
+    REQUIRE(loaded.load(cfg_path));
+    int i_val = -1;
+    bool b_val = false;
+    std::string s_val;
+    CHECK(loaded.get_int("network_engine_mode", i_val) && i_val == 1);
+    CHECK(loaded.get_string("grid_nic_name", s_val) && s_val == "Ethernet-Test-NIC");
+    CHECK(loaded.get_bool("grid_vlan_enabled", b_val) && b_val == true);
+    CHECK(loaded.get_int("grid_vlan_id", i_val) && i_val == 42);
+    CHECK(loaded.get_int("grid_vlan_pcp", i_val) && i_val == 6);
+    CHECK(loaded.get_int("grid_channels", i_val) && i_val == 256);
+    CHECK(loaded.get_bool("grid_clock_master", b_val) && b_val == true);
     // Classic UDP fields must be 100% preserved!
-    CHECK(loaded.dest_ip == "192.168.50.109");
-    CHECK(loaded.dest_port == 5004);
-    CHECK(loaded.aoip_channels == 64);
-    CHECK(loaded.aoip_latency_ms == 20);
+    CHECK(loaded.get_string("dest_ip", s_val) && s_val == "192.168.50.109");
+    CHECK(loaded.get_int("dest_port", i_val) && i_val == 5004);
+    CHECK(loaded.get_int("aoip_channels", i_val) && i_val == 64);
+    CHECK(loaded.get_int("aoip_latency_ms", i_val) && i_val == 20);
 
     // 4c. Switch to Hybrid (mode = 2) and then back to Classic (mode = 0)
-    loaded.network_engine_mode = 2;
-    REQUIRE(lv::gui::save_app_config(loaded));
-    lv::gui::AppConfig hybrid{};
-    REQUIRE(lv::gui::load_app_config(hybrid));
-    CHECK(hybrid.network_engine_mode == 2);
-    CHECK(hybrid.grid_channels == 256);
-    CHECK(hybrid.dest_ip == "192.168.50.109");
+    loaded.set_int("network_engine_mode", 2);
+    REQUIRE(loaded.save(cfg_path));
+    lv::ui::JsonConfig hybrid;
+    REQUIRE(hybrid.load(cfg_path));
+    CHECK(hybrid.get_int("network_engine_mode", i_val) && i_val == 2);
+    CHECK(hybrid.get_int("grid_channels", i_val) && i_val == 256);
+    CHECK(hybrid.get_string("dest_ip", s_val) && s_val == "192.168.50.109");
 
-    hybrid.network_engine_mode = 0;
-    REQUIRE(lv::gui::save_app_config(hybrid));
-    lv::gui::AppConfig back_to_classic{};
-    REQUIRE(lv::gui::load_app_config(back_to_classic));
-    CHECK(back_to_classic.network_engine_mode == 0);
-    CHECK(back_to_classic.grid_nic_name == "Ethernet-Test-NIC");
-    CHECK(back_to_classic.aoip_channels == 64);
+    hybrid.set_int("network_engine_mode", 0);
+    REQUIRE(hybrid.save(cfg_path));
+    lv::ui::JsonConfig back_to_classic;
+    REQUIRE(back_to_classic.load(cfg_path));
+    CHECK(back_to_classic.get_int("network_engine_mode", i_val) && i_val == 0);
+    CHECK(back_to_classic.get_string("grid_nic_name", s_val) && s_val == "Ethernet-Test-NIC");
+    CHECK(back_to_classic.get_int("aoip_channels", i_val) && i_val == 64);
 
-    restore_user_config();
+    std::error_code ec;
+    fs::remove(cfg_path, ec);
 }

@@ -20,7 +20,7 @@
 #include "lanvid/lanvid_sdk.h"
 #include "audio/multi_device_matrix.hpp"
 #include "audio/personal_monitor_bus.hpp"
-#include "gui/app_config.hpp"
+#include "common_ui/json_config.hpp"
 #include "midi/midi_dejitter_queue.hpp"
 #include "midi/midi_device_manager.hpp"
 #include "midi/midi_sync_engine.hpp"
@@ -178,32 +178,27 @@ TEST(midi_over_ip_audio_sync_and_matrix_routing) {
     mx.send_midi_panic(net_tx);
     CHECK(panic_cc123 == 16);  // All 16 channels received CC 123 All Notes Off
 
-    // Verify AppConfig persistence for MIDI slots & crosspoints (backup/restore user config)
+    // Verify JsonConfig persistence for MIDI slots & crosspoints
     namespace fs = std::filesystem;
-    const fs::path cfg_path(lv::gui::config_file_path());
-    std::string backup;
-    bool had_existing = false;
-    if (fs::exists(cfg_path)) {
-        std::ifstream in(cfg_path, std::ios::binary);
-        backup.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        had_existing = true;
-    }
-    lv::gui::AppConfig saved{};
-    saved.midi_slots = mx.midi_slots();
-    saved.midi_crosspoints = mx.midi_crosspoints();
-    CHECK(lv::gui::save_app_config(saved));
-    lv::gui::AppConfig loaded{};
-    CHECK(lv::gui::load_app_config(loaded));
-    CHECK(loaded.midi_slots.size() == size_t(4));
-    CHECK(loaded.midi_crosspoints.size() == size_t(3));
-    CHECK(loaded.midi_crosspoints[2].channel_filter == 10);
-    if (had_existing) {
-        std::ofstream out(cfg_path, std::ios::binary | std::ios::trunc);
-        out.write(backup.data(), std::streamsize(backup.size()));
-    } else {
-        std::error_code ec;
-        fs::remove(cfg_path, ec);
-    }
+    const fs::path cfg_path = fs::temp_directory_path() / "lanvid_midi_sync_test_cfg.json";
+    lv::ui::JsonConfig saved;
+    std::vector<std::string> slot_names;
+    for (const auto& s : mx.midi_slots()) slot_names.push_back(s.name);
+    std::vector<int> ch_filters;
+    for (const auto& cp : mx.midi_crosspoints()) ch_filters.push_back(static_cast<int>(cp.channel_filter));
+    saved.set_string_list("midi_slot_names", slot_names);
+    saved.set_int_list("midi_cp_filters", ch_filters);
+    CHECK(saved.save(cfg_path.string()));
+
+    lv::ui::JsonConfig loaded;
+    CHECK(loaded.load(cfg_path.string()));
+    std::vector<std::string> out_names;
+    std::vector<int> out_filters;
+    CHECK(loaded.get_string_list("midi_slot_names", out_names) && out_names.size() == size_t(4));
+    CHECK(loaded.get_int_list("midi_cp_filters", out_filters) && out_filters.size() == size_t(3));
+    CHECK(out_filters[2] == 10);
+    std::error_code ec;
+    fs::remove(cfg_path, ec);
 }
 
 TEST(virtual_midi_daw_port_visibility_and_loopback) {

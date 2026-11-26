@@ -16,13 +16,13 @@
 #include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
 #include "common/image.hpp"
-#include "gui/app_config.hpp"
 #include "lanvid.hpp"
 #include "net/packet.hpp"
 #include "video/iso_recorder.hpp"
 #include "video/multicam_manager.hpp"
 #include "video/video_bus.hpp"
 #include "video/video_playout_buffer.hpp"
+#include "video_service.hpp"
 
 namespace fs = std::filesystem;
 
@@ -321,31 +321,32 @@ TEST(video_bus_slots_isolated_and_placeholder) {
 TEST(video_config_slots_iso_vcam_persist) {
     const std::string dir = tmp_dir("cfg");
     const std::string path = dir + "/lanvid_video_config.json";
-    lv::gui::AppConfig a;
-    a.video_max_slots = 6;
-    a.video_port_mode = 1;
-    a.video_multiview_layout = 3;
-    a.video_slot_labels = {"CAM 1 • Wide", "CAM 2 \"Close\"", "CAM 3"};
-    a.video_slot_ips = {"192.168.1.20", "", "192.168.1.22"};
-    a.iso_output_dir = dir + "/Recordings";
-    a.iso_session_name = "Concert";
-    a.iso_container = 2;
-    a.iso_record_program = true;
-    a.iso_slot_mask = 0x5;
-    a.vcam_count = 3;
-    a.vcam_placeholder = false;
-    REQUIRE(lv::gui::save_app_config(a, path));
-    lv::gui::AppConfig b;
-    REQUIRE(lv::gui::load_app_config(b, path));
-    CHECK(b.video_max_slots == 6 && b.video_port_mode == 1 && b.video_multiview_layout == 3);
-    REQUIRE(b.video_slot_labels.size() == 3);
-    CHECK(b.video_slot_labels[0] == "CAM 1 • Wide");
-    CHECK(b.video_slot_labels[1] == "CAM 2 \"Close\"");
-    REQUIRE(b.video_slot_ips.size() == 3);
-    CHECK(b.video_slot_ips[0] == "192.168.1.20" && b.video_slot_ips[1].empty() && b.video_slot_ips[2] == "192.168.1.22");
-    CHECK(b.iso_output_dir == a.iso_output_dir && b.iso_session_name == "Concert");
-    CHECK(b.iso_container == 2 && b.iso_record_program && b.iso_slot_mask == 0x5);
-    CHECK(b.vcam_count == 3 && !b.vcam_placeholder);
+    lv::apps::LanVidVideoService a(path);
+    a.config().max_slots = 6;
+    a.config().port_mode = 1;
+    a.config().multiview_layout = 3;
+    a.config().slot_labels = {"CAM 1 • Wide", "CAM 2 \"Close\"", "CAM 3"};
+    a.config().slot_ips = {"192.168.1.20", "", "192.168.1.22"};
+    a.config().iso_output_dir = dir + "/Recordings";
+    a.config().iso_session_name = "Concert";
+    a.config().iso_container = 2;
+    a.config().iso_record_program = true;
+    a.config().iso_slot_mask = 0x5;
+    a.config().vcam_count = 3;
+    a.config().vcam_placeholder = false;
+    REQUIRE(a.save_config());
+
+    lv::apps::LanVidVideoService b(path);
+    REQUIRE(b.load_config());
+    CHECK(b.config().max_slots == 6 && b.config().port_mode == 1 && b.config().multiview_layout == 3);
+    REQUIRE(b.config().slot_labels.size() == 3);
+    CHECK(b.config().slot_labels[0] == "CAM 1 • Wide");
+    CHECK(b.config().slot_labels[1] == "CAM 2 \"Close\"");
+    REQUIRE(b.config().slot_ips.size() == 3);
+    CHECK(b.config().slot_ips[0] == "192.168.1.20" && b.config().slot_ips[1].empty() && b.config().slot_ips[2] == "192.168.1.22");
+    CHECK(b.config().iso_output_dir == a.config().iso_output_dir && b.config().iso_session_name == "Concert");
+    CHECK(b.config().iso_container == 2 && b.config().iso_record_program && b.config().iso_slot_mask == 0x5);
+    CHECK(b.config().vcam_count == 3 && !b.config().vcam_placeholder);
     std::error_code ec;
     fs::remove_all(dir, ec);
 }

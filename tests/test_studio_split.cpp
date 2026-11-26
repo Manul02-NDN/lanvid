@@ -1,195 +1,202 @@
-// Verifies that split desktop apps LanVid Audio (5004/5020/5021, role="audio") and
-// LanVid Video (5006/5022/5023, role="video") run concurrently on the same host with:
-//   - Separate config files (lanvid_audio_config.json vs lanvid_video_config.json)
-//   - Zero UDP port conflict
-//   - Accurate role-aware LAN discovery ([AUDIO] vs [VIDEO])
+// Coexistence & isolation unit tests for the 3 separate LanVid desktop apps:
+//   1) LanVid Audio    (Audio 5004, Monitor 5020, Discovery 5021, role="audio")
+//   2) LanVid Video    (Video 5006, Tally 5022,   Discovery 5023, role="video")
+//   3) LanVid Intercom (Intercom 5024, Discovery 5025, role="intercom")
+// All 3 services run concurrently on localhost with zero UDP port conflicts,
+// separate JSON config files, and full C ABI Duplex Intercom + Tally parity.
+
 #include "mini_test.hpp"
 
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
-#include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
-#include "gui/app_config.hpp"
-#include "gui/audio_studio_ui.hpp"
-#include "gui/video_hub_ui.hpp"
+#include "audio_service.hpp"
+#include "intercom_service.hpp"
+#include "lanvid/lanvid_sdk.h"
 #include "net/discovery.hpp"
+#include "video_service.hpp"
 
-TEST(studio_audio_video_split_no_port_conflict) {
-    namespace fs = std::filesystem;
-    const fs::path tmp_dir = fs::temp_directory_path() / "lanvid_split_studio_test";
-    std::error_code ec;
-    fs::create_directories(tmp_dir, ec);
-    const fs::path audio_cfg = tmp_dir / "lanvid_audio_config.json";
-    const fs::path video_cfg = tmp_dir / "lanvid_video_config.json";
-    fs::remove(audio_cfg, ec);
-    fs::remove(video_cfg, ec);
+namespace fs = std::filesystem;
 
-    // 1. Canonical config paths must be distinct
-    const std::string def_audio_cfg = lv::gui::config_file_path_for("lanvid_audio_config.json");
-    const std::string def_video_cfg = lv::gui::config_file_path_for("lanvid_video_config.json");
-    CHECK(def_audio_cfg != def_video_cfg);
-    CHECK(def_audio_cfg.find("lanvid_audio_config.json") != std::string::npos);
-    CHECK(def_video_cfg.find("lanvid_video_config.json") != std::string::npos);
+namespace {
 
-    // 2. Start LanVid Audio & LanVid Video simultaneously on the same host
-    //    (fall back to +100 port block if live desktop instances already hold 5004/5006 on this machine)
-    CHECK(lv::kAudioStreamPort == 5004);
-    CHECK(lv::kAudioMonitorPort == 5020);
-    CHECK(lv::kAudioDiscoveryPort == 5021);
-    CHECK(lv::kVideoStreamPort == 5006);
-    CHECK(lv::kVideoTallyPort == 5022);
-    CHECK(lv::kVideoDiscoveryPort == 5023);
-
-    lv::gui::LanVidAudioStudioApp audio_app(audio_cfg.string());
-    lv::gui::LanVidVideoHubApp video_app(video_cfg.string());
-
-    uint16_t a_stream = lv::kAudioStreamPort, a_mon = lv::kAudioMonitorPort, a_disc = lv::kAudioDiscoveryPort;
-    uint16_t v_stream = lv::kVideoStreamPort, v_tally = lv::kVideoTallyPort, v_disc = lv::kVideoDiscoveryPort;
-    if (!audio_app.start_services(a_stream, a_mon, a_disc)) {
-        a_stream = 5104; a_mon = 5120; a_disc = 5121;
-        REQUIRE(audio_app.start_services(a_stream, a_mon, a_disc));
-    }
-    if (!video_app.start_services(v_stream, v_tally, v_disc)) {
-        v_stream = 5106; v_tally = 5122; v_disc = 5123;
-        REQUIRE(video_app.start_services(v_stream, v_tally, v_disc));
-    }
-
-    CHECK(audio_app.services_running());
-    CHECK(video_app.services_running());
-
-    // 3. Verify all 6 UDP ports are strictly distinct
-    const std::set<uint16_t> ports = {
-        audio_app.bound_audio_port(),
-        audio_app.bound_monitor_port(),
-        audio_app.bound_discovery_port(),
-        video_app.bound_video_port(),
-        video_app.bound_tally_port(),
-        video_app.bound_discovery_port(),
-    };
-    CHECK(ports.size() == 6);
-    CHECK(audio_app.bound_audio_port() == a_stream);
-    CHECK(audio_app.bound_monitor_port() == a_mon);
-    CHECK(audio_app.bound_discovery_port() == a_disc);
-    CHECK(video_app.bound_video_port() == v_stream);
-    CHECK(video_app.bound_tally_port() == v_tally);
-    CHECK(video_app.bound_discovery_port() == v_disc);
-
-    // 4. Role-aware discovery must detect BOTH [AUDIO] and [VIDEO]
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
-    const auto found_a = lv::discovery_scan(250, a_disc);
-    const auto found_v = lv::discovery_scan(250, v_disc);
-    bool saw_audio = false;
-    bool saw_video = false;
-    for (const auto& r : found_a) {
-        if (r.role == "audio" && r.stream_port == a_stream) saw_audio = true;
-    }
-    for (const auto& r : found_v) {
-        if (r.role == "video" && r.stream_port == v_stream) saw_video = true;
-    }
-    std::printf("    [split studio] audio(:%u,role=audio)=%d | video(:%u,role=video)=%d\n",
-                unsigned(a_stream), int(saw_audio), unsigned(v_stream), int(saw_video));
-    CHECK(saw_audio);
-    CHECK(saw_video);
-
-    // 5. Independent config persistence (no cross-clobbering)
-    audio_app.config().aoip_channels = 32;
-    audio_app.config().network_engine_mode = 2;  // Hybrid
-    video_app.config().video_lip_sync_ms = 25;
-    video_app.config().intercom_ducking_db = -14.0f;
-
-    audio_app.shutdown();
-    video_app.shutdown();
-
-    lv::gui::AppConfig loaded_audio{}, loaded_video{};
-    REQUIRE(lv::gui::load_app_config(loaded_audio, audio_cfg.string()));
-    REQUIRE(lv::gui::load_app_config(loaded_video, video_cfg.string()));
-    CHECK(loaded_audio.aoip_channels == 32);
-    CHECK(loaded_audio.network_engine_mode == 2);
-    CHECK(loaded_video.video_lip_sync_ms == 25);
-    CHECK(loaded_video.intercom_ducking_db <= -13.5f && loaded_video.intercom_ducking_db >= -14.5f);
-
-    fs::remove(audio_cfg, ec);
-    fs::remove(video_cfg, ec);
-    fs::remove(tmp_dir, ec);
+std::string make_temp_cfg_dir(const char* tag) {
+    const fs::path p = fs::temp_directory_path() /
+                       (std::string("lanvid_split_") + tag + "_" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(p);
+    return p.string();
 }
 
-TEST(studio_audio_config_and_lifecycle) {
-    namespace fs = std::filesystem;
-    const fs::path tmp_dir = fs::temp_directory_path() / "lanvid_audio_lifecycle_test";
+}  // namespace
+
+TEST(separate_apps_coexistence_no_port_conflict) {
+    // Verify canonical non-overlapping ports across all 3 standalone apps
+    CHECK(lv::kAudioStreamPort == 5004);
+    CHECK(lv::kVideoStreamPort == 5006);
+    CHECK(lv::kAudioMonitorPort == 5020);
+    CHECK(lv::kAudioDiscoveryPort == 5021);
+    CHECK(lv::kVideoTallyPort == 5022);
+    CHECK(lv::kVideoDiscoveryPort == 5023);
+    CHECK(lv::apps::kIntercomDefaultPort == 5024);
+    CHECK(lv::apps::kIntercomDiscoveryPort == 5025);
+
+    const std::string dir = make_temp_cfg_dir("coexist");
+    lv::apps::LanVidAudioService audio_svc(dir + "/lanvid_audio_config.json");
+    lv::apps::LanVidVideoService video_svc(dir + "/lanvid_video_config.json");
+    lv::apps::LanVidIntercomService intercom_svc(dir + "/lanvid_intercom_config.json");
+
+    // Start all 3 services simultaneously on their default ports (with high-port fallback if a live app holds defaults).
+    bool audio_ok = audio_svc.start_services();
+    bool video_ok = video_svc.start_services();
+    bool intercom_ok = intercom_svc.start_services();
+    if (!audio_ok || !video_ok || !intercom_ok) {
+        intercom_svc.stop_services();
+        video_svc.stop_services();
+        audio_svc.stop_services();
+        audio_ok = audio_svc.start_services(25004, 25020, 25021);
+        video_ok = video_svc.start_services(25006, 25022, 25023);
+        intercom_ok = intercom_svc.start_services(25024, 25025);
+    }
+
+    REQUIRE(audio_ok);
+    REQUIRE(video_ok);
+    REQUIRE(intercom_ok);
+
+    CHECK(audio_svc.services_running());
+    CHECK(video_svc.services_running());
+    CHECK(intercom_svc.services_running());
+
+    const uint16_t a_mon = audio_svc.bound_monitor_port();
+    const uint16_t a_disc = audio_svc.bound_discovery_port();
+    const uint16_t v_vid = video_svc.bound_video_port();
+    const uint16_t v_tal = video_svc.bound_tally_port();
+    const uint16_t v_disc = video_svc.bound_discovery_port();
+    const uint16_t i_com = intercom_svc.bound_intercom_port();
+    const uint16_t i_disc = intercom_svc.bound_discovery_port();
+
+    CHECK(a_mon != 0);
+    CHECK(a_disc != 0);
+    CHECK(v_vid != 0);
+    CHECK(v_tal != 0);
+    CHECK(v_disc != 0);
+    CHECK(i_com != 0);
+    CHECK(i_disc != 0);
+
+    // Every socket across the 3 services must hold a distinct bound port
+    const std::vector<uint16_t> ports = {a_mon, a_disc, v_vid, v_tal, v_disc, i_com, i_disc};
+    for (size_t i = 0; i < ports.size(); ++i) {
+        for (size_t j = i + 1; j < ports.size(); ++j) {
+            CHECK(ports[i] != ports[j]);
+        }
+    }
+
+    // Verify independent JSON persistence for all 3 apps
+    audio_svc.config().studio_name = "Audio Suite";
+    audio_svc.config().channels = 32;
+    REQUIRE(audio_svc.save_config());
+
+    video_svc.config().hub_name = "Video Hub";
+    video_svc.config().max_slots = 12;
+    REQUIRE(video_svc.save_config());
+
+    intercom_svc.config().desk_name = "Director Desk";
+    intercom_svc.config().auto_ducking_db = -18.0f;
+    REQUIRE(intercom_svc.save_config());
+
+    {
+        lv::apps::LanVidAudioService audio_reload(dir + "/lanvid_audio_config.json");
+        lv::apps::LanVidVideoService video_reload(dir + "/lanvid_video_config.json");
+        lv::apps::LanVidIntercomService intercom_reload(dir + "/lanvid_intercom_config.json");
+        REQUIRE(audio_reload.load_config());
+        REQUIRE(video_reload.load_config());
+        REQUIRE(intercom_reload.load_config());
+
+        CHECK(audio_reload.config().studio_name == "Audio Suite");
+        CHECK(audio_reload.config().channels == 32);
+        CHECK(video_reload.config().hub_name == "Video Hub");
+        CHECK(video_reload.config().max_slots == 12);
+        CHECK(intercom_reload.config().desk_name == "Director Desk");
+        CHECK(std::abs(intercom_reload.config().auto_ducking_db - (-18.0f)) < 0.05f);
+    }
+
+    intercom_svc.stop_services();
+    video_svc.stop_services();
+    audio_svc.stop_services();
+
     std::error_code ec;
-    fs::create_directories(tmp_dir, ec);
-    const fs::path cfg_path = tmp_dir / "lanvid_audio_config.json";
-    fs::remove(cfg_path, ec);
+    fs::remove_all(dir, ec);
+}
 
-    {
-        lv::gui::LanVidAudioStudioApp app(cfg_path.string());
-        auto& c = app.config();
-        c.studio_name = "Kyiv Studio A";
-        c.active_tab = 2;
-        c.active_subtab = {1, 2, 1, 0};
-        c.network_engine_mode = 2;
-        c.audio_sample_rate = 96000;
-        c.grid_block_samples = 16;
-        c.grid_nic_mac = "AA:BB:CC:DD:EE:FF";
-        c.grid_dsp_primary = "11:22:33:44:55:66";
-        c.grid_dsp_backup = "66:55:44:33:22:11";
-        c.monitor_channel_names = {"Vocal", "Click", "Guitar"};
-        c.monitor_channel_mask = 0x7ull;
-        c.monitor_dsp_hpf_enabled = true;
-        c.monitor_dsp_hpf_hz = 110.0f;
-        c.monitor_dsp_eq_enabled = true;
-        c.monitor_dsp_eq_low_db = 3.5f;
-        c.monitor_dsp_comp_enabled = true;
-        c.monitor_dsp_comp_ratio = 4.5f;
-        c.autostart_session = false;
+TEST(separate_apps_config_and_intercom_lifecycle) {
+    const std::string dir = make_temp_cfg_dir("intercom");
+    lv::apps::LanVidIntercomService intercom(dir + "/lanvid_intercom_config.json");
+    REQUIRE(intercom.start_services(0, 0));
 
-        REQUIRE(lv::gui::save_app_config(c, cfg_path.string()));
+    const uint16_t desk_port = intercom.bound_intercom_port();
+    REQUIRE(desk_port != 0);
+
+    // Connect a beltpack camera client on slot 1 using the pure C ABI
+    LvTallyIntercomHandle* beltpack = lv_tally_intercom_create_camera("127.0.0.1", desk_port, 1, "CAM 1");
+    REQUIRE(beltpack != nullptr);
+
+    struct TallyTracker {
+        std::atomic<uint8_t> tally{0};
+        std::atomic<uint8_t> rec{0};
+    } tracker;
+    lv_camera_set_tally_callback(
+        beltpack,
+        [](const LV_TallyState* st, void* ud) {
+            if (!st || !ud) return;
+            auto* t = static_cast<TallyTracker*>(ud);
+            t->tally.store(st->tally_state, std::memory_order_release);
+            t->rec.store((st->flags & 1u) ? 1u : 0u, std::memory_order_release);
+        },
+        &tracker);
+
+    // Configure Partyline Group A on slot 0 (camera_id = 1) and enable Program Tally + Auto-Ducking
+    intercom.set_operator_group(0, lv::apps::PartylineGroup::kGroupA);
+    intercom.set_operator_talk(0, true, true);
+    intercom.set_operator_tally(0, 2 /* PGM */, true);
+    intercom.set_partyline_talk(lv::apps::PartylineGroup::kGroupA, true);
+    intercom.set_director_state(true, false, 1.0f, 0.0f);
+
+    // Pump Director voice -> Beltpack and verify roundtrip arrival
+    std::vector<float> tx_tone(480);
+    for (int i = 0; i < 480; ++i) {
+        tx_tone[static_cast<size_t>(i)] = 0.45f * std::sin(2.0f * 3.14159265f * 1000.0f * i / 48000.0f);
     }
 
-    {
-        lv::gui::AppConfig loaded{};
-        REQUIRE(lv::gui::load_app_config(loaded, cfg_path.string()));
-        CHECK(loaded.studio_name == "Kyiv Studio A");
-        CHECK(loaded.active_tab == 2);
-        CHECK(loaded.active_subtab[0] == 1);
-        CHECK(loaded.active_subtab[1] == 2);
-        CHECK(loaded.active_subtab[2] == 1);
-        CHECK(loaded.active_subtab[3] == 0);
-        CHECK(loaded.network_engine_mode == 2);
-        CHECK(loaded.audio_sample_rate == 96000);
-        CHECK(loaded.grid_block_samples == 16);
-        CHECK(loaded.grid_nic_mac == "AA:BB:CC:DD:EE:FF");
-        CHECK(loaded.grid_dsp_primary == "11:22:33:44:55:66");
-        CHECK(loaded.grid_dsp_backup == "66:55:44:33:22:11");
-        CHECK(loaded.monitor_channel_names.size() >= 3);
-        CHECK(loaded.monitor_channel_names[0] == "Vocal");
-        CHECK(loaded.monitor_channel_names[1] == "Click");
-        CHECK(loaded.monitor_channel_mask == 0x7ull);
-        CHECK(loaded.monitor_dsp_hpf_enabled);
-        CHECK(loaded.monitor_dsp_hpf_hz > 109.0f && loaded.monitor_dsp_hpf_hz < 111.0f);
-        CHECK(loaded.monitor_dsp_eq_enabled);
-        CHECK(loaded.monitor_dsp_eq_low_db > 3.4f && loaded.monitor_dsp_eq_low_db < 3.6f);
-        CHECK(loaded.monitor_dsp_comp_enabled);
-        CHECK(loaded.monitor_dsp_comp_ratio > 4.4f && loaded.monitor_dsp_comp_ratio < 4.6f);
+    int beltpack_rx = 0;
+    std::vector<float> rx_buf(480, 0.0f);
+    for (int iter = 0; iter < 50; ++iter) {
+        if (iter == 5 || iter == 15) {
+            intercom.set_operator_tally(0, 2 /* PGM */, true);
+        }
+        intercom.push_director_mic_pcm(tx_tone.data(), 480);
+        intercom.poll();
+
+        lv_intercom_push_mic_pcm(beltpack, tx_tone.data(), 480);
+        lv_tally_intercom_poll(beltpack);
+
+        const int got = lv_intercom_pull_rx_pcm(beltpack, rx_buf.data(), 480);
+        if (got > 0) beltpack_rx += got;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    {
-        lv::gui::LanVidAudioStudioApp app(cfg_path.string());
-        uint16_t a_port = 5204, m_port = 5220, d_port = 5221;
-        REQUIRE(app.start_services(a_port, m_port, d_port));
-        CHECK(app.services_running());
-        CHECK(app.matrix().is_running());
-        app.config().connect_role = 1;  // Receive
-        CHECK(app.start_stream());
-        CHECK(app.stream_running());
-        app.stop_stream();
-        CHECK(!app.stream_running());
-        app.shutdown();
-        CHECK(!app.services_running());
-    }
+    CHECK(beltpack_rx > 0);
+    CHECK(tracker.tally.load(std::memory_order_acquire) == 2);
+    CHECK(tracker.rec.load(std::memory_order_acquire) == 1);
 
-    fs::remove(cfg_path, ec);
-    fs::remove(tmp_dir, ec);
+    lv_tally_intercom_destroy(beltpack);
+    intercom.stop_services();
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
 }

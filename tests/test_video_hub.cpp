@@ -19,10 +19,8 @@
 #include "codec/video_encoder.hpp"
 #include "common/clock.hpp"
 #include "common/image.hpp"
-#include "gui/app_config.hpp"
-#include "gui/video_hub_ui.hpp"
 #include "video/video_bus.hpp"
-#include "video_hub/video_hub_engine.hpp"
+#include "hub/video_hub_engine.hpp"
 
 namespace fs = std::filesystem;
 
