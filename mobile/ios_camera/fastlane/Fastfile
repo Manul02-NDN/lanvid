@@ -317,6 +317,21 @@ platform :ios do
     end
 
     skip_review_info = !missing_contact.empty?
+    if skip_review_info
+      require "deliver/upload_metadata"
+      unless Deliver::UploadMetadata.instance_variable_defined?(:@lanvid_review_attachment_patched)
+        patch = Module.new do
+          def review_attachment_file(options, version)
+            super
+          rescue RuntimeError => e
+            raise unless e.message.to_s.include?("No data")
+            FastlaneCore::UI.important("Skipping review_attachment_file sync (first version has no appStoreReviewDetail yet).")
+          end
+        end
+        Deliver::UploadMetadata.prepend(patch)
+        Deliver::UploadMetadata.instance_variable_set(:@lanvid_review_attachment_patched, true)
+      end
+    end
     with_sanitized_metadata_dir(skip_review_info: skip_review_info) do |meta_dir|
       opts = {
         api_key: key,
