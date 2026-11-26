@@ -13,7 +13,7 @@
 
 #include "gui/app_config.hpp"
 #include "gui/audio_studio_ui.hpp"
-#include "gui/video_studio_ui.hpp"
+#include "gui/video_hub_ui.hpp"
 #include "net/discovery.hpp"
 
 TEST(studio_audio_video_split_no_port_conflict) {
@@ -43,7 +43,7 @@ TEST(studio_audio_video_split_no_port_conflict) {
     CHECK(lv::kVideoDiscoveryPort == 5023);
 
     lv::gui::LanVidAudioStudioApp audio_app(audio_cfg.string());
-    lv::gui::LanVidVideoStudioApp video_app(video_cfg.string());
+    lv::gui::LanVidVideoHubApp video_app(video_cfg.string());
 
     uint16_t a_stream = lv::kAudioStreamPort, a_mon = lv::kAudioMonitorPort, a_disc = lv::kAudioDiscoveryPort;
     uint16_t v_stream = lv::kVideoStreamPort, v_tally = lv::kVideoTallyPort, v_disc = lv::kVideoDiscoveryPort;

@@ -378,7 +378,7 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
     read_int(j, "video_port_mode", cfg.video_port_mode);
     cfg.video_port_mode = std::clamp(cfg.video_port_mode, 0, 1);
     read_int(j, "video_multiview_layout", cfg.video_multiview_layout);
-    cfg.video_multiview_layout = std::clamp(cfg.video_multiview_layout, 1, 3);
+    cfg.video_multiview_layout = std::clamp(cfg.video_multiview_layout, 1, 4);
     {
         auto split = [](const std::string& s) {
             std::vector<std::string> out;
@@ -392,11 +392,13 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
             }
             return out;
         };
-        std::string labels, ips;
+        std::string labels, ips, uids;
         read_str(j, "video_slot_labels", labels);
         read_str(j, "video_slot_ips", ips);
+        read_str(j, "video_slot_device_uids", uids);
         if (!labels.empty()) cfg.video_slot_labels = split(labels);
         if (!ips.empty()) cfg.video_slot_ips = split(ips);
+        if (!uids.empty()) cfg.video_slot_device_uids = split(uids);
     }
     read_str(j, "iso_output_dir", cfg.iso_output_dir);
     read_str(j, "iso_session_name", cfg.iso_session_name);
@@ -607,6 +609,7 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
         << "  \"video_multiview_layout\": " << cfg.video_multiview_layout << ",\n"
         << "  \"video_slot_labels\": \"" << json_esc(join_bar(cfg.video_slot_labels)) << "\",\n"
         << "  \"video_slot_ips\": \"" << json_esc(join_bar(cfg.video_slot_ips)) << "\",\n"
+        << "  \"video_slot_device_uids\": \"" << json_esc(join_bar(cfg.video_slot_device_uids)) << "\",\n"
         << "  \"iso_output_dir\": \"" << json_esc(cfg.iso_output_dir) << "\",\n"
         << "  \"iso_session_name\": \"" << json_esc(cfg.iso_session_name) << "\",\n"
         << "  \"iso_container\": " << cfg.iso_container << ",\n"

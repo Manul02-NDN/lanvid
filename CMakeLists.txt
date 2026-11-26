@@ -389,14 +389,23 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
     target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core dwmapi)
     lanvid_set_flags(lanvid_audio_studio)
 
-    # Split Desktop App 2: LanVid Video (Cameras & Tally, Intercom/IFB, OBS Outputs)
+    # Split Desktop App 2: LanVid Video Hub (Cameras, Playout Buffer, ISO, Tally, Intercom & OBS)
+    set(LV_VIDEO_HUB_SOURCES
+      src/video_hub/camera_slot.cpp
+      src/video_hub/hub_discovery.cpp
+      src/video_hub/iso_recorder.cpp
+      src/video_hub/vcam_bus.cpp
+      src/video_hub/tally_intercom_hub.cpp
+      src/video_hub/video_hub_engine.cpp
+    )
     add_executable(lanvid_video_studio WIN32
-      src/app/video_studio_main.cpp
+      src/app/video_hub_main.cpp
       src/gui/app_config.cpp
       src/gui/studio_common.cpp
       src/gui/studio_host_win32.cpp
-      src/gui/video_studio_ui.cpp
+      src/gui/video_hub_ui.cpp
       src/gui/qr_code.cpp
+      ${LV_VIDEO_HUB_SOURCES}
       ${LV_IMGUI_CORE}
       ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
       ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
@@ -434,14 +443,23 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
       target_link_libraries(lanvid_audio_studio PRIVATE lanvid_core OpenGL::GL)
       lanvid_set_flags(lanvid_audio_studio)
 
-      # Split Desktop App 2: LanVid Video (macOS: LanVid Video.app)
+      # Split Desktop App 2: LanVid Video Hub (macOS: LanVid Video.app)
+      set(LV_VIDEO_HUB_SOURCES
+        src/video_hub/camera_slot.cpp
+        src/video_hub/hub_discovery.cpp
+        src/video_hub/iso_recorder.cpp
+        src/video_hub/vcam_bus.cpp
+        src/video_hub/tally_intercom_hub.cpp
+        src/video_hub/video_hub_engine.cpp
+      )
       add_executable(lanvid_video_studio
-        src/app/video_studio_main.cpp
+        src/app/video_hub_main.cpp
         src/gui/app_config.cpp
         src/gui/studio_common.cpp
         src/gui/studio_host_sdl2.cpp
-        src/gui/video_studio_ui.cpp
+        src/gui/video_hub_ui.cpp
         src/gui/qr_code.cpp
+        ${LV_VIDEO_HUB_SOURCES}
         ${LV_IMGUI_CORE}
         ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
         ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
@@ -608,10 +626,17 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     tests/test_network_interfaces.cpp
     tests/test_multicam_iso_vcam.cpp
     tests/test_studio_split.cpp
+    tests/test_video_hub.cpp
+    src/video_hub/camera_slot.cpp
+    src/video_hub/hub_discovery.cpp
+    src/video_hub/iso_recorder.cpp
+    src/video_hub/vcam_bus.cpp
+    src/video_hub/tally_intercom_hub.cpp
+    src/video_hub/video_hub_engine.cpp
     src/gui/app_config.cpp
     src/gui/studio_common.cpp
     src/gui/audio_studio_ui.cpp
-    src/gui/video_studio_ui.cpp
+    src/gui/video_hub_ui.cpp
     src/gui/qr_code.cpp
     ${LV_IMGUI_DIR}/imgui.cpp
     ${LV_IMGUI_DIR}/imgui_draw.cpp

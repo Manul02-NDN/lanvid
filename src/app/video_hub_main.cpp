@@ -1,10 +1,10 @@
-// LanVid Video — Standalone Desktop Entrypoint (Multi-Camera, Tally, Director Intercom/IFB & OBS Output).
+// LanVid Video Hub — Standalone Desktop Entrypoint (Multi-Camera Hub, Playout Buffer, ISO & OBS).
 
 #include <cstdlib>
 #include <cstring>
 
 #include "gui/studio_common.hpp"
-#include "gui/video_studio_ui.hpp"
+#include "gui/video_hub_ui.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -22,12 +22,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    lv::gui::LanVidVideoStudioApp app;
+    lv::gui::LanVidVideoHubApp app;
     lv::gui::StudioWindowSpec spec{};
-    spec.window_title = "LanVid Video v" LANVID_VERSION_STRING " — Cameras, Tally, Intercom & OBS";
-    spec.window_class = "LanVidVideoStudioWindowClass";
-    spec.width = 1280;
-    spec.height = 780;
+    spec.window_title = "LanVid Video Hub v" LANVID_VERSION_STRING " — Multi-Cam, ISO, Tally & Intercom";
+    spec.window_class = "LanVidVideoHubWindowClass";
+    spec.width = 1320;
+    spec.height = 820;
     spec.smoke_test_ms = smoke_ms;
     return lv::gui::run_studio_desktop_app(spec, app);
 }

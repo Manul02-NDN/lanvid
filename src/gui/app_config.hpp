@@ -103,9 +103,10 @@ struct AppConfig {
     // Multi-Cam (MultiCamManager), ISO recording and OS virtual cameras (LanVid Video)
     int video_max_slots = 8;              // 1..16 camera slots
     int video_port_mode = 0;              // 0 = one port (5006) demultiplexed by sender, 1 = 5006/5008/5010...
-    int video_multiview_layout = 2;       // 1 = 1x1, 2 = 2x2, 3 = 3x3
-    std::vector<std::string> video_slot_labels;  // "CAM 1 • Wide", ... (index = slot)
-    std::vector<std::string> video_slot_ips;     // pinned phone IP per slot ("" = auto)
+    int video_multiview_layout = 2;       // 1 = 1x1, 2 = 2x2, 3 = 3x3, 4 = 4x4
+    std::vector<std::string> video_slot_labels;       // "CAM 1 • Wide", ... (index = slot)
+    std::vector<std::string> video_slot_ips;          // pinned phone IP per slot ("" = auto)
+    std::vector<std::string> video_slot_device_uids;  // persistent device UID per slot for auto-assign
     std::string iso_output_dir;           // "" = ~/Movies/LanVid (macOS) / Videos\LanVid (Windows)
     std::string iso_session_name = "LanVid";
     int iso_container = 0;                // 0 = MP4, 1 = MKV, 2 = MOV

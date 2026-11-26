@@ -1026,8 +1026,12 @@ void LanVidObsRuntime::run_discovery_pass() {
                 it.ip = "127.0.0.1";
                 it.port = 0;
                 it.assigned_cam_number = uint8_t(s < lv::kVideoBusCameraSlots ? s + 1 : 0);
-                it.assigned_cam_tag = lv::video_bus_device_name(s);
-                it.display_name = std::string("[SHM] ") + lv::video_bus_device_name(s) +
+                const std::string shm_lbl = slot->label[0] ? std::string(slot->label)
+                                                           : std::string(lv::video_bus_device_name(s));
+                const std::string shm_src = slot->source_name[0] ? std::string(slot->source_name) : std::string();
+                it.assigned_cam_tag = shm_lbl;
+                it.display_name = std::string("[SHM] ") + shm_lbl +
+                                  (shm_src.empty() ? std::string() : (" (" + shm_src + ")")) +
                                   (conn ? " (LIVE)" : " (Standby)");
                 it.online = conn;
                 items.push_back(std::move(it));
