@@ -147,7 +147,7 @@ platform :ios do
   def log_app_store_version_status
     app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
     return if app.nil?
-    versions = app.get_app_store_versions(platform: Spaceship::ConnectAPI::Platform::IOS, includes: "build")
+    versions = app.get_app_store_versions(filter: { platform: "IOS" }, includes: "build")
     versions.first(3).each do |v|
       UI.message("App Store version #{v.version_string}: state=#{v.app_store_state}, build=#{v.build&.version || 'none'}")
     end
