@@ -86,7 +86,7 @@ jobs:
   ios:
     if: ${{ inputs.target == 'testflight' || !inputs.skip_build }}
     name: Build & upload (${{ inputs.target }})
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 90
     env:
       APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}

@@ -71,18 +71,24 @@ platform :ios do
 
   def find_latest_testflight_build
     app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
-    UI.user_error!("App record #{BUNDLE_ID} not found in App Store Connect.") if app.nil?
+    if app.nil?
+      available = Spaceship::ConnectAPI::App.all.map { |a| "#{a.bundle_id} (#{a.name})" }.join(", ")
+      UI.user_error!("App record #{BUNDLE_ID} not found in App Store Connect. Available apps: #{available}")
+    end
 
     explicit_build = ENV["BUILD_NUMBER"].to_s.strip
     max_attempts = 20
     max_attempts.times do |attempt|
       builds = app.get_builds(
-        filter: { "expired" => "false" },
         includes: "preReleaseVersion",
         sort: "-uploadedDate",
         limit: 10
       )
-      valid_builds = builds.select { |b| b.processing_state == "VALID" }
+      UI.message("App Store Connect builds for #{BUNDLE_ID} (count=#{builds.length}): " +
+                 builds.map { |b| "#{b.version}[state=#{b.processing_state},expired=#{b.expired},ver=#{b.pre_release_version&.version}]" }.join(", "))
+
+      active_builds = builds.reject(&:expired)
+      valid_builds = active_builds.select { |b| b.processing_state == "VALID" }
       chosen = explicit_build.empty? ? valid_builds.first : valid_builds.find { |b| b.version.to_s == explicit_build }
       if chosen
         app_ver = chosen.pre_release_version&.version.to_s
@@ -90,7 +96,7 @@ platform :ios do
         return { build_number: chosen.version.to_s, app_version: app_ver.empty? ? nil : app_ver }
       end
 
-      processing = builds.find { |b| b.processing_state == "PROCESSING" }
+      processing = active_builds.find { |b| b.processing_state == "PROCESSING" }
       if processing && attempt < max_attempts - 1
         UI.message("TestFlight build #{processing.version} is still PROCESSING (attempt #{attempt + 1}/#{max_attempts}); waiting 15s...")
         sleep(15)
@@ -100,8 +106,7 @@ platform :ios do
       break
     end
 
-    UI.user_error!("No VALID TestFlight build found in App Store Connect for #{BUNDLE_ID}. " \
-                   "Upload a TestFlight build first or run with skip_build=false.")
+    nil
   end
 
   def resolve_review_information
@@ -221,7 +226,13 @@ platform :ios do
     submit = options.key?(:submit) ? options[:submit].to_s == "true" : (ENV["SUBMIT_FOR_REVIEW"].to_s != "false")
     key = connect_api_key
     tf = find_latest_testflight_build
-    deliver_to_store(key, nil, submit, build_number: tf[:build_number], app_version: tf[:app_version])
+    if tf.nil?
+      UI.important("No VALID TestFlight build found yet for #{BUNDLE_ID}. Uploading all metadata, screenshots & age rating now (without submitting).")
+      deliver_to_store(key, nil, false)
+      UI.user_error!("Metadata & screenshots uploaded for #{BUNDLE_ID}, but no VALID TestFlight build exists yet in App Store Connect. Run with skip_build=false to build & upload the .ipa.")
+    else
+      deliver_to_store(key, nil, submit, build_number: tf[:build_number], app_version: tf[:app_version])
+    end
   end
 
   desc "Upload build (or existing TestFlight build with skip_build:true), screenshots and metadata to App Store Connect"
