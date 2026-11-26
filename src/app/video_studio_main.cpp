@@ -11,7 +11,7 @@
 #endif
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.6.0"
+#define LANVID_VERSION_STRING "2.7.0"
 #endif
 
 int main(int argc, char** argv) {

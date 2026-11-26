@@ -10,7 +10,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "2.6.0"
+    MARKETING_VERSION: "2.7.0"
     # Build number: Fastlane / CI passes CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER (unique per upload)
     CURRENT_PROJECT_VERSION: "260"
 targets:

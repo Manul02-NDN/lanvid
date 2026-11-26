@@ -72,7 +72,7 @@ jobs:
             build/lanvid_core.dll
             build/sender.exe
             build/receiver.exe
-            dist/LanVidSDK-v2.6.0/
+            dist/LanVidSDK-v2.7.0/
           if-no-files-found: error
 
   build-and-test-linux:
@@ -124,7 +124,7 @@ jobs:
             installer/linux/*.deb
             build/lanvid_app
             build/liblanvid_core.so
-            dist/LanVidSDK-v2.6.0/
+            dist/LanVidSDK-v2.7.0/
           if-no-files-found: error
 
   build-and-test-macos-ios:
@@ -176,8 +176,8 @@ jobs:
         with:
           name: lanvid-macos-ios
           path: |
-            dist/apple/LanVidSDK-v2.6.0-macOS.pkg
-            dist/apple/LanVidSDK-v2.6.0-macOS.dmg
+            dist/apple/LanVidSDK-v2.7.0-macOS.pkg
+            dist/apple/LanVidSDK-v2.7.0-macOS.dmg
             dist/apple/LanVidCore.xcframework/
           if-no-files-found: error
 
@@ -225,20 +225,20 @@ jobs:
           cd android
           gradle --no-daemon exportUniversalApk
           mkdir -p ../dist/android
-          cp LanVid-Android-universal.apk ../dist/android/LanVid-Android-v2.6.0.apk
+          cp LanVid-Android-universal.apk ../dist/android/LanVid-Android-v2.7.0.apk
 
       - name: Build LanVid Monitor (mobile/android, Compose + AAudio JNI)
         run: |
           cd mobile/android
           gradle --no-daemon :app:assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk ../../dist/android/LanVid-Monitor-v2.6.0-debug.apk
+          cp app/build/outputs/apk/debug/app-debug.apk ../../dist/android/LanVid-Monitor-v2.7.0-debug.apk
 
       - name: Upload Android Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lanvid-android
           path: |
-            dist/android/lanvid-sdk-2.6.0.aar
-            dist/android/LanVid-Android-v2.6.0.apk
-            dist/android/LanVid-Monitor-v2.6.0-debug.apk
+            dist/android/lanvid-sdk-2.7.0.aar
+            dist/android/LanVid-Android-v2.7.0.apk
+            dist/android/LanVid-Monitor-v2.7.0-debug.apk
           if-no-files-found: error

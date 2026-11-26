@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
     RegisterClassExW(&wc);
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.6.0"
+#define LANVID_VERSION_STRING "2.7.0"
 #endif
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"LanVid Studio v" LANVID_VERSION_STRING L" — Ultra-Low Latency LAN Video & Audio",
                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 780, nullptr,

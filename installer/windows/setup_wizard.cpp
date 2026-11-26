@@ -477,7 +477,7 @@ void register_uninstaller(const fs::path& dest_dir) {
                        DWORD((val.size() + 1) * sizeof(wchar_t)));
     };
     set_sz(L"DisplayName", L"LanVid Studio + Grid L2");
-    set_sz(L"DisplayVersion", L"2.6.0");
+    set_sz(L"DisplayVersion", L"2.7.0");
     set_sz(L"Publisher", L"LanVid Project");
     set_sz(L"InstallLocation", dest_dir.wstring());
     set_sz(L"DisplayIcon", (dest_dir / L"lanvid_app.exe").wstring());
@@ -796,7 +796,7 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             auto ctl_id = [](int id) { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); };
 
-            g_title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio + Grid L2 v2.6.0",
+            g_title = CreateWindowW(L"STATIC", L"Майстер встановлення LanVid Studio + Grid L2 v2.7.0",
                                     WS_VISIBLE | WS_CHILD, 20, 14, 570, 28, hwnd, ctl_id(IDC_TITLE), nullptr, nullptr);
             SendMessageW(g_title, WM_SETFONT, WPARAM(title_font), TRUE);
 

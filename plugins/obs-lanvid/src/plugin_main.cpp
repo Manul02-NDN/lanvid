@@ -48,7 +48,7 @@ bool obs_module_load(void) {
     lv::obs::register_lanvid_output_and_filter();
     obs_frontend_add_event_callback(lv::obs::on_obs_frontend_event, nullptr);
     lv::obs::register_lanvid_control_dock();
-    blog(LOG_INFO, "[obs-lanvid] Loaded LanVid Studio Plugin v2.6.0 (Tally UDP :%u)",
+    blog(LOG_INFO, "[obs-lanvid] Loaded LanVid Studio Plugin v2.7.0 (Tally UDP :%u)",
          unsigned(lv::obs::LanVidObsManager::instance().studio_port()));
     return true;
 }

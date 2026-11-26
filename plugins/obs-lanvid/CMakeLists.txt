@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(obs-lanvid VERSION 2.6.0 LANGUAGES CXX)
+project(obs-lanvid VERSION 2.7.0 LANGUAGES CXX)
 
 # 1. Core library (always built when obs-lanvid is enabled; used by both the OBS plugin and headless tests)
 add_library(obs_lanvid_core STATIC

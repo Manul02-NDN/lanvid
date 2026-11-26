@@ -837,7 +837,7 @@ void LanVidAudioStudioApp::render_frame() {
 
 void LanVidAudioStudioApp::draw_top_bar() {
     const auto& p = studio_palette();
-    ImGui::TextColored(p.accent_purp, "LanVid Audio v2.6.0");
+    ImGui::TextColored(p.accent_purp, "LanVid Audio v2.7.0");
     ImGui::SameLine();
 
     // Engine mode quick switcher

@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.6.0"
+#define LANVID_VERSION_STRING "2.7.0"
 #endif
     SdlGlHost host;
     host.win = SDL_CreateWindow("LanVid Studio v" LANVID_VERSION_STRING " — Ultra-Low Latency LAN Video & Audio",

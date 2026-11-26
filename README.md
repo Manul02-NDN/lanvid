@@ -1,4 +1,4 @@
-# LanVid `v2.6.0`
+# LanVid `v2.7.0`
 
 [![CI Build & Test](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml)
 [![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
@@ -26,11 +26,11 @@ LanVid is engineered from scratch in C++20 for sub-frame **4K60** local network 
 - **Hardware-Accelerated Preview & Desktop/Mobile Apps:**
   - **LanVid Studio (`lanvid_app`):** Unified Sender + Receiver GUI built with vendored Dear ImGui + **Direct3D 11** (`DXGI_SWAP_EFFECT_FLIP_DISCARD`, `ALLOW_TEARING`, automatic GDI fallback) on Windows and **SDL2 + OpenGL 3** on Linux, with live codec selector (`LanVid DCT` / `H.264` / `H.265`), bitrate slider, 64-channel AoIP bus latency (`2–2000 ms`) & LED meter grid, and hardware badge telemetry.
   - **Android App (`android/`):** Kotlin + Jetpack Compose with a broadcast-grade **Blackmagic / NDICam-style HUD** (live tally, audio meters, FPS/bitrate telemetry, shutter/ISO/WB/zoom controls), Camera2 (`YUV_420_888` zero-RGB-copy with full `rowStride`/`pixelStride` + `SENSOR_ORIENTATION` front/back camera rotation & mirror fix), MediaProjection Foreground Service, `ANativeWindow` + native AAudio, live codec switching (`LanVid DCT` / `H.264 HW` / `H.265 HW`), and adaptive AoIP bus latency (`2–2000 ms`).
-  - **One-Click Installers & Release Artifacts (`v2.6.0`):**
+  - **One-Click Installers & Release Artifacts (`v2.7.0`):**
     - **Windows:** `LanVid_Setup.exe` (Setup Wizard + D3D11/firewall pre-flight + Studio GUI + CLI + `lanvid_core.dll` + 64-ch `LanVidASIO.dll`)
     - **Linux:** `LanVid-Linux-x86_64.run` & `.deb` (`SDL2 + OpenGL3` Studio GUI + CLI + `liblanvid_core.so` + `lanvid-audio-bridge`)
-    - **macOS / iOS:** `LanVidSDK-v2.6.0-macOS.pkg` & `.dmg` (Universal `arm64` NEON + `x86_64` AVX2 + `LanVidCore.xcframework` + SwiftPM `LanVidKit` + `LanVidAudio.driver`)
-    - **Android:** `LanVid-Android-v2.6.0.apk` (Universal `arm64-v8a` + `armeabi-v7a`, also published as `LanVid-Android.apk`) & `lanvid-sdk-2.6.0.aar`
+    - **macOS / iOS:** `LanVidSDK-v2.7.0-macOS.pkg` & `.dmg` (Universal `arm64` NEON + `x86_64` AVX2 + `LanVidCore.xcframework` + SwiftPM `LanVidKit` + `LanVidAudio.driver`)
+    - **Android:** `LanVid-Android-v2.7.0.apk` (Universal `arm64-v8a` + `armeabi-v7a`, also published as `LanVid-Android.apk`) & `lanvid-sdk-2.7.0.aar`
     - **Cross-Platform SDK:** `LanVidSDK-Universal.zip` (`C ABI`, `C++17`, `Swift`, `Kotlin`, `Python`)
 
 ### Multi-Codec Comparison (1080p60 Live UDP Loopback — Windows 11, Ryzen Zen 4 + AMD VCN 3.1 D3D11 HW)
@@ -75,7 +75,7 @@ lanvid/
 │   ├── platform/            # DXGI/GDI screen capture, Media Foundation cam, WASAPI audio, D3D11/SDL2 preview
 │   ├── gui/                 # LanVid Studio (Dear ImGui + Win32 D3D11 / Linux SDL2 OpenGL3)
 │   └── app/                 # CLI sender / receiver, Y4M/PPM file source, telemetry stats
-├── sdk/                     # Cross-Platform LanVidSDK v2.6.0
+├── sdk/                     # Cross-Platform LanVidSDK v2.7.0
 │   ├── README.md            # Developer Quick Start (C++17, Swift, Kotlin, Python)
 │   ├── build_sdk.py         # Unified SDK builder & external find_package() verifier
 │   ├── include/lanvid/      # Self-contained C ABI headers (lanvid_sdk.h, lanvid_types.h, lanvid_export.h)

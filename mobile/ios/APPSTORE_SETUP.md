@@ -1,6 +1,6 @@
 # LanVid Monitor → App Store: owner checklist
 
-Everything technical is prepared (bundle ID `com.manul02.lanvid.monitor`, version 2.6.0, icon, screenshots in EN + UK,
+Everything technical is prepared (bundle ID `com.manul02.lanvid.monitor`, version 2.7.0, icon, screenshots in EN + UK,
 metadata, privacy policy, Fastlane, CI). What only you can do takes **five steps**.
 
 ## 1. Join the Apple Developer Program ($99 / year)

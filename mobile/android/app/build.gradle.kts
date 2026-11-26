@@ -13,7 +13,7 @@ android {
         minSdk = 26            // Android 8.0+ with native AAudio low-latency paths
         targetSdk = 35
         versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1) + 100
-        versionName = "2.6.0"
+        versionName = "2.7.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

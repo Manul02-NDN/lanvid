@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>LanVid Studio + Grid L2 + SDK v2.6.0</title>
+    <title>LanVid Studio + Grid L2 + SDK v2.7.0</title>
     <organization>com.lanvid</organization>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false" />
     <!-- Standard Install installs all checked packages automatically; Customize lets the user toggle optional modules -->
@@ -99,13 +99,13 @@
         <pkg-ref id="com.lanvid.sdk.extras" />
     </choice>
 
-    <pkg-ref id="com.lanvid.pkg.studio" version="2.6.0" onConclusion="none">lanvid-studio.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.pkg.audiostudio" version="2.6.0" onConclusion="none">lanvid-audiostudio.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.pkg.videostudio" version="2.6.0" onConclusion="none">lanvid-videostudio.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.pkg.dspserver" version="2.6.0" onConclusion="none">lanvid-dspserver.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.pkg.chmodbpf" version="2.6.0" onConclusion="none">lanvid-chmodbpf.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.pkg.obsplugin" version="2.6.0" onConclusion="none">lanvid-obsplugin.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.audio.hal" version="2.6.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.swift" version="2.6.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.extras" version="2.6.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.studio" version="2.7.0" onConclusion="none">lanvid-studio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.audiostudio" version="2.7.0" onConclusion="none">lanvid-audiostudio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.videostudio" version="2.7.0" onConclusion="none">lanvid-videostudio.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.dspserver" version="2.7.0" onConclusion="none">lanvid-dspserver.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.chmodbpf" version="2.7.0" onConclusion="none">lanvid-chmodbpf.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.pkg.obsplugin" version="2.7.0" onConclusion="none">lanvid-obsplugin.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.audio.hal" version="2.7.0" onConclusion="none">lanvid-hal.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.swift" version="2.7.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.extras" version="2.7.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>
 </installer-gui-script>

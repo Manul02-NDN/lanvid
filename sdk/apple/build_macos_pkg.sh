@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # LanVid Studio + LanVid Grid (L2 · 256ch) + DSP Server + SDK macOS Single-File Installer Builder
 # Produces:
-#   - dist/apple/LanVidSDK-v2.6.0-macOS.pkg  (Universal arm64 NEON + x86_64 AVX2 Installer.app package)
-#   - dist/apple/LanVidSDK-v2.6.0-macOS.dmg  (Drag/double-click Finder disk image with .pkg + Verify script)
+#   - dist/apple/LanVidSDK-v2.7.0-macOS.pkg  (Universal arm64 NEON + x86_64 AVX2 Installer.app package)
+#   - dist/apple/LanVidSDK-v2.7.0-macOS.dmg  (Drag/double-click Finder disk image with .pkg + Verify script)
 #
 # Supports BOTH Installer.app modes via distribution.xml (customize="allow"):
 #   - Standard Install ("Інсталювати"): automatically installs all packages (Studio + DSP Server + ChmodBPF + OBS + HAL)
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-SDK_VERSION="2.6.0"
+SDK_VERSION="2.7.0"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLE_DIR="$ROOT/sdk/apple"
 INST_DIR="$APPLE_DIR/installer"
@@ -477,7 +477,7 @@ cat > "$DMG_STAGE/Verify_LanVidSDK.command" <<'VEOF'
 if command -v lanvid-sdk-info >/dev/null 2>&1; then
   lanvid-sdk-info
 else
-  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.6.0-macOS.pkg first."
+  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.7.0-macOS.pkg first."
 fi
 read -r -p "Press Enter to close..."
 VEOF

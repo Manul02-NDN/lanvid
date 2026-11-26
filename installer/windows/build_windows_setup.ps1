@@ -1,4 +1,4 @@
-# Builds standalone one-click Windows installer: installer\windows\LanVid_Setup.exe & LanVid_Setup_v2.6.0.exe
+# Builds standalone one-click Windows installer: installer\windows\LanVid_Setup.exe & LanVid_Setup_v2.7.0.exe
 # Links static CRT (/MT) so LanVid_Setup.exe runs on clean Windows 10/11 BEFORE VC++ Redist is installed!
 # Optional: pass -BuildInno to also compile installer\windows\lanvid.iss with Inno Setup 6 (ISCC.exe) if installed.
 param(
@@ -11,7 +11,7 @@ $buildDir = Join-Path $root "build"
 $winDir = $PSScriptRoot
 $stageDir = Join-Path $winDir "_stage"
 $zipPath = Join-Path $winDir "lanvid_payload.zip"
-$version = "2.6.0"
+$version = "2.7.0"
 $outExeVersioned = Join-Path $winDir "LanVid_Setup_v$version.exe"
 $outExe = Join-Path $winDir "LanVid_Setup.exe"
 

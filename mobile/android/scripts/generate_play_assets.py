@@ -305,7 +305,7 @@ def draw_screenshot(lang: str, screen_idx: int) -> Image.Image:
         cy += 340
 
         d.rounded_rectangle([cx0, cy, cx1, cy + 340], radius=30, fill=CARD)
-        d.text((cx0 + 32, cy + 32), "LanVid Monitor v2.6.0", font=f_card, fill=WHITE)
+        d.text((cx0 + 32, cy + 32), "LanVid Monitor v2.7.0", font=f_card, fill=WHITE)
         d.text((cx0 + 32, cy + 96), "100% Local Network · Zero Data Collected · No Ads", font=f_body, fill=MUTED)
         d.rounded_rectangle([cx0 + 32, cy + 180, cx0 + 420, cy + 258], radius=20, fill=CARD_HI, outline=ACCENT, width=2)
         d.text((cx0 + 82, cy + 204), "Privacy Policy", font=f_body, fill=LAVENDER)

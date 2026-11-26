@@ -16,12 +16,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "LanVid Project\0"
-            VALUE "FileDescription", "LanVid Studio 2.6.0 Installer\0"
-            VALUE "FileVersion", "2.6.0.0\0"
-            VALUE "InternalName", "LanVid_Setup_v2.6.0.exe\0"
-            VALUE "OriginalFilename", "LanVid_Setup_v2.6.0.exe\0"
-            VALUE "ProductName", "LanVid Studio 2.6.0\0"
-            VALUE "ProductVersion", "2.6.0.0\0"
+            VALUE "FileDescription", "LanVid Studio 2.7.0 Installer\0"
+            VALUE "FileVersion", "2.7.0.0\0"
+            VALUE "InternalName", "LanVid_Setup_v2.7.0.exe\0"
+            VALUE "OriginalFilename", "LanVid_Setup_v2.7.0.exe\0"
+            VALUE "ProductName", "LanVid Studio 2.7.0\0"
+            VALUE "ProductVersion", "2.7.0.0\0"
         END
     END
     BLOCK "VarFileInfo"

@@ -1485,7 +1485,7 @@ void LanVidStudioApp::draw_sidebar() {
     ImGui::BeginChild("##Sidebar", ImVec2(sidebar_w, 0), true, ImGuiWindowFlags_NoScrollbar);
 
 #ifndef LANVID_VERSION_STRING
-#define LANVID_VERSION_STRING "2.6.0"
+#define LANVID_VERSION_STRING "2.7.0"
 #endif
     draw_gradient_icon_tile("##BrandTile", IconKind::kWaveform, 36.0f, -1, false);
     ImGui::SameLine();

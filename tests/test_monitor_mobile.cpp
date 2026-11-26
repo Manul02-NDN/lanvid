@@ -170,7 +170,7 @@ TEST(monitor_mobile_client_protocol_and_mdns) {
     // mDNS announcement (what Studio publishes when the monitor server is on).
     lv::MdnsAdvertiser adv;
     const std::string inst = "LanVid Studio (unit-" + std::to_string(port) + ")";
-    const bool adv_ok = adv.start(inst, port, {{"role", "monitor"}, {"ver", "2.6.0"}});
+    const bool adv_ok = adv.start(inst, port, {{"role", "monitor"}, {"ver", "2.7.0"}});
     bool mdns_found = false;
     uint16_t mdns_port = 0;
     std::string mdns_role;

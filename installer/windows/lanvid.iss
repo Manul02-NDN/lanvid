@@ -1,13 +1,13 @@
 ; LanVid Studio + LanVid Grid (L2 · 256ch) + DSP Server — Inno Setup 6 Full Ecosystem Installer
 ; Build with: iscc installer\windows\lanvid.iss
 ; Silent CLI:
-;   LanVid_Setup_v2.6.0.exe /VERYSILENT /TYPE=auto
-;   LanVid_Setup_v2.6.0.exe /VERYSILENT /COMPONENTS="core,dsp_server,virtual_audio"
+;   LanVid_Setup_v2.7.0.exe /VERYSILENT /TYPE=auto
+;   LanVid_Setup_v2.7.0.exe /VERYSILENT /COMPONENTS="core,dsp_server,virtual_audio"
 ;
 ; Note: CMake target `lanvid_core_shared` sets OUTPUT_NAME "lanvid_core", producing build\lanvid_core.dll.
 
 #define MyAppName "LanVid Studio"
-#define MyAppVersion "2.6.0"
+#define MyAppVersion "2.7.0"
 #define MyAppPublisher "LanVid Project"
 #define MyAppExeName "lanvid_app.exe"
 
@@ -16,8 +16,8 @@ AppId={{8E74A82C-4D39-4E53-9B3C-6F82D05147B2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName=LanVid Studio + Grid L2 {#MyAppVersion}
-VersionInfoVersion=2.6.0.0
-VersionInfoProductVersion=2.6.0.0
+VersionInfoVersion=2.7.0.0
+VersionInfoProductVersion=2.7.0.0
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\LanVid
 DefaultGroupName={#MyAppName}
