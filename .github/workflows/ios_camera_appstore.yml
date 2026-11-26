@@ -1,9 +1,10 @@
 name: iOS App Store / TestFlight (LanVid Camera)
 
 # Manual run: Actions -> "iOS App Store / TestFlight (LanVid Camera)" -> Run workflow.
-#   target = testflight  builds a signed .ipa and uploads it to TestFlight
-#   target = appstore    uploads the build + screenshots + metadata to App Store Connect
-#   submit_for_review    (appstore only) also submits the version to App Review
+#   target = testflight                 builds a signed .ipa and uploads it to TestFlight
+#   target = appstore, skip_build=true  attaches the latest existing TestFlight build, uploads screenshots/metadata & submits (fast, no Xcode rebuild)
+#   target = appstore, skip_build=false builds a fresh .ipa + uploads screenshots/metadata
+#   submit_for_review                   (appstore only) also submits the version to App Review
 # Uses the shared repository secrets (see mobile/ios_camera/APPSTORE_SETUP.md):
 #   APP_STORE_CONNECT_API_KEY_ID, APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_API_KEY_BASE64
 
@@ -16,18 +17,74 @@ on:
         options:
           - testflight
           - appstore
-        default: testflight
+        default: appstore
+      skip_build:
+        description: 'Skip Xcode build and use latest existing TestFlight build (appstore only)'
+        type: boolean
+        default: true
       submit_for_review:
         description: 'Submit for App Review (appstore only)'
         type: boolean
-        default: false
+        default: true
 
 concurrency:
-  group: ios-camera-appstore
+  group: ios-camera-${{ inputs.target }}-${{ inputs.skip_build }}
   cancel-in-progress: false
 
 jobs:
+  publish-existing:
+    if: ${{ inputs.target == 'appstore' && inputs.skip_build }}
+    name: Publish existing TestFlight build to App Store (LanVid Camera)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      REVIEW_FIRST_NAME: ${{ secrets.REVIEW_FIRST_NAME }}
+      REVIEW_LAST_NAME: ${{ secrets.REVIEW_LAST_NAME }}
+      REVIEW_EMAIL: ${{ secrets.REVIEW_EMAIL }}
+      REVIEW_PHONE: ${{ secrets.REVIEW_PHONE }}
+      LC_ALL: en_US.UTF-8
+      LANG: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          missing=""
+          for v in APP_STORE_CONNECT_API_KEY_ID APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_API_KEY_BASE64; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing GitHub Secrets:$missing - see mobile/ios_camera/APPSTORE_SETUP.md"
+            exit 1
+          fi
+
+      - name: Restore App Store Connect API key (.p8)
+        run: |
+          KEY="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          echo "$APP_STORE_CONNECT_API_KEY_BASE64" | base64 --decode > "$KEY"
+          chmod 600 "$KEY"
+          echo "APP_STORE_CONNECT_API_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: mobile/ios_camera
+
+      - name: Fastlane publish_existing_build (App Store Connect)
+        working-directory: mobile/ios_camera
+        run: bundle exec fastlane publish_existing_build submit:${{ inputs.submit_for_review }}
+
+      - name: Remove API key
+        if: always()
+        run: rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
   ios-camera:
+    if: ${{ inputs.target == 'testflight' || !inputs.skip_build }}
     name: Build & upload LanVid Camera (${{ inputs.target }})
     runs-on: macos-26
     timeout-minutes: 90
@@ -89,7 +146,7 @@ jobs:
       - name: Fastlane release (App Store Connect)
         if: ${{ inputs.target == 'appstore' }}
         working-directory: mobile/ios_camera
-        run: bundle exec fastlane release submit:${{ inputs.submit_for_review }}
+        run: bundle exec fastlane release submit:${{ inputs.submit_for_review }} skip_build:false
 
       - name: Remove API key
         if: always()

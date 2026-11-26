@@ -1,7 +1,8 @@
 name: Publish Pages (Privacy Policy & Support)
 
-# Publishes docs/privacy-policy.html, docs/support.html and docs/index.html to
+# Publishes docs/privacy-policy.html, docs/camera-privacy.html, docs/support.html and docs/index.html to
 #   https://manul02-ndn.github.io/lanvid/privacy-policy.html
+#   https://manul02-ndn.github.io/lanvid/camera-privacy.html
 #   https://manul02-ndn.github.io/lanvid/support.html
 # One-time owner setup: Repository -> Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
 
@@ -10,9 +11,11 @@ on:
     branches: [main]
     paths:
       - 'docs/privacy-policy.html'
+      - 'docs/camera-privacy.html'
       - 'docs/support.html'
       - 'docs/index.html'
       - 'docs/lanvid-monitor-icon.png'
+      - 'docs/lanvid-camera-icon.png'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -36,7 +39,7 @@ jobs:
       - name: Stage the public pages only
         run: |
           mkdir -p _site
-          cp docs/index.html docs/privacy-policy.html docs/support.html docs/lanvid-monitor-icon.png _site/
+          cp docs/index.html docs/privacy-policy.html docs/camera-privacy.html docs/support.html docs/lanvid-monitor-icon.png docs/lanvid-camera-icon.png _site/
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

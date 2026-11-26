@@ -1,11 +1,13 @@
 # LanVid Camera - App Store / TestFlight automation.
 #
-#   bundle exec fastlane beta                 build a signed .ipa and upload to TestFlight
-#   bundle exec fastlane release              build + upload .ipa, screenshots & metadata to App Store Connect
-#   bundle exec fastlane release submit:true  ... and submit the version for App Review
-#   bundle exec fastlane metadata             metadata + screenshots only (no new binary)
+#   bundle exec fastlane beta                              build a signed .ipa and upload to TestFlight
+#   bundle exec fastlane publish_existing_build            attach latest TestFlight build, upload metadata/screenshots & submit
+#   bundle exec fastlane release                           build + upload .ipa, screenshots & metadata to App Store Connect
+#   bundle exec fastlane release skip_build:true submit:true  attach latest TestFlight build & submit without rebuilding
+#   bundle exec fastlane metadata                          metadata + screenshots only (no new binary)
 
 require "base64"
+require "fileutils"
 require "tmpdir"
 
 default_platform(:ios)
@@ -61,6 +63,120 @@ platform :ios do
     (ENV["GITHUB_RUN_NUMBER"] || ENV["BUILD_NUMBER"] || Time.now.strftime("%y%m%d%H%M")).to_s
   end
 
+  def valid_contact_value?(val)
+    s = val.to_s.strip
+    !s.empty? && !s.start_with?("FILL_IN")
+  end
+
+  def find_latest_testflight_build
+    app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    UI.user_error!("App record #{BUNDLE_ID} not found in App Store Connect.") if app.nil?
+
+    explicit_build = ENV["BUILD_NUMBER"].to_s.strip
+    max_attempts = 20
+    max_attempts.times do |attempt|
+      builds = app.get_builds(
+        filter: { "expired" => "false" },
+        includes: "preReleaseVersion",
+        sort: "-uploadedDate",
+        limit: 10
+      )
+      valid_builds = builds.select { |b| b.processing_state == "VALID" }
+      chosen = explicit_build.empty? ? valid_builds.first : valid_builds.find { |b| b.version.to_s == explicit_build }
+      if chosen
+        app_ver = chosen.pre_release_version&.version.to_s
+        UI.success("Selected existing TestFlight build #{chosen.version} (app version: #{app_ver.empty? ? 'default' : app_ver})")
+        return { build_number: chosen.version.to_s, app_version: app_ver.empty? ? nil : app_ver }
+      end
+
+      processing = builds.find { |b| b.processing_state == "PROCESSING" }
+      if processing && attempt < max_attempts - 1
+        UI.message("TestFlight build #{processing.version} is still PROCESSING (attempt #{attempt + 1}/#{max_attempts}); waiting 15s...")
+        sleep(15)
+        next
+      end
+
+      break
+    end
+
+    UI.user_error!("No VALID TestFlight build found in App Store Connect for #{BUNDLE_ID}. " \
+                   "Upload a TestFlight build first or run with skip_build=false.")
+  end
+
+  def resolve_review_information
+    dir = File.join(__dir__, "metadata", "review_information")
+    read_local = lambda do |file, env|
+      v = ENV[env].to_s.strip
+      v = File.read(File.join(dir, file)).strip if v.empty? && File.exist?(File.join(dir, file))
+      valid_contact_value?(v) ? v : ""
+    end
+
+    info = {
+      first_name: read_local.call("first_name.txt", "REVIEW_FIRST_NAME"),
+      last_name: read_local.call("last_name.txt", "REVIEW_LAST_NAME"),
+      email_address: read_local.call("email_address.txt", "REVIEW_EMAIL"),
+      phone_number: read_local.call("phone_number.txt", "REVIEW_PHONE"),
+      demo_user: "",
+      demo_password: "",
+      notes: read_local.call("notes.txt", "REVIEW_NOTES")
+    }
+
+    missing_keys = [:first_name, :last_name, :email_address, :phone_number].select { |k| info[k].empty? }
+    unless missing_keys.empty?
+      begin
+        app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+        if app
+          sources = []
+          begin
+            edit_ver = app.get_edit_app_store_version(platform: Spaceship::ConnectAPI::Platform::IOS)
+            sources << edit_ver.fetch_app_store_review_detail if edit_ver
+          rescue StandardError => e
+            UI.message("Could not read appStoreReviewDetail: #{e.message}")
+          end
+          begin
+            sources << app.fetch_beta_app_review_detail
+          rescue StandardError => e
+            UI.message("Could not read betaAppReviewDetail: #{e.message}")
+          end
+          sources.compact.each do |src|
+            info[:first_name] = src.contact_first_name.to_s.strip if info[:first_name].empty? && valid_contact_value?(src.contact_first_name)
+            info[:last_name] = src.contact_last_name.to_s.strip if info[:last_name].empty? && valid_contact_value?(src.contact_last_name)
+            info[:email_address] = src.contact_email.to_s.strip if info[:email_address].empty? && valid_contact_value?(src.contact_email)
+            info[:phone_number] = src.contact_phone.to_s.strip if info[:phone_number].empty? && valid_contact_value?(src.contact_phone)
+          end
+        end
+        if info[:first_name].empty? || info[:last_name].empty? || info[:email_address].empty?
+          users = Spaceship::ConnectAPI::User.all
+          admin = users.find { |u| Array(u.roles).include?("ADMIN") || Array(u.roles).include?("ACCOUNT_HOLDER") } || users.first
+          if admin
+            info[:first_name] = admin.first_name.to_s.strip if info[:first_name].empty? && valid_contact_value?(admin.first_name)
+            info[:last_name] = admin.last_name.to_s.strip if info[:last_name].empty? && valid_contact_value?(admin.last_name)
+            info[:email_address] = admin.username.to_s.strip if info[:email_address].empty? && valid_contact_value?(admin.username)
+          end
+        end
+      rescue StandardError => e
+        UI.important("Could not auto-fill review contact from App Store Connect: #{e.message}")
+      end
+    end
+
+    info
+  end
+
+  def with_sanitized_metadata_dir
+    src = File.join(__dir__, "metadata")
+    Dir.mktmpdir("lanvid_deliver_meta") do |tmp|
+      dst = File.join(tmp, "metadata")
+      FileUtils.cp_r(src, dst)
+      %w[first_name.txt last_name.txt email_address.txt phone_number.txt].each do |fname|
+        path = File.join(dst, "review_information", fname)
+        next unless File.exist?(path)
+        content = File.read(path).strip
+        File.delete(path) unless valid_contact_value?(content)
+      end
+      yield dst
+    end
+  end
+
   desc "Build a signed App Store .ipa (automatic signing via App Store Connect API key)"
   lane :build_ipa do
     key = connect_api_key
@@ -68,7 +184,7 @@ platform :ios do
     auth = ["-allowProvisioningUpdates",
             "-authenticationKeyPath #{api_key_path}",
             "-authenticationKeyID #{ENV['APP_STORE_CONNECT_API_KEY_ID']}",
-            "-authenticationKeyIssuerID #{ENV['APP_STORE_CONNECT_ISSUER_ID']}"].join(" ")
+            "-authenticationKeyIssuerID #{ENV['APP_STORE_CONNECT_API_KEY_ISSUER_ID']}"].join(" ")
     build_app(
       project: PROJECT,
       scheme: SCHEME,
@@ -99,67 +215,74 @@ platform :ios do
     )
   end
 
-  desc "Upload build, screenshots and metadata to App Store Connect (submit:true submits for review)"
+  desc "Attach latest existing TestFlight build, upload metadata & screenshots, and optionally submit for App Review"
+  lane :publish_existing_build do |options|
+    submit = options.key?(:submit) ? options[:submit].to_s == "true" : (ENV["SUBMIT_FOR_REVIEW"].to_s != "false")
+    key = connect_api_key
+    tf = find_latest_testflight_build
+    deliver_to_store(key, nil, submit, build_number: tf[:build_number], app_version: tf[:app_version])
+  end
+
+  desc "Upload build (or existing TestFlight build with skip_build:true), screenshots and metadata to App Store Connect"
   lane :release do |options|
     submit = options[:submit].to_s == "true" || ENV["SUBMIT_FOR_REVIEW"].to_s == "true"
-    verify_review_contact! if submit
-    key = build_ipa
-    deliver_to_store(key, lane_context[SharedValues::IPA_OUTPUT_PATH], submit)
+    skip_build = options[:skip_build].to_s == "true" || ENV["SKIP_BUILD"].to_s == "true"
+    if skip_build
+      publish_existing_build(submit: submit)
+    else
+      key = build_ipa
+      deliver_to_store(key, lane_context[SharedValues::IPA_OUTPUT_PATH], submit)
+    end
   end
 
   desc "Upload only screenshots and metadata (no new binary)"
   lane :metadata do |options|
     submit = options[:submit].to_s == "true"
-    verify_review_contact! if submit
     deliver_to_store(connect_api_key, nil, submit)
   end
 
-  def review_information
-    dir = File.join(__dir__, "metadata", "review_information")
-    read = lambda do |file, env|
-      v = ENV[env].to_s.strip
-      v = File.read(File.join(dir, file)).strip if v.empty? && File.exist?(File.join(dir, file))
-      v
+  def deliver_to_store(key, ipa, submit, build_number: nil, app_version: nil)
+    info = resolve_review_information
+    missing_contact = [:first_name, :last_name, :email_address, :phone_number].select { |k| info[k].empty? }
+    can_submit = submit && missing_contact.empty?
+    if submit && !missing_contact.empty?
+      UI.important("App Review contact fields missing (#{missing_contact.join(', ')}). " \
+                   "Uploading metadata, screenshots and attaching TestFlight build first (submit_for_review deferred until contact is provided).")
     end
-    {
-      first_name: read.call("first_name.txt", "REVIEW_FIRST_NAME"),
-      last_name: read.call("last_name.txt", "REVIEW_LAST_NAME"),
-      email_address: read.call("email_address.txt", "REVIEW_EMAIL"),
-      phone_number: read.call("phone_number.txt", "REVIEW_PHONE"),
-      demo_user: "",
-      demo_password: "",
-      notes: read.call("notes.txt", "REVIEW_NOTES")
-    }
-  end
 
-  def verify_review_contact!
-    info = review_information
-    bad = [:first_name, :last_name, :email_address, :phone_number].select do |k|
-      info[k].empty? || info[k].start_with?("FILL_IN")
+    filtered_review_info = info.reject { |k, v| [:first_name, :last_name, :email_address, :phone_number].include?(k) && v.empty? }
+
+    with_sanitized_metadata_dir do |meta_dir|
+      opts = {
+        api_key: key,
+        skip_binary_upload: ipa.nil?,
+        metadata_path: meta_dir,
+        screenshots_path: File.join(__dir__, "screenshots"),
+        app_rating_config_path: File.join(__dir__, "age_rating.json"),
+        app_review_information: filtered_review_info,
+        submission_information: {
+          export_compliance_uses_encryption: false,
+          add_id_info_uses_idfa: false
+        },
+        languages: %w[en-US uk],
+        overwrite_screenshots: true,
+        force: true,
+        precheck_include_in_app_purchases: false,
+        run_precheck_before_submit: false,
+        automatic_release: true,
+        submit_for_review: can_submit,
+        reject_if_possible: false
+      }
+      opts[:ipa] = ipa unless ipa.nil?
+      opts[:build_number] = build_number unless build_number.to_s.empty?
+      opts[:app_version] = app_version unless app_version.to_s.empty?
+      upload_to_app_store(**opts)
     end
-    return if bad.empty?
-    UI.user_error!("App Review contact is not filled in (#{bad.join(', ')}). Edit " \
-                   "mobile/ios_camera/fastlane/metadata/review_information/*.txt or set REVIEW_* secrets.")
-  end
 
-  def deliver_to_store(key, ipa, submit)
-    upload_to_app_store(
-      api_key: key,
-      ipa: ipa,
-      skip_binary_upload: ipa.nil?,
-      metadata_path: File.join(__dir__, "metadata"),
-      screenshots_path: File.join(__dir__, "screenshots"),
-      app_rating_config_path: File.join(__dir__, "age_rating.json"),
-      app_review_information: review_information,
-      submission_information: { export_compliance_uses_encryption: false, add_id_info_uses_idfa: false },
-      languages: %w[en-US uk],
-      overwrite_screenshots: true,
-      force: true,
-      precheck_include_in_app_purchases: false,
-      run_precheck_before_submit: false,
-      automatic_release: false,
-      submit_for_review: submit,
-      reject_if_possible: false
-    )
+    if submit && !missing_contact.empty?
+      UI.user_error!("Metadata, screenshots & TestFlight build #{build_number} were uploaded, " \
+                     "but final submission needs App Review contact (#{missing_contact.join(', ')}). " \
+                     "Add REVIEW_FIRST_NAME / REVIEW_LAST_NAME / REVIEW_EMAIL / REVIEW_PHONE in GitHub Secrets or App Store Connect.")
+    end
   end
 end
