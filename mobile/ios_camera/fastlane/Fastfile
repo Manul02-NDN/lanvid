@@ -63,6 +63,11 @@ platform :ios do
     (ENV["GITHUB_RUN_NUMBER"] || ENV["BUILD_NUMBER"] || Time.now.strftime("%y%m%d%H%M")).to_s
   end
 
+  def fastlane_dir
+    cand = File.expand_path("fastlane", Dir.pwd)
+    File.directory?(cand) ? cand : File.expand_path(__dir__)
+  end
+
   def valid_contact_value?(val)
     s = val.to_s.strip
     !s.empty? && !s.start_with?("FILL_IN")
@@ -109,7 +114,7 @@ platform :ios do
   end
 
   def resolve_review_information
-    dir = File.join(__dir__, "metadata", "review_information")
+    dir = File.join(fastlane_dir, "metadata", "review_information")
     read_local = lambda do |file, env|
       v = ENV[env].to_s.strip
       v = File.read(File.join(dir, file)).strip if v.empty? && File.exist?(File.join(dir, file))
@@ -168,7 +173,7 @@ platform :ios do
   end
 
   def with_sanitized_metadata_dir
-    src = File.join(__dir__, "metadata")
+    src = File.join(fastlane_dir, "metadata")
     Dir.mktmpdir("lanvid_deliver_meta") do |tmp|
       dst = File.join(tmp, "metadata")
       FileUtils.cp_r(src, dst)
@@ -210,7 +215,7 @@ platform :ios do
   desc "Build and upload to TestFlight"
   lane :beta do
     key = build_ipa
-    notes = File.join(__dir__, "metadata", "en-US", "release_notes.txt")
+    notes = File.join(fastlane_dir, "metadata", "en-US", "release_notes.txt")
     upload_to_testflight(
       api_key: key,
       ipa: lane_context[SharedValues::IPA_OUTPUT_PATH],
@@ -268,8 +273,8 @@ platform :ios do
         api_key: key,
         skip_binary_upload: ipa.nil?,
         metadata_path: meta_dir,
-        screenshots_path: File.join(__dir__, "screenshots"),
-        app_rating_config_path: File.join(__dir__, "age_rating.json"),
+        screenshots_path: File.join(fastlane_dir, "screenshots"),
+        app_rating_config_path: File.join(fastlane_dir, "age_rating.json"),
         app_review_information: filtered_review_info,
         submission_information: {
           export_compliance_uses_encryption: false,
