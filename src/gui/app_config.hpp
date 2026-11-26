@@ -112,6 +112,11 @@ struct AppConfig {
     int iso_slot_mask = 0xFFFF;           // slots included in REC ALL
     int vcam_count = 8;                   // "LanVid Cam 1..N" exposed to the OS (0..8) + Program Out
     bool vcam_placeholder = true;         // lavender "No Signal / Standby" card when a camera is gone
+    bool video_hw_decode = true;          // hardware H.264 / H.265 decoding (VideoToolbox / DXVA / VA-API)
+    int video_audio_route = 0;            // camera audio: 0 = LanVid Audio, 1 = system output, 2 = off
+    int intercom_mic_index = -1;          // director microphone (-1 = system default)
+    int intercom_out_index = -1;          // director headphones (-1 = system default)
+    float intercom_ifb_volume = 1.0f;     // IFB (director -> camera) gain
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\<filename> or ~/.config/lanvid/<filename>).

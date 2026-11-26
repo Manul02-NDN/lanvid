@@ -11,6 +11,7 @@
     - Socket buffer & MMCSS audio priority tuning + EEE/Interrupt Moderation check + High Performance power plan
     - LanVidGridDSP background service / auto-restart scheduled task registration
     - Virtual 64ch ASIO driver (LanVidASIO.dll) registration
+    - DirectShow virtual cameras (LanVidVCam.dll: LanVid Cam 1..8 + LanVid Program Out) unregistration on -Uninstall
     - Npcap Layer 2 driver detection, OEM silent / interactive installation & `sc start npcap`
     - Automatic OBS Studio detection (Registry + Program Files) & obs-lanvid.dll + locales deployment
     - Clean full uninstallation (-Uninstall)
@@ -89,13 +90,15 @@ if ($Uninstall) {
         Stop-Process -Name $name -Force -ErrorAction SilentlyContinue
     }
 
-    # 3. Unregister 64-bit LanVidASIO.dll
-    $asioDll = Join-Path $InstallDir "LanVidASIO.dll"
-    if (Test-Path $asioDll) {
-        try {
-            Start-Process -FilePath "$env:SystemRoot\System32\regsvr32.exe" `
-                -ArgumentList "/u", "/s", "`"$asioDll`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
-        } catch {}
+    # 3. Unregister 64-bit LanVidASIO.dll and the DirectShow virtual cameras (LanVidVCam.dll)
+    foreach ($dllName in @("LanVidASIO.dll", "LanVidVCam.dll")) {
+        $regDll = Join-Path $InstallDir $dllName
+        if (Test-Path $regDll) {
+            try {
+                Start-Process -FilePath "$env:SystemRoot\System32\regsvr32.exe" `
+                    -ArgumentList "/u", "/s", "`"$regDll`"" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+            } catch {}
+        }
     }
 
     # 4. Remove all LanVid Windows Defender Firewall rules

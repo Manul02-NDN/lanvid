@@ -31,6 +31,7 @@ enum class PacketType : uint8_t {
     kTallyState = 0xB,     // Studio <-> Camera Tally (Standby / Preview / Program ON AIR) + REC trigger
     kIntercomAudio = 0xC,  // Isolated full-duplex Director <-> Camera Operator voice talkback / IFB
     kMonitorAudioFlow = 0xD, // Dante-style compact multi-channel monitor UDP flow (up to 16 ch in 1 packet)
+    kCameraControl = 0xE,    // Studio -> Camera remote control (lens, focus, quality preset) on the Tally port
 };
 
 enum class VideoCodecId : uint8_t {
@@ -473,6 +474,25 @@ struct TallyStatePayload {
 
 void write_tally_state(uint8_t* out, const TallyStatePayload& t);
 bool parse_tally_state(const uint8_t* in, size_t len, TallyStatePayload& t);
+
+// ---------------------------------------------------------------------------------------------
+// Camera Remote Control (PacketType::kCameraControl = 0xE, 16 bytes), Studio -> Camera.
+// ---------------------------------------------------------------------------------------------
+enum CameraLens : uint8_t { kLensWide = 0, kLensUltraWide = 1, kLensTele = 2, kLensFront = 3 };
+enum CameraQualityPreset : uint8_t { kQuality360p = 0, kQuality720p = 1, kQuality1080p = 2, kQuality4K = 3 };
+constexpr size_t kCameraControlSize = 16;
+struct CameraControlPayload {
+    uint32_t camera_id = 0;
+    uint32_t revision = 0;        // monotonic per studio (duplicates / reordering are ignored)
+    uint8_t lens = kLensWide;
+    uint8_t focus_auto = 1;       // 1 = continuous autofocus, 0 = manual `focus_pos`
+    uint16_t focus_pos = 0;       // 0 (near) .. 1000 (infinity)
+    uint8_t quality = kQuality1080p;
+    uint8_t flags = 0;            // bit0 = torch, bit1 = lock exposure
+    uint16_t zoom_x100 = 100;     // 1.00x .. 10.00x
+};
+void write_camera_control(uint8_t* out, const CameraControlPayload& c);
+bool parse_camera_control(const uint8_t* in, size_t len, CameraControlPayload& c);
 
 // ---------------------------------------------------------------------------------------------
 // Duplex Intercom Voice (PacketType::kIntercomAudio = 0xC, 16-byte header + Opus/PCM16 payload).

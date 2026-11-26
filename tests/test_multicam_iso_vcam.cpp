@@ -347,3 +347,74 @@ TEST(video_config_slots_iso_vcam_persist) {
     std::error_code ec;
     fs::remove_all(dir, ec);
 }
+
+// Remote phone control from LanVid Video (lens / focus / quality preset) over the Tally channel:
+// packet round-trip, Studio -> Camera delivery, and de-duplication of the 3x redundant sends.
+TEST(camera_remote_control_lens_focus_quality_roundtrip) {
+    lv::CameraControlPayload in;
+    in.camera_id = 7;
+    in.revision = 42;
+    in.lens = lv::kLensTele;
+    in.focus_auto = 0;
+    in.focus_pos = 733;
+    in.quality = lv::kQuality4K;
+    in.zoom_x100 = 250;
+    uint8_t wire[lv::kCameraControlSize] = {};
+    lv::write_camera_control(wire, in);
+    lv::CameraControlPayload out;
+    REQUIRE(lv::parse_camera_control(wire, sizeof(wire), out));
+    CHECK(out.camera_id == 7 && out.revision == 42 && out.lens == lv::kLensTele && out.focus_auto == 0);
+    CHECK(out.focus_pos == 733 && out.quality == lv::kQuality4K && out.zoom_x100 == 250);
+    CHECK(!lv::parse_camera_control(wire, sizeof(wire) - 1, out));
+
+    lv::TallyIntercomEngine studio, camera;
+    REQUIRE(studio.start_studio(0, "127.0.0.1"));
+    std::atomic<int> calls{0};
+    std::atomic<int> last_lens{-1}, last_quality{-1}, last_focus{-1};
+    camera.camera_set_control_callback([&](const lv::CameraControlPayload& c) {
+        ++calls;
+        last_lens = c.lens;
+        last_quality = c.quality;
+        last_focus = c.focus_pos;
+    });
+    REQUIRE(camera.start_camera("127.0.0.1", studio.bound_port(), 3, "CAM 3"));
+    for (int i = 0; i < 100 && studio.studio_cameras().empty(); ++i) {
+        camera.poll();
+        studio.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(!studio.studio_cameras().empty());
+
+    lv::CameraControlPayload ctl;
+    ctl.lens = lv::kLensUltraWide;
+    ctl.quality = lv::kQuality360p;
+    ctl.focus_auto = 0;
+    ctl.focus_pos = 120;
+    REQUIRE(studio.studio_set_camera_control(3, ctl));
+    for (int i = 0; i < 60 && calls.load() == 0; ++i) {
+        studio.poll();
+        camera.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    for (int i = 0; i < 20; ++i) {  // let the redundant copies arrive too
+        studio.poll();
+        camera.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    CHECK(calls.load() == 1);  // 3x redundant packets -> one callback
+    CHECK(last_lens.load() == lv::kLensUltraWide && last_quality.load() == lv::kQuality360p && last_focus.load() == 120);
+    CHECK(camera.camera_last_control().lens == lv::kLensUltraWide);
+
+    ctl.lens = lv::kLensFront;
+    ctl.quality = lv::kQuality1080p;
+    REQUIRE(studio.studio_set_camera_control(3, ctl));
+    for (int i = 0; i < 60 && calls.load() < 2; ++i) {
+        studio.poll();
+        camera.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(calls.load() == 2 && last_lens.load() == lv::kLensFront && last_quality.load() == lv::kQuality1080p);
+    CHECK(!studio.studio_set_camera_control(99, ctl));  // unknown camera
+    camera.stop();
+    studio.stop();
+}

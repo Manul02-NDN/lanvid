@@ -2080,6 +2080,38 @@ void lv_camera_set_tally_callback(LvTallyIntercomHandle* handle, LV_TallyCallbac
     });
 }
 
+int lv_tally_intercom_set_camera_control(LvTallyIntercomHandle* studio, const LV_CameraControl* control) {
+    if (!studio || !studio->eng || !control) return 0;
+    lv::CameraControlPayload c;
+    c.lens = control->lens;
+    c.focus_auto = control->focus_auto;
+    c.focus_pos = control->focus_pos;
+    c.quality = control->quality;
+    c.flags = control->flags;
+    c.zoom_x100 = control->zoom_x100;
+    return studio->eng->studio_set_camera_control(control->camera_id, c) ? 1 : 0;
+}
+
+void lv_camera_set_control_callback(LvTallyIntercomHandle* handle, LV_CameraControlCallback cb, void* user_data) {
+    if (!handle || !handle->eng) return;
+    if (!cb) {
+        handle->eng->camera_set_control_callback(nullptr);
+        return;
+    }
+    handle->eng->camera_set_control_callback([cb, user_data](const lv::CameraControlPayload& c) {
+        LV_CameraControl out{};
+        out.camera_id = c.camera_id;
+        out.revision = c.revision;
+        out.lens = c.lens;
+        out.focus_auto = c.focus_auto;
+        out.focus_pos = c.focus_pos;
+        out.quality = c.quality;
+        out.flags = c.flags;
+        out.zoom_x100 = c.zoom_x100;
+        cb(&out, user_data);
+    });
+}
+
 void lv_tally_intercom_update_camera_telemetry(LvTallyIntercomHandle* handle, uint8_t battery_pct,
                                                int8_t temp_c) {
     if (handle && handle->eng) handle->eng->camera_update_telemetry(battery_pct, temp_c);

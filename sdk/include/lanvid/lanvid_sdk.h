@@ -336,6 +336,21 @@ LV_API void lv_camera_set_tally_callback(LvTallyIntercomHandle* handle, LV_Tally
 LV_API void lv_tally_intercom_update_camera_telemetry(LvTallyIntercomHandle* handle, uint8_t battery_pct,
                                                       int8_t temp_c);
 
+/* Remote camera control (LanVid Video -> phone): lens, focus, quality preset (additive). */
+typedef struct LV_CameraControl {
+    uint32_t camera_id;
+    uint32_t revision;      /* monotonic; duplicates of the 3x redundant send are filtered */
+    uint8_t lens;           /* 0 = Wide, 1 = Ultra Wide, 2 = Tele, 3 = Front */
+    uint8_t focus_auto;     /* 1 = continuous auto focus, 0 = manual focus_pos */
+    uint16_t focus_pos;     /* 0 (near) .. 1000 (infinity) */
+    uint8_t quality;        /* 0 = 360p, 1 = 720p, 2 = 1080p, 3 = 4K */
+    uint8_t flags;
+    uint16_t zoom_x100;     /* 100 = 1.0x */
+} LV_CameraControl;
+typedef void (*LV_CameraControlCallback)(const LV_CameraControl* control, void* user_data);
+LV_API int lv_tally_intercom_set_camera_control(LvTallyIntercomHandle* studio, const LV_CameraControl* control);
+LV_API void lv_camera_set_control_callback(LvTallyIntercomHandle* handle, LV_CameraControlCallback cb, void* user_data);
+
 /* Duplex Intercom voice I/O (48 kHz mono float32, isolated from program audio) */
 LV_API int lv_intercom_push_mic_pcm(LvTallyIntercomHandle* handle, const float* samples, int frames);
 LV_API int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames);

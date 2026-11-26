@@ -289,11 +289,24 @@ fi
 # 7. Install binaries, shared library, icon, and .desktop launcher
 log "Встановлення файлів у $PREFIX..."
 $SUDO install -d "$PREFIX/bin" "$PREFIX/lib" /usr/share/applications /usr/share/icons/hicolor/scalable/apps
-for b in lanvid_studio lanvid_app sender receiver lanvid-audio-bridge; do
+for b in lanvid_studio lanvid_app sender receiver lanvid-audio-bridge lanvid-vcam-bridge; do
   if [ -f "$BIN_SRC/$b" ]; then
     $SUDO install -m 0755 "$BIN_SRC/$b" "$PREFIX/bin/$b"
   fi
 done
+# Virtual cameras "LanVid Cam 1..8" + "LanVid Program Out" (v4l2loopback /dev/video10..18)
+if [ -d "$SCRIPT_DIR/vcam" ] && [ -f "$BIN_SRC/lanvid-vcam-bridge" ]; then
+  $SUDO install -d /etc/modprobe.d /etc/modules-load.d /usr/lib/systemd/user
+  $SUDO install -m 0644 "$SCRIPT_DIR/vcam/lanvid-v4l2loopback.conf" /etc/modprobe.d/lanvid-v4l2loopback.conf
+  $SUDO install -m 0644 "$SCRIPT_DIR/vcam/lanvid-v4l2loopback.load.conf" /etc/modules-load.d/lanvid-v4l2loopback.conf
+  $SUDO install -m 0644 "$SCRIPT_DIR/vcam/lanvid-vcam-bridge.service" /usr/lib/systemd/user/lanvid-vcam-bridge.service
+  if modinfo v4l2loopback >/dev/null 2>&1; then
+    $SUDO modprobe v4l2loopback >/dev/null 2>&1 || true
+    log "Віртуальні камери LanVid Cam 1..8 + Program Out: v4l2loopback налаштовано (systemctl --user enable --now lanvid-vcam-bridge)."
+  else
+    log "Віртуальні камери: встановіть v4l2loopback-dkms (sudo apt install v4l2loopback-dkms) і перезапустіть інсталятор."
+  fi
+fi
 if [ "$INSTALL_AUDIO_STUDIO" -eq 1 ] && [ -f "$BIN_SRC/lanvid_audio_studio" ]; then
   $SUDO install -m 0755 "$BIN_SRC/lanvid_audio_studio" "$PREFIX/bin/lanvid_audio_studio"
   [ -f "$SCRIPT_DIR/lanvid-audio.desktop" ] && $SUDO install -m 0644 "$SCRIPT_DIR/lanvid-audio.desktop" /usr/share/applications/lanvid-audio.desktop

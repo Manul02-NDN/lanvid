@@ -7,6 +7,8 @@
 #   - Systemd unit /etc/systemd/system/lanvid-dsp.service (systemctl daemon-reload && systemctl enable --now)
 #   - Auto-deployed OBS Studio plugin (/usr/lib/x86_64-linux-gnu/obs-plugins/ & ~/.config/obs-studio/plugins/obs-lanvid/bin/64bit/)
 #   - UFW / firewalld rules for UDP 5000-5035, 5099 & 5353 (mDNS)
+#   - Virtual cameras: lanvid-vcam-bridge + v4l2loopback config ("LanVid Cam 1..8", "LanVid Program Out",
+#     /dev/video10..18) + systemd --user unit lanvid-vcam-bridge.service
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -44,6 +46,27 @@ LimitMEMLOCK=infinity
 WantedBy=multi-user.target
 UNITEOF
 
+# Virtual cameras: v4l2loopback module options + bridge user service
+VCAM_LABELS="LanVid Cam 1,LanVid Cam 2,LanVid Cam 3,LanVid Cam 4,LanVid Cam 5,LanVid Cam 6,LanVid Cam 7,LanVid Cam 8,LanVid Program Out"
+VCAM_MODPROBE_TMP="$BUILD/lanvid-v4l2loopback.conf"
+printf 'options v4l2loopback devices=9 video_nr=10,11,12,13,14,15,16,17,18 exclusive_caps=1 card_label="%s"\n' "$VCAM_LABELS" > "$VCAM_MODPROBE_TMP"
+VCAM_MODLOAD_TMP="$BUILD/lanvid-v4l2loopback.load.conf"
+echo "v4l2loopback" > "$VCAM_MODLOAD_TMP"
+VCAM_UNIT_TMP="$BUILD/lanvid-vcam-bridge.service"
+cat > "$VCAM_UNIT_TMP" <<'UNITEOF'
+[Unit]
+Description=LanVid virtual cameras (LanVidVideoBus_v1 -> v4l2loopback LanVid Cam 1..8 + Program Out)
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lanvid-vcam-bridge --width 1920 --height 1080 --fps 30
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNITEOF
+
 # 1. Build .deb package
 DEB_ROOT="$BUILD/deb_pkg"
 rm -rf "$DEB_ROOT"
@@ -51,6 +74,9 @@ install -d "$DEB_ROOT/DEBIAN" \
            "$DEB_ROOT/usr/local/bin" \
            "$DEB_ROOT/usr/local/lib" \
            "$DEB_ROOT/etc/systemd/system" \
+           "$DEB_ROOT/etc/modprobe.d" \
+           "$DEB_ROOT/etc/modules-load.d" \
+           "$DEB_ROOT/usr/lib/systemd/user" \
            "$DEB_ROOT/usr/share/applications" \
            "$DEB_ROOT/usr/share/icons/hicolor/scalable/apps" \
            "$DEB_ROOT/usr/share/obs/obs-plugins/obs-lanvid/locale"
@@ -63,6 +89,10 @@ install -m 0755 "$BUILD/lanvid_dsp_server"   "$DEB_ROOT/usr/local/bin/lanvid_dsp
 install -m 0755 "$BUILD/sender"              "$DEB_ROOT/usr/local/bin/sender"
 install -m 0755 "$BUILD/receiver"            "$DEB_ROOT/usr/local/bin/receiver"
 install -m 0755 "$BUILD/lanvid-audio-bridge" "$DEB_ROOT/usr/local/bin/lanvid-audio-bridge"
+install -m 0755 "$BUILD/lanvid-vcam-bridge"  "$DEB_ROOT/usr/local/bin/lanvid-vcam-bridge"
+install -m 0644 "$VCAM_MODPROBE_TMP"         "$DEB_ROOT/etc/modprobe.d/lanvid-v4l2loopback.conf"
+install -m 0644 "$VCAM_MODLOAD_TMP"          "$DEB_ROOT/etc/modules-load.d/lanvid-v4l2loopback.conf"
+install -m 0644 "$VCAM_UNIT_TMP"             "$DEB_ROOT/usr/lib/systemd/user/lanvid-vcam-bridge.service"
 install -m 0755 "$BUILD/liblanvid_core.so"   "$DEB_ROOT/usr/local/lib/liblanvid_core.so"
 install -m 0644 "$DSP_UNIT_TMP"              "$DEB_ROOT/etc/systemd/system/lanvid-dsp.service"
 install -m 0644 "$OUT/lanvid.desktop"        "$DEB_ROOT/usr/share/applications/lanvid.desktop"
@@ -85,7 +115,7 @@ Section: video
 Priority: optional
 Architecture: $ARCH
 Depends: libsdl2-2.0-0, libgl1, libx11-6, libxrandr2, libstdc++6
-Recommends: libcap2-bin
+Recommends: libcap2-bin, v4l2loopback-dkms
 Maintainer: LanVid Project <dev@lanvid.local>
 Description: Ultra-Low Latency LAN Video, 64ch Classic AoIP & 256ch Grid Layer 2 Audio Studio
  Intra-only AVX2/NEON slice codec, LanVid Grid Layer 2 (256ch + DSP Server),
@@ -129,7 +159,20 @@ if [ -n "$TARGET_USER" ] && [ "$TARGET_USER" != "root" ]; then
   fi
 fi
 
-# 5. Open UFW / firewalld ports for LanVid Classic UDP (5000-5035, 5099, 5353 mDNS)
+# 5. Virtual cameras: load v4l2loopback with the LanVid labels (/dev/video10..18) and enable the bridge
+if modinfo v4l2loopback >/dev/null 2>&1; then
+  if ! grep -qs "LanVid Cam 1" /sys/devices/virtual/video4linux/*/name; then
+    modprobe -r v4l2loopback >/dev/null 2>&1 || true
+    modprobe v4l2loopback >/dev/null 2>&1 || true
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --global enable lanvid-vcam-bridge.service >/dev/null 2>&1 || true
+  fi
+else
+  echo "LanVid: install v4l2loopback-dkms to get the virtual cameras LanVid Cam 1..8 (apt install v4l2loopback-dkms)."
+fi
+
+# 6. Open UFW / firewalld ports for LanVid Classic UDP (5000-5035, 5099, 5353 mDNS)
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -qi "Status: active"; then
   ufw allow 5000:5035/udp >/dev/null 2>&1 || true
   ufw allow 5099/udp >/dev/null 2>&1 || true
@@ -182,7 +225,11 @@ fi
 STAGE="$BUILD/run_stage"
 rm -rf "$STAGE"
 install -d "$STAGE/bin" "$STAGE/lib" "$STAGE/systemd" "$STAGE/obs-lanvid/locale"
-cp "$BUILD/lanvid_app" "$BUILD/lanvid_dsp_server" "$BUILD/sender" "$BUILD/receiver" "$BUILD/lanvid-audio-bridge" "$STAGE/bin/"
+cp "$BUILD/lanvid_app" "$BUILD/lanvid_dsp_server" "$BUILD/sender" "$BUILD/receiver" "$BUILD/lanvid-audio-bridge" "$BUILD/lanvid-vcam-bridge" "$STAGE/bin/"
+install -d "$STAGE/vcam"
+cp "$VCAM_MODPROBE_TMP" "$STAGE/vcam/lanvid-v4l2loopback.conf"
+cp "$VCAM_MODLOAD_TMP" "$STAGE/vcam/lanvid-v4l2loopback.load.conf"
+cp "$VCAM_UNIT_TMP" "$STAGE/vcam/lanvid-vcam-bridge.service"
 cp "$BUILD/lanvid_app" "$STAGE/bin/lanvid_studio"
 cp "$BUILD/liblanvid_core.so" "$STAGE/lib/"
 cp "$DSP_UNIT_TMP" "$STAGE/systemd/lanvid-dsp.service"

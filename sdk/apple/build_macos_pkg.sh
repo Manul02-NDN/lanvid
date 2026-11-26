@@ -12,6 +12,9 @@
 #       * com.lanvid.pkg.chmodbpf   (optional): ChmodBPF helper + com.lanvid.chmod-bpf.plist (access_bpf -> /dev/bpf*)
 #       * com.lanvid.pkg.obsplugin  (optional): obs-lanvid.plugin -> ~/Library/Application Support/obs-studio/plugins/
 #       * com.lanvid.audio.hal      (optional): LanVidAudio.driver (64ch CoreAudio HAL)
+#       * com.lanvid.pkg.vcam       (optional, when signed): LanVid Virtual Camera.app -> /Applications
+#         (CoreMediaIO Camera Extension "LanVid Cam 1..8" + "LanVid Program Out"; built by
+#         drivers/macos_vcam/build_vcam.sh, needs an Apple Development / Developer ID team in Xcode)
 #       * com.lanvid.sdk.swift / com.lanvid.sdk.extras (optional)
 
 set -euo pipefail
@@ -360,6 +363,33 @@ exit 0
 HALEOF
 chmod 0755 "$HAL_SCRIPTS/postinstall"
 
+# Virtual cameras (CoreMediaIO Camera Extension). Legacy DAL plug-ins are not loaded since macOS 14, so the
+# cameras ship as a system extension inside "LanVid Virtual Camera.app"; it must be signed by a team.
+VCAM_APP=""
+if [ "${LANVID_SKIP_VCAM:-0}" != "1" ] && command -v xcodegen >/dev/null 2>&1; then
+  if "$ROOT/drivers/macos_vcam/build_vcam.sh" && [ -d "$DIST_APPLE/LanVid Virtual Camera.app" ]; then
+    VCAM_APP="$DIST_APPLE/LanVid Virtual Camera.app"
+  else
+    echo "[WARN] LanVid Virtual Camera.app not built (sign in to Xcode > Settings > Accounts); pkg without virtual cameras"
+  fi
+fi
+if [ -n "$VCAM_APP" ]; then
+  mkdir -p "$BUILD_DIR/pkgroot-vcam/Applications"
+  cp -R "$VCAM_APP" "$BUILD_DIR/pkgroot-vcam/Applications/"
+  VCAM_SCRIPTS="$BUILD_DIR/scripts-vcam"
+  mkdir -p "$VCAM_SCRIPTS"
+  cat > "$VCAM_SCRIPTS/postinstall" <<'VCAMEOF'
+#!/bin/bash
+# Ask macOS (in the logged-in user's session) to activate the camera extension.
+CU="$(stat -f%Su /dev/console 2>/dev/null || true)"
+if [ -n "$CU" ] && [ "$CU" != "root" ]; then
+  launchctl asuser "$(id -u "$CU")" sudo -u "$CU" /usr/bin/open -a "/Applications/LanVid Virtual Camera.app" --args --install --quit-when-done || true
+fi
+exit 0
+VCAMEOF
+  chmod 0755 "$VCAM_SCRIPTS/postinstall"
+fi
+
 SCRIPTS_STAGE="$BUILD_DIR/scripts"
 mkdir -p "$SCRIPTS_STAGE"
 cp "$INST_DIR/scripts/preinstall" "$INST_DIR/scripts/postinstall" "$SCRIPTS_STAGE/"
@@ -390,6 +420,22 @@ pkgbuild --root "$BUILD_DIR/pkgroot-obsplugin" --identifier "com.lanvid.pkg.obsp
 pkgbuild --root "$BUILD_DIR/pkgroot-hal" --identifier "com.lanvid.audio.hal" --version "$SDK_VERSION" \
   --scripts "$HAL_SCRIPTS" --install-location "/" "$COMP_DIR/lanvid-hal.pkg"
 
+DIST_XML="$INST_DIR/distribution.xml"
+if [ -n "$VCAM_APP" ]; then
+  pkgbuild --root "$BUILD_DIR/pkgroot-vcam" --identifier "com.lanvid.pkg.vcam" --version "$SDK_VERSION" \
+    --scripts "$VCAM_SCRIPTS" --install-location "/" "$COMP_DIR/lanvid-vcam.pkg"
+  DIST_XML="$BUILD_DIR/distribution.xml"
+  sed -e 's|        <line choice="choice_hal" />|        <line choice="choice_hal" />\
+        <line choice="choice_vcam" />|' \
+      -e 's|    <choice id="choice_swift"|    <choice id="choice_vcam" title="Virtual Cameras «LanVid Cam 1-8» + «LanVid Program Out»" description="CoreMediaIO Camera Extension: every phone camera from LanVid Video appears in FaceTime, Zoom, Teams, OBS and browsers. macOS asks once to allow it in System Settings." start_selected="true" enabled="true">\
+        <pkg-ref id="com.lanvid.pkg.vcam" />\
+    </choice>\
+\
+    <choice id="choice_swift"|' \
+      -e 's|    <pkg-ref id="com.lanvid.sdk.swift" version|    <pkg-ref id="com.lanvid.pkg.vcam" version="'"$SDK_VERSION"'" onConclusion="none">lanvid-vcam.pkg</pkg-ref>\
+    <pkg-ref id="com.lanvid.sdk.swift" version|' "$INST_DIR/distribution.xml" > "$DIST_XML"
+fi
+
 pkgbuild --root "$BUILD_DIR/pkgroot-swift" --identifier "com.lanvid.sdk.swift" --version "$SDK_VERSION" \
   --install-location "/" "$COMP_DIR/lanvid-swift.pkg"
 
@@ -402,7 +448,7 @@ if [ -z "$SIGN_ID" ] && command -v security >/dev/null 2>&1; then
 fi
 
 PROD_ARGS=(
-  --distribution "$INST_DIR/distribution.xml"
+  --distribution "$DIST_XML"
   --resources "$INST_DIR/resources"
   --package-path "$COMP_DIR"
   --version "$SDK_VERSION"

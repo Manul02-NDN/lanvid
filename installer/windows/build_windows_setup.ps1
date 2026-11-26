@@ -18,7 +18,8 @@ $outExe = Join-Path $winDir "LanVid_Setup.exe"
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
 
-# 1. Stage Core Studio + Split LanVid Audio / LanVid Video + Grid L2 DSP Server + Virtual ASIO + Preflight
+# 1. Stage Core Studio + Split LanVid Audio / LanVid Video + Grid L2 DSP Server + Virtual ASIO
+#    + DirectShow virtual cameras (LanVid Cam 1..8 + Program Out) + Preflight
 $files = @(
     (Join-Path $buildDir "lanvid_app.exe"),
     (Join-Path $buildDir "lanvid_audio_studio.exe"),
@@ -28,6 +29,8 @@ $files = @(
     (Join-Path $buildDir "receiver.exe"),
     (Join-Path $buildDir "lanvid_dsp_server.exe"),
     (Join-Path $buildDir "LanVidASIO.dll"),
+    (Join-Path $buildDir "LanVidVCam.dll"),
+    (Join-Path $buildDir "lanvid_vcam_probe.exe"),
     (Join-Path $winDir "preflight.ps1")
 )
 foreach ($f in $files) {
@@ -97,7 +100,7 @@ Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stageDir, $zipPath, (
 Copy-Item -Force $outExe $outExeVersioned
 $item = Get-Item $outExeVersioned
 Write-Host ("Built {0} and {1} ({2:N0} bytes)" -f $item.FullName, $outExe, $item.Length)
-Write-Host "  CLI modes: /S (Auto silent) | /COMPONENTS=core,dsp_server,virtual_audio,grid_l2_npcap,obs_plugin,firewall,high_perf_power | --custom | --check-only"
+Write-Host "  CLI modes: /S (Auto silent) | /COMPONENTS=core,dsp_server,virtual_audio,virtual_cams,grid_l2_npcap,obs_plugin,firewall,high_perf_power | --custom | --check-only"
 
 # 5. Optional Inno Setup 6 compilation of lanvid.iss
 if ($BuildInno) {

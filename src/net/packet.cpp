@@ -576,6 +576,30 @@ void write_tally_state(uint8_t* out, const TallyStatePayload& t) {
     out[39] = '\0';
 }
 
+void write_camera_control(uint8_t* out, const CameraControlPayload& c) {
+    store_le32(out + 0, c.camera_id);
+    store_le32(out + 4, c.revision);
+    out[8] = c.lens;
+    out[9] = c.focus_auto;
+    store_le16(out + 10, c.focus_pos);
+    out[12] = c.quality;
+    out[13] = c.flags;
+    store_le16(out + 14, c.zoom_x100);
+}
+
+bool parse_camera_control(const uint8_t* in, size_t len, CameraControlPayload& c) {
+    if (!in || len < kCameraControlSize) return false;
+    c.camera_id = load_le32(in + 0);
+    c.revision = load_le32(in + 4);
+    c.lens = in[8];
+    c.focus_auto = in[9];
+    c.focus_pos = load_le16(in + 10);
+    c.quality = in[12];
+    c.flags = in[13];
+    c.zoom_x100 = load_le16(in + 14);
+    return c.lens <= kLensFront && c.quality <= kQuality4K && c.focus_pos <= 1000;
+}
+
 bool parse_tally_state(const uint8_t* in, size_t len, TallyStatePayload& t) {
     if (len < kTallyStateSize) return false;
     t = TallyStatePayload{};

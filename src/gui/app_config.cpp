@@ -407,6 +407,13 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
     read_int(j, "vcam_count", cfg.vcam_count);
     cfg.vcam_count = std::clamp(cfg.vcam_count, 0, 8);
     read_bool(j, "vcam_placeholder", cfg.vcam_placeholder);
+    read_bool(j, "video_hw_decode", cfg.video_hw_decode);
+    read_int(j, "video_audio_route", cfg.video_audio_route);
+    cfg.video_audio_route = std::clamp(cfg.video_audio_route, 0, 2);
+    read_int(j, "intercom_mic_index", cfg.intercom_mic_index);
+    read_int(j, "intercom_out_index", cfg.intercom_out_index);
+    read_flt(j, "intercom_ifb_volume", cfg.intercom_ifb_volume);
+    cfg.intercom_ifb_volume = std::clamp(cfg.intercom_ifb_volume, 0.0f, 2.0f);
     read_bool(j, "tally_dscp_ef", cfg.tally_dscp_ef);
     return true;
 }
@@ -506,7 +513,12 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
         << "  \"iso_record_program\": " << (cfg.iso_record_program ? "true" : "false") << ",\n"
         << "  \"iso_slot_mask\": " << cfg.iso_slot_mask << ",\n"
         << "  \"vcam_count\": " << cfg.vcam_count << ",\n"
-        << "  \"vcam_placeholder\": " << (cfg.vcam_placeholder ? "true" : "false") << "\n"
+        << "  \"vcam_placeholder\": " << (cfg.vcam_placeholder ? "true" : "false") << ",\n"
+        << "  \"video_hw_decode\": " << (cfg.video_hw_decode ? "true" : "false") << ",\n"
+        << "  \"video_audio_route\": " << cfg.video_audio_route << ",\n"
+        << "  \"intercom_mic_index\": " << cfg.intercom_mic_index << ",\n"
+        << "  \"intercom_out_index\": " << cfg.intercom_out_index << ",\n"
+        << "  \"intercom_ifb_volume\": " << cfg.intercom_ifb_volume << "\n"
         << "}\n";
     return out.good();
 }

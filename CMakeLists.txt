@@ -65,6 +65,12 @@ option(LANVID_BUILD_GUI     "Build LanVid Studio Desktop GUI (Dear ImGui)" ON)
 option(LANVID_BUILD_CLI     "Build CLI sender/receiver executables" ON)
 option(LANVID_BUILD_TESTS   "Build unit tests and benchmark" ON)
 option(LANVID_BUILD_DRIVERS "Build OS virtual audio devices (ASIO DLL / CoreAudio HAL / JACK bridge)" ON)
+# macOS: LanVidVideoBus_v1 shared memory must live inside the App Group of the sandboxed CoreMediaIO
+# Camera Extension (drivers/macos_vcam), so the host publishes to "<group>/vbus1" (POSIX name <= 31 chars).
+set(LANVID_MACOS_APP_GROUP "9SN7V4SC2S.lanvid" CACHE STRING "App Group of the LanVid macOS Camera Extension (<TEAM_ID>.lanvid)")
+if(APPLE AND NOT IOS)
+  add_compile_definitions(LANVID_VIDEO_BUS_NAME="${LANVID_MACOS_APP_GROUP}/vbus1")
+endif()
 option(BUILD_OBS_PLUGIN     "Build obs-lanvid plugin for OBS Studio" ON)
 
 set(LV_IS_X86 FALSE)
@@ -388,6 +394,7 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
       src/gui/studio_common.cpp
       src/gui/studio_host_win32.cpp
       src/gui/video_studio_ui.cpp
+      src/gui/qr_code.cpp
       ${LV_IMGUI_CORE}
       ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
       ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
@@ -431,6 +438,7 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
         src/gui/studio_common.cpp
         src/gui/studio_host_sdl2.cpp
         src/gui/video_studio_ui.cpp
+        src/gui/qr_code.cpp
         ${LV_IMGUI_CORE}
         ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
         ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
@@ -511,6 +519,23 @@ if(LANVID_BUILD_DRIVERS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS
     # Static CRT: the DLL is loaded into arbitrary DAW processes.
     set_target_properties(LanVidASIO PROPERTIES OUTPUT_NAME LanVidASIO
       MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+    # DirectShow virtual cameras "LanVid Cam 1..8" + "LanVid Program Out" (LanVidVideoBus_v1 reader).
+    # Self-contained (no lanvid_core): loaded into OBS / Zoom / Teams / browsers.
+    add_library(LanVidVCam SHARED
+      drivers/windows_vcam/lanvid_vcam.cpp
+      drivers/windows_vcam/lanvid_vcam.def
+      src/video/video_bus.cpp)
+    target_include_directories(LanVidVCam PRIVATE src drivers/windows_vcam)
+    target_link_libraries(LanVidVCam PRIVATE strmiids ole32 oleaut32 advapi32 winmm uuid)
+    set_target_properties(LanVidVCam PROPERTIES OUTPUT_NAME LanVidVCam
+      MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    # End-to-end DirectShow client check (enumerate, connect, validate pixels / formats / placeholder).
+    add_executable(lanvid_vcam_probe
+      drivers/windows_vcam/vcam_probe.cpp
+      src/video/video_bus.cpp)
+    target_include_directories(lanvid_vcam_probe PRIVATE src)
+    target_link_libraries(lanvid_vcam_probe PRIVATE strmiids ole32 oleaut32 uuid)
   else()
     add_executable(lanvid-audio-bridge
       drivers/linux/jack_pw/lanvid_audio_bridge.cpp
@@ -520,6 +545,16 @@ if(LANVID_BUILD_DRIVERS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS
     find_library(LV_RT_LIB rt)
     if(LV_RT_LIB)
       target_link_libraries(lanvid-audio-bridge PRIVATE ${LV_RT_LIB})
+    endif()
+    # Virtual cameras "LanVid Cam 1..8" + "LanVid Program Out": LanVidVideoBus_v1 -> v4l2loopback
+    add_executable(lanvid-vcam-bridge
+      drivers/linux_vcam/lanvid_v4l2_bridge.cpp
+      drivers/common_vcam/lanvid_vbus_c.cpp
+      src/video/video_bus.cpp)
+    target_include_directories(lanvid-vcam-bridge PRIVATE src drivers/common_vcam)
+    target_link_libraries(lanvid-vcam-bridge PRIVATE Threads::Threads)
+    if(LV_RT_LIB)
+      target_link_libraries(lanvid-vcam-bridge PRIVATE ${LV_RT_LIB})
     endif()
   endif()
 endif()
@@ -565,6 +600,7 @@ if(LANVID_BUILD_TESTS AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS)
     src/gui/studio_common.cpp
     src/gui/audio_studio_ui.cpp
     src/gui/video_studio_ui.cpp
+    src/gui/qr_code.cpp
     ${LV_IMGUI_DIR}/imgui.cpp
     ${LV_IMGUI_DIR}/imgui_draw.cpp
     ${LV_IMGUI_DIR}/imgui_tables.cpp

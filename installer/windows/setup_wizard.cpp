@@ -9,6 +9,7 @@
 //     - LanVid Studio (обов'язково, locked)
 //     - LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP
 //     - LanVid Virtual ASIO Driver (64ch)
+//     - LanVid Virtual Cameras (DirectShow: LanVid Cam 1..8 + LanVid Program Out)
 //     - Npcap Driver (Layer 2 Grid 256ch)
 //     - OBS Studio Plugin (obs-lanvid.dll)
 //     - Правила Windows Firewall та QoS DSCP=46
@@ -19,7 +20,8 @@
 // CLI flags:
 //   /S | --silent | --auto        Silent automatic full installation
 //   --custom                      Open wizard directly on the custom components page
-//   /COMPONENTS=core,dsp_server,… Select specific components (works with /S or interactive)
+//   /COMPONENTS=core,dsp_server,… Select specific components (works with /S or interactive),
+//                                 e.g. core,video_studio,virtual_cams
 //   --check-only                  Run pre-flight environment diagnostics and exit 0
 
 #ifndef UNICODE
@@ -94,6 +96,7 @@ constexpr int IDC_CHK_OBS = 1024;
 constexpr int IDC_CHK_FIREWALL = 1025;
 constexpr int IDC_CHK_HIGH_PERF = 1026;
 constexpr int IDC_CHK_DESKTOP = 1027;
+constexpr int IDC_CHK_VCAM = 1033;
 // Page 2: Progress
 constexpr int IDC_LOG = 1030;
 constexpr int IDC_PROGRESS = 1031;
@@ -122,6 +125,7 @@ struct InstallOptions {
     bool video_studio = true;      // LanVid Video (lanvid_video_studio.exe)
     bool dsp_service = true;
     bool virtual_audio = true;
+    bool virtual_cams = true;      // LanVidVCam.dll (DirectShow virtual cameras)
     bool grid_npcap = true;
     bool obs_plugin = true;
     bool firewall_qos = true;
@@ -145,6 +149,7 @@ HWND g_chk_audio_studio = nullptr;
 HWND g_chk_video_studio = nullptr;
 HWND g_chk_dsp = nullptr;
 HWND g_chk_asio = nullptr;
+HWND g_chk_vcam = nullptr;
 HWND g_chk_npcap = nullptr;
 HWND g_chk_obs = nullptr;
 HWND g_chk_fw = nullptr;
@@ -192,6 +197,7 @@ bool parse_cli_components(const std::wstring& cmd_line, InstallOptions& opt) {
     opt.video_studio = false;
     opt.dsp_service = false;
     opt.virtual_audio = false;
+    opt.virtual_cams = false;
     opt.grid_npcap = false;
     opt.obs_plugin = false;
     opt.firewall_qos = false;
@@ -205,6 +211,7 @@ bool parse_cli_components(const std::wstring& cmd_line, InstallOptions& opt) {
         else if (item == L"video_studio" || item == L"video") opt.video_studio = true;
         else if (item == L"dsp_server" || item == L"dsp") opt.dsp_service = true;
         else if (item == L"virtual_audio" || item == L"asio") opt.virtual_audio = true;
+        else if (item == L"virtual_cams" || item == L"vcam" || item == L"virtual_cameras") opt.virtual_cams = true;
         else if (item == L"grid_l2_npcap" || item == L"npcap" || item == L"grid_l2") opt.grid_npcap = true;
         else if (item == L"obs_plugin" || item == L"obs") opt.obs_plugin = true;
         else if (item == L"firewall" || item == L"qos" || item == L"firewall_qos" || item == L"net_opt")
@@ -585,6 +592,32 @@ bool execute_install(const InstallOptions& opt) {
     } else {
         log_msg(L"[4/7] ASIO-драйвер «LanVid Virtual ASIO»: пропущено користувачем.");
     }
+    {
+        // OS virtual cameras: 9 DirectShow capture devices (CLSID_VideoInputDeviceCategory)
+        const std::wstring vcam = (g_rep.install_dir / L"LanVidVCam.dll").wstring();
+        const std::wstring regsvr = L"C:\\Windows\\System32\\regsvr32.exe";
+        if (opt.virtual_cams && fs::exists(vcam)) {
+            const std::wstring reg_args = L"/s \"" + vcam + L"\"";
+            DWORD ec_reg = 1;
+            bool registered = false;
+            if (g_rep.is_admin) {
+                registered = run_hidden_cmd(L"\"" + regsvr + L"\" " + reg_args, &ec_reg) && ec_reg == 0;
+            } else if (!opt.silent) {
+                registered = run_elevated_cmd(regsvr, reg_args, &ec_reg) && ec_reg == 0;
+            }
+            log_msg(registered ? L"[4/7] Віртуальні камери «LanVid Cam 1..8» + «LanVid Program Out» зареєстровано (DirectShow)."
+                               : L"[4/7] Віртуальні камери: реєстрація пропущена (потрібні права Адміністратора). "
+                                 L"Зареєструйте пізніше в LanVid Video → «Віртуальні камери та Вивід».");
+        } else if (!opt.virtual_cams) {
+            std::error_code vc_ec;
+            if (fs::exists(vcam) && g_rep.is_admin) {
+                DWORD ec_unreg = 0;
+                run_hidden_cmd(L"\"" + regsvr + L"\" /u /s \"" + vcam + L"\"", &ec_unreg);
+            }
+            fs::remove(vcam, vc_ec);
+            log_msg(L"[4/7] Віртуальні камери LanVid: пропущено користувачем.");
+        }
+    }
 
     set_prog(68);
     log_msg(L"[5/7] Збереження конфігурації (UDP :" + std::to_wstring(g_rep.chosen_port) +
@@ -687,6 +720,7 @@ void show_page(WizardPage p) {
     set_vis(g_chk_video_studio, p1);
     set_vis(g_chk_dsp, p1);
     set_vis(g_chk_asio, p1);
+    set_vis(g_chk_vcam, p1);
     set_vis(g_chk_npcap, p1);
     set_vis(g_chk_obs, p1);
     set_vis(g_chk_fw, p1);
@@ -726,6 +760,7 @@ InstallOptions read_custom_checkboxes() {
     opt.video_studio = SendMessageW(g_chk_video_studio, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.dsp_service = SendMessageW(g_chk_dsp, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.virtual_audio = SendMessageW(g_chk_asio, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    opt.virtual_cams = SendMessageW(g_chk_vcam, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.grid_npcap = SendMessageW(g_chk_npcap, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.obs_plugin = SendMessageW(g_chk_obs, BM_GETCHECK, 0, 0) == BST_CHECKED;
     opt.firewall_qos = SendMessageW(g_chk_fw, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -779,7 +814,7 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_desc_auto = CreateWindowW(
                 L"STATIC",
                 L"У 1 клік встановлює всі компоненти: LanVid Studio, LanVid Grid DSP Server (фонова служба\r\n"
-                L"з автозапуском), 64ch Virtual ASIO, Npcap (Layer 2 Ethernet), OBS Studio плагін,\r\n"
+                L"з автозапуском), 64ch Virtual ASIO, віртуальні камери LanVid Cam 1..8, Npcap (Layer 2), OBS плагін,\r\n"
                 L"правила Firewall, QoS DSCP=46 та оптимізацію мережі без зайвих вікон.",
                 WS_CHILD, 44, 108, 540, 56, hwnd, ctl_id(IDC_DESC_AUTO), nullptr, nullptr);
             SendMessageW(g_desc_auto, WM_SETFONT, WPARAM(font), TRUE);
@@ -793,7 +828,7 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_desc_custom = CreateWindowW(
                 L"STATIC",
                 L"Відкриває сторінку вибору компонентів, де ви самостійно вмикаєте/вимикаєте DSP Server,\r\n"
-                L"Virtual ASIO (64ch), Npcap L2, OBS плагін, правила Firewall/QoS та профіль High Performance.",
+                L"Virtual ASIO (64ch), віртуальні камери, Npcap L2, OBS плагін, Firewall/QoS та High Performance.",
                 WS_CHILD, 44, 204, 540, 42, hwnd, ctl_id(IDC_DESC_CUSTOM), nullptr, nullptr);
             SendMessageW(g_desc_custom, WM_SETFONT, WPARAM(font), TRUE);
 
@@ -823,11 +858,12 @@ LRESULT CALLBACK wizard_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_chk_video_studio = make_chk(L"LanVid Video (Камери та Tally, Інтерком/IFB, OBS Вивід)", 124, IDC_CHK_VIDEO_STUDIO, g_cli_opt.video_studio);
             g_chk_dsp = make_chk(L"LanVid Grid DSP Server + фонова служба автозапуску LanVidGridDSP", 150, IDC_CHK_DSP_SVC, g_cli_opt.dsp_service);
             g_chk_asio = make_chk(L"LanVid Virtual ASIO Driver (64ch In / 64ch Out)", 176, IDC_CHK_ASIO, g_cli_opt.virtual_audio);
-            g_chk_npcap = make_chk(L"Npcap Driver (Layer 2 Grid 256ch Ethernet)", 202, IDC_CHK_NPCAP, g_cli_opt.grid_npcap);
-            g_chk_obs = make_chk(L"OBS Studio Plugin (obs-lanvid.dll + локалізації)", 228, IDC_CHK_OBS, g_cli_opt.obs_plugin);
-            g_chk_fw = make_chk(L"Правила Windows Firewall та QoS DSCP=46 (EF) + оптимізація сокетів", 254, IDC_CHK_FIREWALL, g_cli_opt.firewall_qos);
-            g_chk_highperf = make_chk(L"Профіль живлення High Performance (максимальна стабільність аудіо)", 280, IDC_CHK_HIGH_PERF, g_cli_opt.high_perf_power);
-            g_chk_desktop = make_chk(L"Створити ярлики «LanVid Audio» і «LanVid Video» на Робочому столі", 306, IDC_CHK_DESKTOP, g_cli_opt.desktop);
+            g_chk_vcam = make_chk(L"Віртуальні камери LanVid Cam 1..8 + Program Out (OBS, Zoom, Teams, vMix)", 202, IDC_CHK_VCAM, g_cli_opt.virtual_cams);
+            g_chk_npcap = make_chk(L"Npcap Driver (Layer 2 Grid 256ch Ethernet)", 228, IDC_CHK_NPCAP, g_cli_opt.grid_npcap);
+            g_chk_obs = make_chk(L"OBS Studio Plugin (obs-lanvid.dll + локалізації)", 254, IDC_CHK_OBS, g_cli_opt.obs_plugin);
+            g_chk_fw = make_chk(L"Правила Windows Firewall та QoS DSCP=46 (EF) + оптимізація сокетів", 280, IDC_CHK_FIREWALL, g_cli_opt.firewall_qos);
+            g_chk_highperf = make_chk(L"Профіль живлення High Performance (максимальна стабільність аудіо)", 306, IDC_CHK_HIGH_PERF, g_cli_opt.high_perf_power);
+            g_chk_desktop = make_chk(L"Створити ярлики «LanVid Audio» і «LanVid Video» на Робочому столі", 332, IDC_CHK_DESKTOP, g_cli_opt.desktop);
 
             // ---- PAGE 2: Progress ----
             g_log = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",

@@ -81,6 +81,11 @@ public:
 
     // Camera side: registers callback invoked immediately on incoming Tally state changes.
     void camera_set_tally_callback(TallyCallback cb);
+    // Remote camera control (lens / focus / quality preset), Studio -> Camera.
+    using CameraControlCallback = std::function<void(const CameraControlPayload&)>;
+    bool studio_set_camera_control(uint32_t camera_id, const CameraControlPayload& ctl);
+    void camera_set_control_callback(CameraControlCallback cb);
+    CameraControlPayload camera_last_control() const;
     TallyStatePayload camera_last_tally() const;
     void camera_update_telemetry(uint8_t battery_pct, int8_t temp_c);
 

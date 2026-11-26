@@ -47,6 +47,7 @@ Name: "audio_studio"; Description: "LanVid Audio (AoIP, Patchbay/64x64 Матр�
 Name: "video_studio"; Description: "LanVid Video (Камери та Tally, Режисерський Інтерком/IFB, OBS Вивід)"; Types: auto custom
 Name: "dsp_server"; Description: "LanVid Grid DSP Server (фонова служба LanVidGridDSP 256ch + Failover)"; Types: auto custom
 Name: "virtual_audio"; Description: "Віртуальний аудіодрайвер LanVid Virtual ASIO (64 In / 64 Out)"; Types: auto custom
+Name: "virtual_cams"; Description: "Віртуальні камери LanVid Cam 1..8 + LanVid Program Out (DirectShow: OBS, Zoom, Teams, vMix, браузери)"; Types: auto custom
 Name: "grid_l2_npcap"; Description: "LanVid Grid Layer 2 (перевірка та встановлення Npcap для прямого Ethernet)"; Types: auto custom
 Name: "obs_plugin"; Description: "Плагін OBS Studio (obs-lanvid.dll + локалізації, автовиявлення OBS)"; Types: auto custom
 Name: "net_power_opt"; Description: "Оптимізація мережі (Firewall, QoS DSCP=46, сокети) та живлення High Performance"; Types: auto
@@ -73,6 +74,10 @@ Source: "..\..\build\lanvid_dsp_server.exe"; DestDir: "{app}"; Flags: ignorevers
 
 ; 64-channel Virtual ASIO Driver (64-bit COM registration in HKLM\SOFTWARE\ASIO)
 Source: "..\..\build\LanVidASIO.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit; Components: virtual_audio
+
+; OS virtual cameras: 9 DirectShow capture devices in CLSID_VideoInputDeviceCategory (regsvr32, HKLM)
+Source: "..\..\build\LanVidVCam.dll"; DestDir: "{app}"; Flags: ignoreversion regserver 64bit restartreplace uninsrestartdelete; Components: virtual_cams
+Source: "..\..\build\lanvid_vcam_probe.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: virtual_cams
 
 ; Optional bundled Npcap OEM / standard installer (if placed in installer\windows\third_party\)
 Source: "third_party\npcap-*.exe"; DestDir: "{app}\third_party"; Flags: ignoreversion skipifsourcedoesntexist; Components: grid_l2_npcap
@@ -118,8 +123,9 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Fil
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустити LanVid Studio зараз"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-; Cleanly stop & delete LanVidGridDSP, remove Firewall + QoS DSCP rules, and unregister LanVidASIO.dll
+; Cleanly stop & delete LanVidGridDSP, remove Firewall + QoS DSCP rules, and unregister LanVidASIO.dll + LanVidVCam.dll
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\preflight.ps1"" -InstallDir ""{app}"" -Uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "LanVidPreflightUninstall"
 Filename: "sc.exe"; Parameters: "stop LanVidGridDSP"; Flags: runhidden waituntilterminated; RunOnceId: "StopLanVidDspSvc"
 Filename: "sc.exe"; Parameters: "delete LanVidGridDSP"; Flags: runhidden waituntilterminated; RunOnceId: "DeleteLanVidDspSvc"
 Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\LanVidASIO.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregLanVidASIO"
+Filename: "{sys}\regsvr32.exe"; Parameters: "/u /s ""{app}\LanVidVCam.dll"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregLanVidVCam"

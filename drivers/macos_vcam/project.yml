@@ -1,0 +1,48 @@
+# XcodeGen spec: LanVid Virtual Camera.app + embedded CoreMediaIO Camera Extension.
+# Generated + built by build_vcam.sh (TEAM_ID / LANVID_APP_GROUP come from the environment).
+name: LanVidVirtualCamera
+options:
+  bundleIdPrefix: com.manul02.lanvid
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${TEAM_ID}
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "2.6.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    LANVID_APP_GROUP: ${LANVID_APP_GROUP}
+targets:
+  LanVidCameraExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Extension
+      - path: ../common_vcam
+      - path: ../../src/video/video_bus.cpp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.manul02.lanvid.vcam.extension
+        PRODUCT_NAME: com.manul02.lanvid.vcam.extension
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/LanVidCameraExtension.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: ../common_vcam/lanvid_vbus_c.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../../src
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        GCC_PREPROCESSOR_DEFINITIONS: 'LANVID_VIDEO_BUS_NAME=\"$(LANVID_APP_GROUP)/vbus1\"'
+        SKIP_INSTALL: YES
+  LanVidVirtualCamera:
+    type: application
+    platform: macOS
+    sources:
+      - path: App
+    dependencies:
+      - target: LanVidCameraExtension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.manul02.lanvid.vcam
+        PRODUCT_NAME: LanVid Virtual Camera
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/LanVidVirtualCamera.entitlements

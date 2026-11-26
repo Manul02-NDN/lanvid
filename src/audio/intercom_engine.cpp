@@ -67,6 +67,9 @@ struct TallyIntercomEngine::Impl {
     int8_t my_temp = 30;
     TallyStatePayload last_tally{};
     TallyCallback tally_cb;
+    CameraControlCallback ctl_cb;
+    CameraControlPayload last_ctl{};
+    uint32_t ctl_revision = 0;
     uint64_t last_director_voice_us = 0;
 
     // Local intercom controls
@@ -368,6 +371,40 @@ bool TallyIntercomEngine::studio_set_camera_tally(uint32_t camera_id, uint8_t ta
     return true;
 }
 
+bool TallyIntercomEngine::studio_set_camera_control(uint32_t camera_id, const CameraControlPayload& ctl) {
+    if (!running_.load(std::memory_order_acquire) || !studio_mode_.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    for (auto& c : impl_->cams) {
+        if (!c.used || c.camera_id != camera_id || !c.ep.valid()) continue;
+        CameraControlPayload p = ctl;
+        p.camera_id = camera_id;
+        p.revision = ++impl_->ctl_revision;
+        uint8_t body[kCameraControlSize];
+        write_camera_control(body, p);
+        PacketHeader ph{};
+        ph.type = PacketType::kCameraControl;
+        ph.flags = kFlagHasCrc;
+        ph.frame_id = p.revision;
+        ph.timestamp_us = now_us32();
+        uint8_t dgram[kPacketHeaderSize + kCameraControlSize];
+        const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
+        if (dlen == 0) return false;
+        for (int r = 0; r < 3; ++r) impl_->sock.send_to_qos(dgram, dlen, c.ep, QosTrafficClass::kSyncControl);
+        return true;
+    }
+    return false;
+}
+
+void TallyIntercomEngine::camera_set_control_callback(CameraControlCallback cb) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->ctl_cb = std::move(cb);
+}
+
+CameraControlPayload TallyIntercomEngine::camera_last_control() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->last_ctl;
+}
+
 void TallyIntercomEngine::camera_set_tally_callback(TallyCallback cb) {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->tally_cb = std::move(cb);
@@ -508,6 +545,19 @@ void TallyIntercomEngine::poll() {
                     }
                 }
             }
+        } else if (h.type == PacketType::kCameraControl && !is_studio) {
+            CameraControlPayload cc{};
+            if (!parse_camera_control(pl, h.payload_size, cc)) continue;
+            CameraControlCallback ccb;
+            {
+                std::lock_guard<std::mutex> lk(impl_->mu);
+                if ((cc.camera_id != 0 && cc.camera_id != impl_->my_camera_id) ||
+                    (impl_->last_ctl.revision != 0 && int32_t(cc.revision - impl_->last_ctl.revision) <= 0))
+                    continue;  // other camera, duplicate or stale
+                impl_->last_ctl = cc;
+                ccb = impl_->ctl_cb;
+            }
+            if (ccb) ccb(cc);
         } else if (h.type == PacketType::kIntercomAudio) {
             IntercomAudioHeader ih{};
             if (!parse_intercom_header(pl, h.payload_size, ih)) continue;
