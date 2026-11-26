@@ -8,6 +8,7 @@
 
 require "base64"
 require "fileutils"
+require "shellwords"
 require "tmpdir"
 
 default_platform(:ios)
@@ -236,15 +237,75 @@ platform :ios do
     end
   end
 
-  desc "Build a signed App Store .ipa (automatic signing via App Store Connect API key)"
+  desc "Build a signed App Store .ipa (manual App Store Distribution signing via App Store Connect API key — works even with 0 registered devices)"
   lane :build_ipa do
-    setup_ci if ENV["CI"].to_s == "true"
+    ci_keychain = nil
+    if ENV["CI"].to_s == "true"
+      setup_ci
+      ci_keychain = [
+        File.expand_path("~/Library/Keychains/fastlane_tmp_keychain-db"),
+        File.expand_path("~/Library/Keychains/fastlane_tmp_keychain")
+      ].find { |p| File.exist?(p) }
+    end
+
     key = connect_api_key
     team = resolve_team_id
-    auth = ["-allowProvisioningUpdates",
-            "-authenticationKeyPath #{api_key_path}",
-            "-authenticationKeyID #{ENV['APP_STORE_CONNECT_API_KEY_ID'].to_s.strip}",
-            "-authenticationKeyIssuerID #{ENV['APP_STORE_CONNECT_ISSUER_ID'].to_s.strip}"].join(" ")
+
+    FileUtils.mkdir_p("build/certs")
+    FileUtils.mkdir_p("build/profiles")
+
+    cert_opts = {
+      api_key: key,
+      team_id: team,
+      development: false,
+      generate_apple_certs: true,
+      output_path: "build/certs"
+    }
+    if ci_keychain
+      cert_opts[:keychain_path] = ci_keychain
+      cert_opts[:keychain_password] = ""
+    end
+    get_certificates(**cert_opts)
+    cert_id = lane_context[SharedValues::CERT_CERTIFICATE_ID]
+
+    if ci_keychain
+      sh("security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k '' #{Shellwords.escape(ci_keychain)} >/dev/null")
+    end
+    sh("security find-identity -v -p codesigning")
+
+    profile_path = get_provisioning_profile(
+      api_key: key,
+      team_id: team,
+      app_identifier: BUNDLE_ID,
+      cert_id: cert_id,
+      development: false,
+      adhoc: false,
+      force: true,
+      output_path: "build/profiles"
+    )
+    profile_name = lane_context[SharedValues::SIGH_NAME]
+    profile_uuid = lane_context[SharedValues::SIGH_UUID]
+    UI.success("Using App Store Distribution profile '#{profile_name}' (UUID=#{profile_uuid}, cert=#{cert_id})")
+
+    [
+      File.expand_path("~/Library/MobileDevice/Provisioning Profiles"),
+      File.expand_path("~/Library/Developer/Xcode/UserData/Provisioning Profiles")
+    ].each do |dir|
+      FileUtils.mkdir_p(dir)
+      if profile_path && File.exist?(profile_path)
+        FileUtils.cp(profile_path, File.join(dir, "#{profile_uuid}.mobileprovision"))
+      end
+    end
+
+    update_code_signing_settings(
+      path: PROJECT,
+      use_automatic_signing: false,
+      team_id: team,
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile_name,
+      profile_uuid: profile_uuid
+    )
+
     build_app(
       project: PROJECT,
       scheme: SCHEME,
@@ -254,10 +315,20 @@ platform :ios do
       output_name: "LanVidMonitor.ipa",
       export_method: "app-store",
       export_team_id: team,
-      export_options: { signingStyle: "automatic", teamID: team, manageAppVersionAndBuildNumber: false },
-      xcargs: "#{auth} DEVELOPMENT_TEAM=#{team} CODE_SIGN_STYLE=Automatic CURRENT_PROJECT_VERSION=#{build_number}",
-      export_xcargs: auth,
-      skip_profile_detection: true
+      export_options: {
+        signingStyle: "manual",
+        teamID: team,
+        signingCertificate: "Apple Distribution",
+        provisioningProfiles: { BUNDLE_ID => profile_name },
+        manageAppVersionAndBuildNumber: false
+      },
+      xcargs: [
+        "DEVELOPMENT_TEAM=#{team}",
+        "CODE_SIGN_STYLE=Manual",
+        "CODE_SIGN_IDENTITY=#{Shellwords.escape('Apple Distribution')}",
+        "PROVISIONING_PROFILE_SPECIFIER=#{Shellwords.escape(profile_name)}",
+        "CURRENT_PROJECT_VERSION=#{build_number}"
+      ].join(" ")
     )
     key
   end
