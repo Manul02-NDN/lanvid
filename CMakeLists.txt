@@ -378,6 +378,7 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
       src/gui/studio_common.cpp
       src/gui/studio_host_win32.cpp
       src/gui/audio_studio_ui.cpp
+      src/gui/qr_code.cpp
       ${LV_IMGUI_CORE}
       ${LV_IMGUI_DIR}/backends/imgui_impl_win32.cpp
       ${LV_IMGUI_DIR}/backends/imgui_impl_dx11.cpp
@@ -423,6 +424,7 @@ if(LANVID_BUILD_GUI AND NOT LANVID_SDK_CORE_ONLY AND NOT ANDROID AND NOT IOS AND
         src/gui/studio_common.cpp
         src/gui/studio_host_sdl2.cpp
         src/gui/audio_studio_ui.cpp
+        src/gui/qr_code.cpp
         ${LV_IMGUI_CORE}
         ${LV_IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
         ${LV_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp

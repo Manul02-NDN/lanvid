@@ -114,3 +114,82 @@ TEST(studio_audio_video_split_no_port_conflict) {
     fs::remove(video_cfg, ec);
     fs::remove(tmp_dir, ec);
 }
+
+TEST(studio_audio_config_and_lifecycle) {
+    namespace fs = std::filesystem;
+    const fs::path tmp_dir = fs::temp_directory_path() / "lanvid_audio_lifecycle_test";
+    std::error_code ec;
+    fs::create_directories(tmp_dir, ec);
+    const fs::path cfg_path = tmp_dir / "lanvid_audio_config.json";
+    fs::remove(cfg_path, ec);
+
+    {
+        lv::gui::LanVidAudioStudioApp app(cfg_path.string());
+        auto& c = app.config();
+        c.studio_name = "Kyiv Studio A";
+        c.active_tab = 2;
+        c.active_subtab = {1, 2, 1, 0};
+        c.network_engine_mode = 2;
+        c.audio_sample_rate = 96000;
+        c.grid_block_samples = 16;
+        c.grid_nic_mac = "AA:BB:CC:DD:EE:FF";
+        c.grid_dsp_primary = "11:22:33:44:55:66";
+        c.grid_dsp_backup = "66:55:44:33:22:11";
+        c.monitor_channel_names = {"Vocal", "Click", "Guitar"};
+        c.monitor_channel_mask = 0x7ull;
+        c.monitor_dsp_hpf_enabled = true;
+        c.monitor_dsp_hpf_hz = 110.0f;
+        c.monitor_dsp_eq_enabled = true;
+        c.monitor_dsp_eq_low_db = 3.5f;
+        c.monitor_dsp_comp_enabled = true;
+        c.monitor_dsp_comp_ratio = 4.5f;
+        c.autostart_session = false;
+
+        REQUIRE(lv::gui::save_app_config(c, cfg_path.string()));
+    }
+
+    {
+        lv::gui::AppConfig loaded{};
+        REQUIRE(lv::gui::load_app_config(loaded, cfg_path.string()));
+        CHECK(loaded.studio_name == "Kyiv Studio A");
+        CHECK(loaded.active_tab == 2);
+        CHECK(loaded.active_subtab[0] == 1);
+        CHECK(loaded.active_subtab[1] == 2);
+        CHECK(loaded.active_subtab[2] == 1);
+        CHECK(loaded.active_subtab[3] == 0);
+        CHECK(loaded.network_engine_mode == 2);
+        CHECK(loaded.audio_sample_rate == 96000);
+        CHECK(loaded.grid_block_samples == 16);
+        CHECK(loaded.grid_nic_mac == "AA:BB:CC:DD:EE:FF");
+        CHECK(loaded.grid_dsp_primary == "11:22:33:44:55:66");
+        CHECK(loaded.grid_dsp_backup == "66:55:44:33:22:11");
+        CHECK(loaded.monitor_channel_names.size() >= 3);
+        CHECK(loaded.monitor_channel_names[0] == "Vocal");
+        CHECK(loaded.monitor_channel_names[1] == "Click");
+        CHECK(loaded.monitor_channel_mask == 0x7ull);
+        CHECK(loaded.monitor_dsp_hpf_enabled);
+        CHECK(loaded.monitor_dsp_hpf_hz > 109.0f && loaded.monitor_dsp_hpf_hz < 111.0f);
+        CHECK(loaded.monitor_dsp_eq_enabled);
+        CHECK(loaded.monitor_dsp_eq_low_db > 3.4f && loaded.monitor_dsp_eq_low_db < 3.6f);
+        CHECK(loaded.monitor_dsp_comp_enabled);
+        CHECK(loaded.monitor_dsp_comp_ratio > 4.4f && loaded.monitor_dsp_comp_ratio < 4.6f);
+    }
+
+    {
+        lv::gui::LanVidAudioStudioApp app(cfg_path.string());
+        uint16_t a_port = 5204, m_port = 5220, d_port = 5221;
+        REQUIRE(app.start_services(a_port, m_port, d_port));
+        CHECK(app.services_running());
+        CHECK(app.matrix().is_running());
+        app.config().connect_role = 1;  // Receive
+        CHECK(app.start_stream());
+        CHECK(app.stream_running());
+        app.stop_stream();
+        CHECK(!app.stream_running());
+        app.shutdown();
+        CHECK(!app.services_running());
+    }
+
+    fs::remove(cfg_path, ec);
+    fs::remove(tmp_dir, ec);
+}

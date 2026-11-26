@@ -415,6 +415,69 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
     read_flt(j, "intercom_ifb_volume", cfg.intercom_ifb_volume);
     cfg.intercom_ifb_volume = std::clamp(cfg.intercom_ifb_volume, 0.0f, 2.0f);
     read_bool(j, "tally_dscp_ef", cfg.tally_dscp_ef);
+    read_str(j, "studio_name", cfg.studio_name);
+    {
+        std::string subtabs;
+        read_str(j, "active_subtab", subtabs);
+        if (!subtabs.empty()) {
+            size_t a = 0;
+            for (int i = 0; i < 4 && a <= subtabs.size(); ++i) {
+                const size_t b = subtabs.find('|', a);
+                const std::string tok = subtabs.substr(a, b == std::string::npos ? std::string::npos : b - a);
+                if (!tok.empty()) cfg.active_subtab[i] = std::clamp(std::atoi(tok.c_str()), 0, 5);
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
+        }
+    }
+    read_int(j, "audio_sample_rate", cfg.audio_sample_rate);
+    if (cfg.audio_sample_rate != 96000) cfg.audio_sample_rate = 48000;
+    read_int(j, "audio_monitor_port", cfg.audio_monitor_port);
+    read_int(j, "audio_discovery_port", cfg.audio_discovery_port);
+    cfg.audio_monitor_port = std::clamp(cfg.audio_monitor_port, 1024, 65535);
+    cfg.audio_discovery_port = std::clamp(cfg.audio_discovery_port, 1024, 65535);
+    read_int(j, "grid_block_samples", cfg.grid_block_samples);
+    if (cfg.grid_block_samples != 16 && cfg.grid_block_samples != 48) cfg.grid_block_samples = 32;
+    read_str(j, "grid_nic_mac", cfg.grid_nic_mac);
+    read_str(j, "grid_dsp_primary", cfg.grid_dsp_primary);
+    read_str(j, "grid_dsp_backup", cfg.grid_dsp_backup);
+    {
+        auto split_bar = [](const std::string& s) {
+            std::vector<std::string> out;
+            size_t a = 0;
+            while (a <= s.size()) {
+                const size_t b = s.find('|', a);
+                out.push_back(s.substr(a, b == std::string::npos ? std::string::npos : b - a));
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
+            return out;
+        };
+        std::string names, favs, mask;
+        read_str(j, "monitor_channel_names", names);
+        read_str(j, "favorite_peers", favs);
+        read_str(j, "monitor_channel_mask", mask);
+        if (!names.empty()) cfg.monitor_channel_names = split_bar(names);
+        if (!favs.empty()) cfg.favorite_peers = split_bar(favs);
+        if (!mask.empty()) cfg.monitor_channel_mask = std::strtoull(mask.c_str(), nullptr, 16);
+    }
+    read_bool(j, "autostart_session", cfg.autostart_session);
+    read_bool(j, "monitor_dsp_hpf_enabled", cfg.monitor_dsp_hpf_enabled);
+    read_flt(j, "monitor_dsp_hpf_hz", cfg.monitor_dsp_hpf_hz);
+    cfg.monitor_dsp_hpf_hz = std::clamp(cfg.monitor_dsp_hpf_hz, 20.0f, 250.0f);
+    read_bool(j, "monitor_dsp_eq_enabled", cfg.monitor_dsp_eq_enabled);
+    read_flt(j, "monitor_dsp_eq_low_db", cfg.monitor_dsp_eq_low_db);
+    read_flt(j, "monitor_dsp_eq_mid_hz", cfg.monitor_dsp_eq_mid_hz);
+    read_flt(j, "monitor_dsp_eq_mid_db", cfg.monitor_dsp_eq_mid_db);
+    read_flt(j, "monitor_dsp_eq_high_db", cfg.monitor_dsp_eq_high_db);
+    read_bool(j, "monitor_dsp_comp_enabled", cfg.monitor_dsp_comp_enabled);
+    read_flt(j, "monitor_dsp_comp_thresh_db", cfg.monitor_dsp_comp_thresh_db);
+    read_flt(j, "monitor_dsp_comp_ratio", cfg.monitor_dsp_comp_ratio);
+    read_flt(j, "monitor_dsp_comp_attack_ms", cfg.monitor_dsp_comp_attack_ms);
+    read_flt(j, "monitor_dsp_comp_release_ms", cfg.monitor_dsp_comp_release_ms);
+    read_flt(j, "monitor_dsp_comp_makeup_db", cfg.monitor_dsp_comp_makeup_db);
+    read_flt(j, "monitor_dsp_master_db", cfg.monitor_dsp_master_db);
+    read_bool(j, "monitor_dsp_master_mute", cfg.monitor_dsp_master_mute);
     return true;
 }
 
@@ -518,7 +581,36 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
         << "  \"video_audio_route\": " << cfg.video_audio_route << ",\n"
         << "  \"intercom_mic_index\": " << cfg.intercom_mic_index << ",\n"
         << "  \"intercom_out_index\": " << cfg.intercom_out_index << ",\n"
-        << "  \"intercom_ifb_volume\": " << cfg.intercom_ifb_volume << "\n"
+        << "  \"intercom_ifb_volume\": " << cfg.intercom_ifb_volume << ",\n"
+        << "  \"studio_name\": \"" << json_esc(cfg.studio_name) << "\",\n"
+        << "  \"active_subtab\": \"" << cfg.active_subtab[0] << "|" << cfg.active_subtab[1] << "|"
+        << cfg.active_subtab[2] << "|" << cfg.active_subtab[3] << "\",\n"
+        << "  \"audio_sample_rate\": " << cfg.audio_sample_rate << ",\n"
+        << "  \"audio_monitor_port\": " << cfg.audio_monitor_port << ",\n"
+        << "  \"audio_discovery_port\": " << cfg.audio_discovery_port << ",\n"
+        << "  \"grid_block_samples\": " << cfg.grid_block_samples << ",\n"
+        << "  \"grid_nic_mac\": \"" << json_esc(cfg.grid_nic_mac) << "\",\n"
+        << "  \"grid_dsp_primary\": \"" << json_esc(cfg.grid_dsp_primary) << "\",\n"
+        << "  \"grid_dsp_backup\": \"" << json_esc(cfg.grid_dsp_backup) << "\",\n"
+        << "  \"monitor_channel_names\": \"" << json_esc(join_bar(cfg.monitor_channel_names)) << "\",\n"
+        << "  \"monitor_channel_mask\": \"" << std::hex << cfg.monitor_channel_mask << std::dec << "\",\n"
+        << "  \"favorite_peers\": \"" << json_esc(join_bar(cfg.favorite_peers)) << "\",\n"
+        << "  \"autostart_session\": " << (cfg.autostart_session ? "true" : "false") << ",\n"
+        << "  \"monitor_dsp_hpf_enabled\": " << (cfg.monitor_dsp_hpf_enabled ? "true" : "false") << ",\n"
+        << "  \"monitor_dsp_hpf_hz\": " << cfg.monitor_dsp_hpf_hz << ",\n"
+        << "  \"monitor_dsp_eq_enabled\": " << (cfg.monitor_dsp_eq_enabled ? "true" : "false") << ",\n"
+        << "  \"monitor_dsp_eq_low_db\": " << cfg.monitor_dsp_eq_low_db << ",\n"
+        << "  \"monitor_dsp_eq_mid_hz\": " << cfg.monitor_dsp_eq_mid_hz << ",\n"
+        << "  \"monitor_dsp_eq_mid_db\": " << cfg.monitor_dsp_eq_mid_db << ",\n"
+        << "  \"monitor_dsp_eq_high_db\": " << cfg.monitor_dsp_eq_high_db << ",\n"
+        << "  \"monitor_dsp_comp_enabled\": " << (cfg.monitor_dsp_comp_enabled ? "true" : "false") << ",\n"
+        << "  \"monitor_dsp_comp_thresh_db\": " << cfg.monitor_dsp_comp_thresh_db << ",\n"
+        << "  \"monitor_dsp_comp_ratio\": " << cfg.monitor_dsp_comp_ratio << ",\n"
+        << "  \"monitor_dsp_comp_attack_ms\": " << cfg.monitor_dsp_comp_attack_ms << ",\n"
+        << "  \"monitor_dsp_comp_release_ms\": " << cfg.monitor_dsp_comp_release_ms << ",\n"
+        << "  \"monitor_dsp_comp_makeup_db\": " << cfg.monitor_dsp_comp_makeup_db << ",\n"
+        << "  \"monitor_dsp_master_db\": " << cfg.monitor_dsp_master_db << ",\n"
+        << "  \"monitor_dsp_master_mute\": " << (cfg.monitor_dsp_master_mute ? "true" : "false") << "\n"
         << "}\n";
     return out.good();
 }

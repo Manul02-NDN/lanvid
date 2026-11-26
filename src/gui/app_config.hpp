@@ -3,6 +3,7 @@
 //  - Windows: %APPDATA%\LanVid\config.json
 //  - Linux:   ~/.config/lanvid/config.json
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -117,6 +118,38 @@ struct AppConfig {
     int intercom_mic_index = -1;          // director microphone (-1 = system default)
     int intercom_out_index = -1;          // director headphones (-1 = system default)
     float intercom_ifb_volume = 1.0f;     // IFB (director -> camera) gain
+
+    // LanVid Audio (audio_studio_ui)
+    std::string studio_name = "LanVid Audio";
+    std::array<int, 4> active_subtab{0, 0, 0, 0};  // active pill subtab per page (0..3)
+    int audio_sample_rate = 48000;        // 48000 / 96000
+    int audio_monitor_port = 5020;        // Personal Monitor (smartphones)
+    int audio_discovery_port = 5021;      // Discovery, role = "audio"
+    int grid_block_samples = 32;          // 16 / 32 / 48 samples per Grid L2 frame (0.33 .. 1 ms)
+    std::string grid_nic_mac;             // MAC address of selected Grid L2 Ethernet adapter
+    std::string grid_dsp_primary;         // MAC of the primary lanvid_dsp_server ("" = none)
+    std::string grid_dsp_backup;          // MAC of the backup DSP server (failover < 10 ms)
+    std::vector<std::string> monitor_channel_names;  // friendly names shown in LanVid Monitor (index = channel)
+    uint64_t monitor_channel_mask = ~0ull;           // input channels offered to the musicians
+    std::vector<std::string> favorite_peers;         // pinned peer IPs
+    bool autostart_session = false;       // restart the last stream on launch
+
+    // Personal Monitor Server-Side DSP defaults
+    bool monitor_dsp_hpf_enabled = false;
+    float monitor_dsp_hpf_hz = 80.0f;
+    bool monitor_dsp_eq_enabled = false;
+    float monitor_dsp_eq_low_db = 0.0f;
+    float monitor_dsp_eq_mid_hz = 1200.0f;
+    float monitor_dsp_eq_mid_db = 0.0f;
+    float monitor_dsp_eq_high_db = 0.0f;
+    bool monitor_dsp_comp_enabled = false;
+    float monitor_dsp_comp_thresh_db = -18.0f;
+    float monitor_dsp_comp_ratio = 3.0f;
+    float monitor_dsp_comp_attack_ms = 5.0f;
+    float monitor_dsp_comp_release_ms = 80.0f;
+    float monitor_dsp_comp_makeup_db = 0.0f;
+    float monitor_dsp_master_db = 0.0f;
+    bool monitor_dsp_master_mute = false;
 };
 
 // Returns platform config file path (%APPDATA%\LanVid\<filename> or ~/.config/lanvid/<filename>).
