@@ -216,16 +216,21 @@ platform :ios do
     info
   end
 
-  def with_sanitized_metadata_dir
+  def with_sanitized_metadata_dir(skip_review_info: false)
     src = File.join(fastlane_dir, "metadata")
     Dir.mktmpdir("lanvid_deliver_meta") do |tmp|
       dst = File.join(tmp, "metadata")
       FileUtils.cp_r(src, dst)
-      %w[first_name.txt last_name.txt email_address.txt phone_number.txt].each do |fname|
-        path = File.join(dst, "review_information", fname)
-        next unless File.exist?(path)
-        content = File.read(path).strip
-        File.delete(path) unless valid_contact_value?(content)
+      review_dir = File.join(dst, "review_information")
+      if skip_review_info
+        FileUtils.rm_rf(review_dir)
+      else
+        %w[first_name.txt last_name.txt email_address.txt phone_number.txt].each do |fname|
+          path = File.join(review_dir, fname)
+          next unless File.exist?(path)
+          content = File.read(path).strip
+          File.delete(path) unless valid_contact_value?(content)
+        end
       end
       yield dst
     end
@@ -311,16 +316,14 @@ platform :ios do
                    "Uploading metadata, screenshots and attaching build first (submit_for_review deferred until contact is provided).")
     end
 
-    filtered_review_info = info.reject { |k, v| [:first_name, :last_name, :email_address, :phone_number].include?(k) && v.empty? }
-
-    with_sanitized_metadata_dir do |meta_dir|
+    skip_review_info = !missing_contact.empty?
+    with_sanitized_metadata_dir(skip_review_info: skip_review_info) do |meta_dir|
       opts = {
         api_key: key,
         skip_binary_upload: ipa.nil?,
         metadata_path: meta_dir,
         screenshots_path: File.join(fastlane_dir, "screenshots"),
         app_rating_config_path: File.join(fastlane_dir, "age_rating.json"),
-        app_review_information: filtered_review_info,
         submission_information: {
           export_compliance_uses_encryption: false,
           add_id_info_uses_idfa: false
@@ -334,6 +337,7 @@ platform :ios do
         submit_for_review: can_submit,
         reject_if_possible: false
       }
+      opts[:app_review_information] = info unless skip_review_info
       opts[:ipa] = ipa unless ipa.nil?
       opts[:build_number] = build_number unless build_number.to_s.empty? || !ipa.nil?
       opts[:app_version] = app_version unless app_version.to_s.empty?
