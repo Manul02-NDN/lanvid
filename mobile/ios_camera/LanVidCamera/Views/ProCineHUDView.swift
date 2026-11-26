@@ -11,6 +11,7 @@ struct ProCineHUDView: View {
     @State var showEncoderDrawer = false
     @State var showDuoSheet = false
     @State var showSettingsSheet = false
+    @State private var showBadgeTooltip = false
 
     var body: some View {
         GeometryReader { geo in
@@ -41,6 +42,11 @@ struct ProCineHUDView: View {
 
                     VStack(spacing: isCompactWidth ? 6 : 8) {
                         topTelemetryBar(isLandscape: isLandscape, isCompactWidth: isCompactWidth)
+
+                        HStack {
+                            Spacer()
+                            cameraNumberBadge
+                        }
 
                         if engine.duoMode.isMultiCam || !engine.browser.duoPeers.isEmpty {
                             duoSyncBanner(isCompactWidth: isCompactWidth)
@@ -136,6 +142,66 @@ struct ProCineHUDView: View {
             .background(CineTheme.glass)
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(CineTheme.border, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 16))
+        }
+    }
+
+    private var cameraNumberBadge: some View {
+        let borderTint: Color = {
+            switch engine.tallyState {
+            case .program: return CineTheme.tallyRed
+            case .preview: return CineTheme.tallyGreen
+            case .standby: return CineTheme.lavender
+            }
+        }()
+        return VStack(alignment: .trailing, spacing: 5) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { showBadgeTooltip.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(borderTint)
+                        .frame(width: 7, height: 7)
+                    Text(engine.displayBadgeTag)
+                        .font(.system(size: 12, weight: .heavy, design: .monospaced))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .padding(.horizontal, 11)
+                .frame(minHeight: 36)
+                .background(CineTheme.glass)
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(borderTint, lineWidth: 2))
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .shadow(color: borderTint.opacity(0.45), radius: 6, x: 0, y: 2)
+            }
+
+            if showBadgeTooltip {
+                HStack(spacing: 8) {
+                    let modeStr = engine.syncedFixedDelay ? "\(engine.syncedDelayMs) ms" : "Adaptive"
+                    Text(engine.configSynced
+                         ? tr("Призначено студією: \(engine.displayBadgeTag) • Synced \(modeStr)",
+                              "Assigned by Studio: \(engine.displayBadgeTag) • Synced \(modeStr)")
+                         : tr("Камера: \(engine.displayBadgeTag) • Очікування студії",
+                              "Camera: \(engine.displayBadgeTag) • Awaiting Studio"))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundColor(CineTheme.lavenderSoft)
+                    Button(tr("Мережа", "Network")) {
+                        showBadgeTooltip = false
+                        showSettingsSheet = true
+                    }
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(CineTheme.lavender.opacity(0.85))
+                    .clipShape(Capsule())
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(CineTheme.glass)
+                .overlay(RoundedRectangle(cornerRadius: 11).stroke(borderTint.opacity(0.7), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 11))
+            }
         }
     }
 

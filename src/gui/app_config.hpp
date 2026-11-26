@@ -118,6 +118,12 @@ struct AppConfig {
     int intercom_mic_index = -1;          // director microphone (-1 = system default)
     int intercom_out_index = -1;          // director headphones (-1 = system default)
     float intercom_ifb_volume = 1.0f;     // IFB (director -> camera) gain
+    int video_default_delay_ms = 33;      // VideoPlayoutBuffer default delay (5..250 ms)
+    bool video_default_fixed_delay = true;// true = Fixed Delay, false = Adaptive Wi-Fi
+    std::vector<int> video_slot_delay_ms; // per-slot playout delay ms
+    std::vector<int> video_slot_fixed_delay; // per-slot 1=Fixed, 0=Adaptive
+    std::vector<int> video_slot_cam_numbers; // per-slot assigned phone badge 1..16
+    std::vector<std::string> video_slot_cam_tags; // per-slot badge tag ("CAM 1", "A", ...)
 
     // LanVid Audio (audio_studio_ui)
     std::string studio_name = "LanVid Audio";

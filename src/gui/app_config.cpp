@@ -414,6 +414,35 @@ bool load_app_config(AppConfig& cfg, const std::string& custom_path) {
     read_int(j, "intercom_out_index", cfg.intercom_out_index);
     read_flt(j, "intercom_ifb_volume", cfg.intercom_ifb_volume);
     cfg.intercom_ifb_volume = std::clamp(cfg.intercom_ifb_volume, 0.0f, 2.0f);
+    read_int(j, "video_default_delay_ms", cfg.video_default_delay_ms);
+    cfg.video_default_delay_ms = std::clamp(cfg.video_default_delay_ms, 5, 250);
+    read_bool(j, "video_default_fixed_delay", cfg.video_default_fixed_delay);
+    {
+        auto split_bar = [](const std::string& s) {
+            std::vector<std::string> out;
+            if (s.empty()) return out;
+            size_t a = 0;
+            for (;;) {
+                const size_t b = s.find('|', a);
+                out.push_back(s.substr(a, b == std::string::npos ? std::string::npos : b - a));
+                if (b == std::string::npos) break;
+                a = b + 1;
+            }
+            return out;
+        };
+        std::string delays, fixeds, nums, tags;
+        read_str(j, "video_slot_delay_ms", delays);
+        read_str(j, "video_slot_fixed_delay", fixeds);
+        read_str(j, "video_slot_cam_numbers", nums);
+        read_str(j, "video_slot_cam_tags", tags);
+        for (const auto& tok : split_bar(delays))
+            cfg.video_slot_delay_ms.push_back(std::clamp(std::atoi(tok.c_str()), 5, 250));
+        for (const auto& tok : split_bar(fixeds))
+            cfg.video_slot_fixed_delay.push_back(std::atoi(tok.c_str()) != 0 ? 1 : 0);
+        for (const auto& tok : split_bar(nums))
+            cfg.video_slot_cam_numbers.push_back(std::clamp(std::atoi(tok.c_str()), 0, 16));
+        if (!tags.empty()) cfg.video_slot_cam_tags = split_bar(tags);
+    }
     read_bool(j, "tally_dscp_ef", cfg.tally_dscp_ef);
     read_str(j, "studio_name", cfg.studio_name);
     {
@@ -493,6 +522,14 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
 
     std::ofstream out(p, std::ios::binary | std::ios::trunc);
     if (!out) return false;
+    auto join_ints = [](const std::vector<int>& v) {
+        std::string s;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) s += '|';
+            s += std::to_string(v[i]);
+        }
+        return s;
+    };
     out << "{\n"
         << "  \"dest_ip\": \"" << json_esc(cfg.dest_ip) << "\",\n"
         << "  \"dest_port\": " << cfg.dest_port << ",\n"
@@ -582,6 +619,12 @@ bool save_app_config(const AppConfig& cfg, const std::string& custom_path) {
         << "  \"intercom_mic_index\": " << cfg.intercom_mic_index << ",\n"
         << "  \"intercom_out_index\": " << cfg.intercom_out_index << ",\n"
         << "  \"intercom_ifb_volume\": " << cfg.intercom_ifb_volume << ",\n"
+        << "  \"video_default_delay_ms\": " << cfg.video_default_delay_ms << ",\n"
+        << "  \"video_default_fixed_delay\": " << (cfg.video_default_fixed_delay ? "true" : "false") << ",\n"
+        << "  \"video_slot_delay_ms\": \"" << json_esc(join_ints(cfg.video_slot_delay_ms)) << "\",\n"
+        << "  \"video_slot_fixed_delay\": \"" << json_esc(join_ints(cfg.video_slot_fixed_delay)) << "\",\n"
+        << "  \"video_slot_cam_numbers\": \"" << json_esc(join_ints(cfg.video_slot_cam_numbers)) << "\",\n"
+        << "  \"video_slot_cam_tags\": \"" << json_esc(join_bar(cfg.video_slot_cam_tags)) << "\",\n"
         << "  \"studio_name\": \"" << json_esc(cfg.studio_name) << "\",\n"
         << "  \"active_subtab\": \"" << cfg.active_subtab[0] << "|" << cfg.active_subtab[1] << "|"
         << cfg.active_subtab[2] << "|" << cfg.active_subtab[3] << "\",\n"

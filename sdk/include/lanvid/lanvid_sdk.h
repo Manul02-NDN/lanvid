@@ -351,6 +351,29 @@ typedef void (*LV_CameraControlCallback)(const LV_CameraControl* control, void* 
 LV_API int lv_tally_intercom_set_camera_control(LvTallyIntercomHandle* studio, const LV_CameraControl* control);
 LV_API void lv_camera_set_control_callback(LvTallyIntercomHandle* handle, LV_CameraControlCallback cb, void* user_data);
 
+/* Bidirectional Video Config Sync + Camera Number Assignment + Smart IDR Keyframe Request (additive). */
+typedef struct LV_VideoConfigSync {
+    uint64_t config_revision;
+    uint32_t origin_id;
+    uint32_t camera_id;
+    uint8_t assigned_cam_number;  /* 0 = unassigned, 1..16 */
+    uint8_t resolution_preset;    /* 0=360p, 1=720p, 2=1080p, 3=4K */
+    uint8_t target_fps;           /* 24 / 25 / 30 / 50 / 60 */
+    uint8_t codec;                /* 0=DCT, 1=H.264, 2=HEVC */
+    uint32_t bitrate_kbps;        /* 5000..150000 */
+    uint16_t video_delay_ms;      /* 5..250 ms */
+    uint8_t fixed_delay_mode;     /* 1=Fixed, 0=Adaptive Wi-Fi */
+    uint8_t camera_lens;          /* 0=Wide, 1=UltraWide, 2=Tele, 3=Front */
+    uint8_t flags;                /* bit0=RequestIdr, bit1=FromCamera, bit2=HasBadgeColor, bit3=SyncAck */
+    uint8_t badge_accent_rgba[4];
+    char assigned_cam_tag[16];    /* "CAM 1", "CAM 2", "A", "B" */
+} LV_VideoConfigSync;
+typedef void (*LV_VideoConfigSyncCallback)(const LV_VideoConfigSync* cfg, void* user_data);
+LV_API int lv_tally_intercom_send_video_config_sync(LvTallyIntercomHandle* handle, const LV_VideoConfigSync* cfg);
+LV_API void lv_tally_intercom_set_video_config_sync_callback(LvTallyIntercomHandle* handle,
+                                                             LV_VideoConfigSyncCallback cb, void* user_data);
+LV_API int lv_tally_intercom_request_keyframe(LvTallyIntercomHandle* handle, uint32_t camera_id);
+
 /* Duplex Intercom voice I/O (48 kHz mono float32, isolated from program audio) */
 LV_API int lv_intercom_push_mic_pcm(LvTallyIntercomHandle* handle, const float* samples, int frames);
 LV_API int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames);
@@ -545,6 +568,8 @@ LV_API void lv_multicam_rec_stop_all(LvMultiCamHandle* mc);
 LV_API int lv_multicam_rec_slot(LvMultiCamHandle* mc, uint32_t slot, int on);
 LV_API int lv_multicam_get_rec_stats(LvMultiCamHandle* mc, uint32_t slot, LV_IsoSlotStats* out);
 LV_API void lv_multicam_set_vcam(LvMultiCamHandle* mc, uint32_t count, int placeholder);
+LV_API int lv_multicam_set_slot_playout(LvMultiCamHandle* mc, uint32_t slot, uint32_t delay_ms, int fixed_mode);
+LV_API int lv_multicam_force_idr(LvMultiCamHandle* mc, uint32_t slot);
 
 /* ---- LAN Auto-Discovery ---- */
 /* Scans the LAN for active receivers and populates `out_peers` (up to `max_peers`).

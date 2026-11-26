@@ -1,11 +1,13 @@
 // obs_lanvid_output.cpp — OBS Studio Program Output ("LanVid Program Output")
-// and Dedicated Send Filter ("LanVid Dedicated Send Filter") for 360p-4K60 streaming
-// from OBS Studio back into the LanVid network (Director / Operator return feeds).
+// and Dedicated Send Filter ("LanVid Dedicated Send Filter") supporting 360p-4K60
+// BGRA, I420, and NV12 streaming back into the LanVid network.
 
 #include "obs_api_compat.hpp"
 #include "obs_lanvid_core.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <vector>
 
 #if defined(LV_HAVE_REAL_LIBOBS)
@@ -23,13 +25,13 @@ constexpr const char* kOutFec = "fec_group";
 
 struct LanVidOutputContext {
     obs_output_t* output = nullptr;
-    LanVidObsOutputEngine engine;
+    std::shared_ptr<LanVidObsOutputEngine> engine;
     std::vector<int16_t> pcm16_tmp;
 };
 
 struct LanVidFilterContext {
     obs_source_t* filter = nullptr;
-    LanVidObsOutputEngine engine;
+    std::shared_ptr<LanVidObsOutputEngine> engine;
     OutputConfig cfg;
 };
 
@@ -48,7 +50,7 @@ OutputConfig output_config_from_settings(obs_data_t* settings, uint32_t w, uint3
     cfg.quality = static_cast<int>(obs_data_get_int(settings, kOutQuality));
     if (cfg.quality <= 0) cfg.quality = 82;
     cfg.fec_group = static_cast<int>(obs_data_get_int(settings, kOutFec));
-    if (cfg.fec_group <= 0) cfg.fec_group = 6;
+    if (cfg.fec_group < 0) cfg.fec_group = 6;
     return cfg;
 }
 
@@ -79,32 +81,32 @@ void set_output_defaults(obs_data_t* settings) {
 // ---- Program Output (obs_output_info) ----
 const char* out_get_name(void*) { return obs_module_text("LanVid.Output.Name"); }
 
-void* out_create(obs_data_t* settings, obs_output_t* output) {
-    (void)settings;
+void* out_create(obs_data_t*, obs_output_t* output) {
     auto* ctx = new LanVidOutputContext();
     ctx->output = output;
+    ctx->engine = std::make_shared<LanVidObsOutputEngine>();
     return ctx;
 }
 
 void out_destroy(void* data) {
     auto* ctx = static_cast<LanVidOutputContext*>(data);
     if (!ctx) return;
-    ctx->engine.stop();
+    if (ctx->engine) ctx->engine->stop();
     delete ctx;
 }
 
 bool out_start(void* data) {
     auto* ctx = static_cast<LanVidOutputContext*>(data);
-    if (!ctx || !ctx->output) return false;
+    if (!ctx || !ctx->output || !ctx->engine) return false;
     obs_data_t* settings = obs_output_get_settings(ctx->output);
     const uint32_t w = obs_output_get_width(ctx->output);
     const uint32_t h = obs_output_get_height(ctx->output);
     const OutputConfig cfg = output_config_from_settings(settings, w, h, 60);
     obs_data_release(settings);
 
-    if (!ctx->engine.start(cfg)) return false;
+    if (!ctx->engine->start(cfg)) return false;
     if (!obs_output_begin_data_capture(ctx->output, 0)) {
-        ctx->engine.stop();
+        ctx->engine->stop();
         return false;
     }
     return true;
@@ -114,27 +116,32 @@ void out_stop(void* data, uint64_t) {
     auto* ctx = static_cast<LanVidOutputContext*>(data);
     if (!ctx) return;
     obs_output_end_data_capture(ctx->output);
-    ctx->engine.stop();
+    if (ctx->engine) ctx->engine->stop();
 }
 
 void out_raw_video(void* data, struct video_data* frame) {
     auto* ctx = static_cast<LanVidOutputContext*>(data);
-    if (!ctx || !frame) return;
-    const auto cfg = ctx->engine.config();
+    if (!ctx || !frame || !ctx->engine || !ctx->engine->is_running()) return;
+    const auto cfg = ctx->engine->config();
     if (frame->data[0] && frame->data[1] && frame->data[2]) {
-        ctx->engine.push_i420(frame->data[0], frame->data[1], frame->data[2],
-                              static_cast<int>(frame->linesize[0]),
-                              static_cast<int>(frame->linesize[1]),
-                              static_cast<int>(frame->linesize[2]),
-                              cfg.width, cfg.height);
+        ctx->engine->push_i420(frame->data[0], frame->data[1], frame->data[2],
+                               static_cast<int>(frame->linesize[0]),
+                               static_cast<int>(frame->linesize[1]),
+                               static_cast<int>(frame->linesize[2]),
+                               cfg.width, cfg.height);
+    } else if (frame->data[0] && frame->data[1]) {
+        ctx->engine->push_nv12(frame->data[0], frame->data[1],
+                               static_cast<int>(frame->linesize[0]),
+                               static_cast<int>(frame->linesize[1]),
+                               cfg.width, cfg.height);
     } else if (frame->data[0]) {
-        ctx->engine.push_bgra(frame->data[0], cfg.width, cfg.height, frame->linesize[0]);
+        ctx->engine->push_bgra(frame->data[0], cfg.width, cfg.height, frame->linesize[0]);
     }
 }
 
 void out_raw_audio(void* data, struct audio_data* frames) {
     auto* ctx = static_cast<LanVidOutputContext*>(data);
-    if (!ctx || !frames || !frames->data[0] || frames->frames == 0) return;
+    if (!ctx || !frames || !frames->data[0] || frames->frames == 0 || !ctx->engine || !ctx->engine->is_running()) return;
     const float* l = reinterpret_cast<const float*>(frames->data[0]);
     const float* r = frames->data[1] ? reinterpret_cast<const float*>(frames->data[1]) : l;
     ctx->pcm16_tmp.resize(size_t(frames->frames) * 2);
@@ -142,7 +149,7 @@ void out_raw_audio(void* data, struct audio_data* frames) {
         ctx->pcm16_tmp[i * 2 + 0] = static_cast<int16_t>(std::clamp(l[i], -1.0f, 1.0f) * 32767.0f);
         ctx->pcm16_tmp[i * 2 + 1] = static_cast<int16_t>(std::clamp(r[i], -1.0f, 1.0f) * 32767.0f);
     }
-    ctx->engine.push_audio_pcm16(ctx->pcm16_tmp.data(), frames->frames);
+    ctx->engine->push_audio_pcm16(ctx->pcm16_tmp.data(), frames->frames);
 }
 
 // ---- Dedicated Send Filter (OBS_SOURCE_TYPE_FILTER) ----
@@ -151,36 +158,45 @@ const char* filter_get_name(void*) { return obs_module_text("LanVid.Filter.Name"
 void* filter_create(obs_data_t* settings, obs_source_t* filter) {
     auto* ctx = new LanVidFilterContext();
     ctx->filter = filter;
+    ctx->engine = std::make_shared<LanVidObsOutputEngine>();
     ctx->cfg = output_config_from_settings(settings, 1920, 1080, 60);
-    ctx->engine.start(ctx->cfg);
+    ctx->engine->start(ctx->cfg);
     return ctx;
 }
 
 void filter_destroy(void* data) {
     auto* ctx = static_cast<LanVidFilterContext*>(data);
     if (!ctx) return;
-    ctx->engine.stop();
+    if (ctx->engine) ctx->engine->stop();
     delete ctx;
 }
 
 void filter_update(void* data, obs_data_t* settings) {
     auto* ctx = static_cast<LanVidFilterContext*>(data);
-    if (!ctx) return;
-    ctx->cfg = output_config_from_settings(settings, ctx->cfg.width, ctx->cfg.height, ctx->cfg.fps);
-    ctx->engine.start(ctx->cfg);
+    if (!ctx || !ctx->engine) return;
+    const OutputConfig next = output_config_from_settings(settings, ctx->cfg.width, ctx->cfg.height, ctx->cfg.fps);
+    if (next != ctx->cfg) {
+        ctx->cfg = next;
+        ctx->engine->start(ctx->cfg);
+    }
 }
 
 struct obs_source_frame* filter_video(void* data, struct obs_source_frame* frame) {
     auto* ctx = static_cast<LanVidFilterContext*>(data);
-    if (ctx && frame && frame->data[0]) {
+    if (ctx && ctx->engine && ctx->engine->is_running() && frame && frame->data[0]) {
         if (frame->format == VIDEO_FORMAT_I420 && frame->data[1] && frame->data[2]) {
-            ctx->engine.push_i420(frame->data[0], frame->data[1], frame->data[2],
-                                  static_cast<int>(frame->linesize[0]),
-                                  static_cast<int>(frame->linesize[1]),
-                                  static_cast<int>(frame->linesize[2]),
-                                  frame->width, frame->height);
+            ctx->engine->push_i420(frame->data[0], frame->data[1], frame->data[2],
+                                   static_cast<int>(frame->linesize[0]),
+                                   static_cast<int>(frame->linesize[1]),
+                                   static_cast<int>(frame->linesize[2]),
+                                   frame->width, frame->height);
+        } else if (frame->format == VIDEO_FORMAT_NV12 && frame->data[1]) {
+            ctx->engine->push_nv12(frame->data[0], frame->data[1],
+                                   static_cast<int>(frame->linesize[0]),
+                                   static_cast<int>(frame->linesize[1]),
+                                   frame->width, frame->height);
         } else if (frame->format == VIDEO_FORMAT_BGRA) {
-            ctx->engine.push_bgra(frame->data[0], frame->width, frame->height, frame->linesize[0]);
+            ctx->engine->push_bgra(frame->data[0], frame->width, frame->height, frame->linesize[0]);
         }
     }
     return frame;

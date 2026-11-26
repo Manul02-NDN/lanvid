@@ -600,6 +600,55 @@ bool parse_camera_control(const uint8_t* in, size_t len, CameraControlPayload& c
     return c.lens <= kLensFront && c.quality <= kQuality4K && c.focus_pos <= 1000;
 }
 
+void write_video_config_sync(uint8_t* out, const VideoConfigSyncPayload& p) {
+    std::memset(out, 0, kVideoConfigSyncSize);
+    store_le64(out + 0, p.config_revision);
+    store_le32(out + 8, p.origin_id);
+    store_le32(out + 12, p.camera_id);
+    out[16] = p.assigned_cam_number <= 16 ? p.assigned_cam_number : 16;
+    out[17] = p.resolution_preset;
+    out[18] = p.target_fps;
+    out[19] = p.codec;
+    store_le32(out + 20, p.bitrate_kbps);
+    store_le16(out + 24, p.video_delay_ms);
+    out[26] = p.fixed_delay_mode ? 1 : 0;
+    out[27] = p.camera_lens;
+    out[28] = p.flags;
+    out[29] = p.badge_accent_rgba[0];
+    out[30] = p.badge_accent_rgba[1];
+    out[31] = p.badge_accent_rgba[2];
+    out[32] = p.badge_accent_rgba[3];
+    std::memcpy(out + 36, p.assigned_cam_tag, 16);
+    out[51] = '\0';
+}
+
+bool parse_video_config_sync(const uint8_t* in, size_t len, VideoConfigSyncPayload& p) {
+    if (!in || len < kVideoConfigSyncSize) return false;
+    p = VideoConfigSyncPayload{};
+    p.config_revision = load_le64(in + 0);
+    p.origin_id = load_le32(in + 8);
+    p.camera_id = load_le32(in + 12);
+    p.assigned_cam_number = in[16];
+    if (p.assigned_cam_number > 16) p.assigned_cam_number = 16;
+    p.resolution_preset = in[17] <= kQuality4K ? in[17] : uint8_t(kQuality1080p);
+    p.target_fps = in[18];
+    p.codec = in[19] <= uint8_t(VideoCodecId::kH265) ? in[19] : uint8_t(VideoCodecId::kH264);
+    p.bitrate_kbps = load_le32(in + 20);
+    p.video_delay_ms = load_le16(in + 24);
+    if (p.video_delay_ms < 5) p.video_delay_ms = 5;
+    if (p.video_delay_ms > 250) p.video_delay_ms = 250;
+    p.fixed_delay_mode = in[26] ? 1 : 0;
+    p.camera_lens = in[27] <= kLensFront ? in[27] : uint8_t(kLensWide);
+    p.flags = in[28];
+    p.badge_accent_rgba[0] = in[29];
+    p.badge_accent_rgba[1] = in[30];
+    p.badge_accent_rgba[2] = in[31];
+    p.badge_accent_rgba[3] = in[32];
+    std::memcpy(p.assigned_cam_tag, in + 36, 16);
+    p.assigned_cam_tag[15] = '\0';
+    return true;
+}
+
 bool parse_tally_state(const uint8_t* in, size_t len, TallyStatePayload& t) {
     if (len < kTallyStateSize) return false;
     t = TallyStatePayload{};

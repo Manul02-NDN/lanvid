@@ -82,6 +82,8 @@ private:
     void update_slot_texture(uint32_t idx, uint32_t tex_index);
     void sync_tally();
     void persist_slot_labels();
+    void send_slot_video_config_sync(uint32_t slot, bool request_idr = false);
+    void apply_remote_video_config(const lv::VideoConfigSyncPayload& vc);
 
     // layout
     void draw_top_bar();
@@ -146,6 +148,16 @@ private:
     std::array<int, lv::kMultiCamMaxSlots> focus_{};
     std::array<bool, lv::kMultiCamMaxSlots> talk_{};
     std::array<bool, lv::kMultiCamMaxSlots> latch_{};
+    std::array<int, lv::kMultiCamMaxSlots> assigned_num_{};
+    std::array<std::array<char, 16>, lv::kMultiCamMaxSlots> assigned_tag_{};
+    std::array<int, lv::kMultiCamMaxSlots> delay_ms_{};
+    std::array<bool, lv::kMultiCamMaxSlots> fixed_delay_{};
+    std::array<int, lv::kMultiCamMaxSlots> fps_idx_{};      // 0=24, 1=25, 2=30, 3=50, 4=60
+    std::array<int, lv::kMultiCamMaxSlots> codec_idx_{};    // 0=H.264, 1=HEVC, 2=DCT
+    std::array<int, lv::kMultiCamMaxSlots> bitrate_mbps_{}; // 5..150 Mbps
+    std::array<bool, lv::kMultiCamMaxSlots> synced_{};
+    std::mutex vcfg_mu_;
+    std::vector<lv::VideoConfigSyncPayload> pending_vcfg_;
 
     // discovery / manual connect
     char manual_ip_[64] = {};

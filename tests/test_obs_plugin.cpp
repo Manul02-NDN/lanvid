@@ -4,22 +4,26 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <thread>
 #include <vector>
 
 #include "obs_api_compat.hpp"
 #include "obs_lanvid_core.hpp"
+#include "video/video_bus.hpp"
 
 TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
     using namespace lv::obs;
 
     // 1. Dynamic video resolution switching: 360p -> 1080p -> 9:16 vertical -> 4K UHD -> 4K DCI
-    LanVidObsSourceEngine src;
+    auto src = LanVidObsSourceEngine::create();
     SourceConfig cfg{};
     cfg.source_name = "CAM 1 • OBS MAIN";
+    cfg.connection_mode = ConnectionMode::kDedicatedPort;
     cfg.listen_port = 0;  // ephemeral UDP port
     cfg.camera_id = 1;
     cfg.jitter_preset = JitterPreset::kUltraLow;
+    cfg.show_placeholder = false;
     cfg.audio_route = AudioRouteMode::kStereoPair;
     cfg.audio_pair_index = 2;  // Ch 5-6 (0-based indices 4 & 5)
     cfg.audio_channels = 64;
@@ -33,7 +37,7 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
     std::atomic<uint32_t> audio_callbacks{0};
     std::atomic<float> last_l{0.0f}, last_r{0.0f};
 
-    CHECK(src.start(
+    CHECK(src->start(
         cfg,
         [&](const VideoFrameView& fv) {
             rx_frames.push_back({fv.width, fv.height, fv.format, fv.color_space});
@@ -46,7 +50,7 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
                 last_r.store(av.planes[1][0], std::memory_order_relaxed);
             }
         }));
-    CHECK(src.bound_port() != 0);
+    CHECK(src->bound_port() != 0);
 
     struct ResSpec {
         uint32_t w, h;
@@ -63,7 +67,7 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
     std::vector<uint8_t> dummy_bgra(4096u * 2160u * 4u, 0x80u);
     uint64_t ts_ns = 1'000'000ULL;
     for (const auto& sp : specs) {
-        src.ingest_video_frame_bgra(dummy_bgra.data(), sp.w, sp.h, sp.w * 4u, ts_ns, sp.cs);
+        src->ingest_video_frame_bgra(dummy_bgra.data(), sp.w, sp.h, sp.w * 4u, ts_ns, sp.cs);
         ts_ns += 16'666'667ULL;  // 60 fps
     }
 
@@ -74,7 +78,7 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
     CHECK(rx_frames[3].w == 3840 && rx_frames[3].h == 2160 && rx_frames[3].cs == ColorSpace::kBT2100_PQ);
     CHECK(rx_frames[4].w == 4096 && rx_frames[4].h == 2160 && rx_frames[4].cs == ColorSpace::kBT2100_HLG);
 
-    const auto tel = src.telemetry();
+    const auto tel = src->telemetry();
     CHECK(tel.width == 4096 && tel.height == 2160 && tel.frames_rx == 5);
 
     // 2. 64-channel AoIP audio routing: Stereo Pair (Ch 5-6), Mono Sum, Video Only
@@ -86,24 +90,24 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
         interleaved[size_t(f) * kCh + 5] = -0.50f;  // Ch 6
     }
     const uint32_t cb_before = audio_callbacks.load();
-    src.route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns);
+    src->route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns);
     CHECK(audio_callbacks.load() > cb_before);
     CHECK(std::fabs(last_l.load() - 0.75f) < 1e-5f);
     CHECK(std::fabs(last_r.load() - (-0.50f)) < 1e-5f);
 
     // Switch to Video Only -> no audio callback fired
     cfg.audio_route = AudioRouteMode::kVideoOnly;
-    cfg.listen_port = src.bound_port();
-    src.update_config(cfg);
+    cfg.listen_port = src->bound_port();
+    src->update_config(cfg);
     const uint32_t cb_after_mute = audio_callbacks.load();
-    src.route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns + 1000);
+    src->route_multichannel_audio(interleaved.data(), kCh, kFrames, 48000, ts_ns + 1000);
     CHECK(audio_callbacks.load() == cb_after_mute);
 
     // 3. LanVid Program Output loopback test
     LanVidObsOutputEngine out;
     OutputConfig ocfg{};
     ocfg.dest_ip = "127.0.0.1";
-    ocfg.dest_port = src.bound_port();
+    ocfg.dest_port = src->bound_port();
     ocfg.width = 640;
     ocfg.height = 360;
     ocfg.fps = 60;
@@ -114,7 +118,7 @@ TEST(obs_plugin_video_360p_to_4k60_dynamic_switch_and_64ch_audio_routing) {
     CHECK(out.frames_sent() == 1);
     out.stop();
 
-    src.stop();
+    src->stop();
     std::printf("    [obs-lanvid] 360p->1080p->9:16->4K UHD->4K DCI dynamic switch + 64ch Ch5-6 routing OK\n");
 }
 
@@ -163,14 +167,15 @@ TEST(obs_plugin_auto_tally_and_duplex_intercom_control_sync) {
     const uint16_t studio_port = mgr.studio_port();
     CHECK(studio_port != 0);
 
-    LanVidObsSourceEngine src;
+    auto src = LanVidObsSourceEngine::create();
     SourceConfig scfg{};
     scfg.source_name = "CAM 1 • OBS MAIN";
+    scfg.connection_mode = ConnectionMode::kDedicatedPort;
     scfg.listen_port = 0;
     scfg.camera_id = 1;
     scfg.auto_tally = true;
     scfg.sync_remote_rec = true;
-    CHECK(src.start(scfg, nullptr, nullptr));
+    CHECK(src->start(scfg, nullptr, nullptr));
 
     lv::TallyIntercomEngine phone_cam;
     std::atomic<uint8_t> phone_tally{lv::kTallyStandby};
@@ -193,7 +198,7 @@ TEST(obs_plugin_auto_tally_and_duplex_intercom_control_sync) {
 
     // OBS switches CAM 1 into Program + Recording -> phone gets PGM + Remote REC
     mgr.set_obs_global_state(/*studio_mode=*/true, /*streaming=*/true, /*recording=*/true);
-    src.set_obs_visibility(/*in_program=*/true, /*in_preview=*/false);
+    src->set_obs_visibility(/*in_program=*/true, /*in_preview=*/false);
     for (int i = 0; i < 25 && (phone_tally.load() != lv::kTallyProgram || !phone_rec.load()); ++i) {
         mgr.poll_studio();
         phone_cam.poll();
@@ -257,9 +262,141 @@ TEST(obs_plugin_auto_tally_and_duplex_intercom_control_sync) {
     CHECK(snap[0].effective_tally == lv::kTallyProgram && snap[0].remote_rec_active);
 
     phone_cam.stop();
-    src.stop();
+    src->stop();
     mgr.shutdown();
 
     std::printf("    [obs-lanvid] Auto-Tally PGM+REC + Duplex Intercom (phone_rms=%.3f obs_rms=%.3f) + ControlSync OK\n",
                 phone_rms, obs_rms);
+}
+
+TEST(obs_plugin_multi_camera_discovery_port_conflicts_and_remote_badge) {
+    using namespace lv::obs;
+
+    auto& rt = LanVidObsRuntime::instance();
+    rt.shutdown();
+    rt.clear_test_cameras();
+    REQUIRE(rt.startup(0));
+    const uint16_t studio_port = rt.studio_port();
+    REQUIRE(studio_port != 0);
+
+    // Inject 3 discovered phones + connect 1 real phone via Tally
+    for (int i = 1; i <= 3; ++i) {
+        DiscoveredCameraItem item{};
+        item.id = "lan:phone_" + std::to_string(i);
+        item.display_name = "[CAM " + std::to_string(i) + "] Phone " + std::to_string(i);
+        item.ip = "192.168.10." + std::to_string(10 + i);
+        item.port = uint16_t(5004 + (i - 1) * 2);
+        item.camera_id = uint32_t(i);
+        item.assigned_cam_number = uint8_t(i);
+        item.assigned_cam_tag = "CAM " + std::to_string(i);
+        item.origin = DiscoveryOrigin::kLanBroadcast;
+        rt.inject_discovered_camera_for_test(item);
+    }
+
+    lv::TallyIntercomEngine phone5;
+    std::atomic<uint8_t> badge_num{0};
+    std::string badge_tag;
+    std::atomic<uint8_t> remote_fps{0};
+    std::atomic<uint32_t> remote_kbps{0};
+    std::mutex badge_mu;
+    phone5.set_video_config_sync_callback([&](const lv::VideoConfigSyncPayload& vc) {
+        std::lock_guard<std::mutex> lk(badge_mu);
+        badge_num.store(vc.assigned_cam_number);
+        badge_tag = vc.assigned_cam_tag;
+        remote_fps.store(vc.target_fps);
+        if (vc.bitrate_kbps > 0) remote_kbps.store(vc.bitrate_kbps);
+    });
+    REQUIRE(phone5.start_camera("127.0.0.1", studio_port, 5, "Galaxy S25 Ultra"));
+
+    for (int i = 0; i < 60 && rt.tally_engine().studio_cameras().empty(); ++i) {
+        phone5.poll();
+        rt.poll_studio();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    REQUIRE(!rt.tally_engine().studio_cameras().empty());
+
+    rt.refresh_discovery_now();
+    const auto cams = rt.discovered_cameras();
+    CHECK(cams.size() >= 4);
+
+    // Port conflict detection between two sources
+    auto s1 = LanVidObsSourceEngine::create();
+    SourceConfig c1{};
+    c1.source_name = "OBS Cam A";
+    c1.connection_mode = ConnectionMode::kDedicatedPort;
+    c1.listen_port = 0;
+    c1.camera_id = 5;
+    REQUIRE(s1->start(c1, nullptr, nullptr));
+    const uint16_t p1 = s1->bound_port();
+    REQUIRE(p1 != 0);
+
+    const auto cfl = rt.check_port_conflict(p1, 999999ULL);
+    CHECK(cfl.has_conflict && cfl.port == p1 && cfl.conflicting_source == "OBS Cam A");
+    CHECK(!rt.check_port_conflict(p1, s1->uid()).has_conflict);
+
+    // Assign badge CAM 2 + remote bitrate/FPS control -> phone receives update cleanly
+    CHECK(s1->assign_camera_number(2, "CAM 2"));
+    RemoteCameraControl rc{};
+    rc.quality = CameraQualityPreset::kMaster4K60;
+    rc.fps = 50;
+    rc.bitrate_kbps = 75000;
+    rc.lens = lv::kLensTele;
+    CHECK(s1->send_remote_camera_control(rc));
+
+    for (int i = 0; i < 60 && (badge_num.load() != 2 || remote_kbps.load() != 75000); ++i) {
+        rt.poll_studio();
+        phone5.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(badge_num.load() == 2);
+    CHECK(remote_fps.load() == 50);
+    CHECK(remote_kbps.load() == 75000);
+    {
+        std::lock_guard<std::mutex> lk(badge_mu);
+        CHECK(badge_tag == "CAM 2");
+    }
+
+    s1->stop();
+    phone5.stop();
+    rt.clear_test_cameras();
+    rt.shutdown();
+}
+
+TEST(obs_plugin_stress_create_destroy_50_cycles) {
+    using namespace lv::obs;
+
+    auto& rt = LanVidObsRuntime::instance();
+    rt.shutdown();
+    REQUIRE(rt.startup(0));
+
+    std::atomic<bool> stop_reader{false};
+    std::thread reader([&]() {
+        while (!stop_reader.load(std::memory_order_relaxed)) {
+            (void)rt.snapshot_cameras();
+            (void)rt.discovered_cameras();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+
+    std::vector<uint8_t> frame(64u * 64u * 4u, 0x55u);
+    for (int cycle = 0; cycle < 50; ++cycle) {
+        auto src = LanVidObsSourceEngine::create();
+        SourceConfig cfg{};
+        cfg.source_name = "Stress Cam " + std::to_string(cycle);
+        cfg.connection_mode = ConnectionMode::kDedicatedPort;
+        cfg.listen_port = 0;
+        cfg.camera_id = uint32_t((cycle % 8) + 1);
+        cfg.video_delay_ms = 16;
+        REQUIRE(src->start(cfg, [](const VideoFrameView&) {}, [](const AudioBlockView&) {}));
+        src->ingest_video_frame_bgra(frame.data(), 64, 64, 64 * 4, uint64_t(cycle + 1) * 16'666'667ULL,
+                                     ColorSpace::kRec709, true, uint32_t((cycle + 1) * 16666));
+        src->set_obs_visibility((cycle % 2) == 0, (cycle % 2) == 1);
+        src->stop();
+        src.reset();
+    }
+
+    stop_reader.store(true);
+    reader.join();
+    CHECK(rt.snapshot_cameras().empty());
+    rt.shutdown();
 }

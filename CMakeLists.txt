@@ -125,6 +125,7 @@ set(LV_CORE_SOURCES
   src/audio/personal_monitor_bus.cpp
   src/audio/intercom_engine.cpp
   src/video/video_bus.cpp
+  src/video/video_playout_buffer.cpp
   src/video/iso_recorder.cpp
   src/video/multicam_manager.cpp
   src/net/mdns_advertiser.cpp

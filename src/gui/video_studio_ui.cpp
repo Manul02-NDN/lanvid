@@ -94,6 +94,16 @@ LanVidVideoStudioApp::LanVidVideoStudioApp(std::string config_path_override)
     quality_.fill(int(lv::kQuality1080p));
     focus_.fill(500);
     tex_slot_.fill(-1);
+    delay_ms_.fill(33);
+    fixed_delay_.fill(true);
+    fps_idx_.fill(4);      // 60 fps
+    codec_idx_.fill(0);    // H.264
+    bitrate_mbps_.fill(25);
+    synced_.fill(false);
+    for (uint32_t i = 0; i < lv::kMultiCamMaxSlots; ++i) {
+        assigned_num_[i] = int(i + 1);
+        std::snprintf(assigned_tag_[i].data(), assigned_tag_[i].size(), "CAM %u", i + 1);
+    }
 }
 
 LanVidVideoStudioApp::~LanVidVideoStudioApp() { shutdown(); }
@@ -135,6 +145,8 @@ bool LanVidVideoStudioApp::start_services(uint16_t video_port, uint16_t tally_po
     mc.max_slots = uint32_t(std::clamp(cfg_.video_max_slots, 1, 16));
     mc.vcam_count = uint32_t(std::clamp(cfg_.vcam_count, 0, 8));
     mc.vcam_placeholder = cfg_.vcam_placeholder;
+    mc.video_delay_ms = uint32_t(std::clamp(cfg_.video_default_delay_ms, 5, 250));
+    mc.video_fixed_delay = cfg_.video_default_fixed_delay;
     if (!multicam_.start(mc) && mc.bind_ip != "0.0.0.0") {
         mc.bind_ip = "0.0.0.0";
         if (!multicam_.start(mc)) return false;
@@ -151,6 +163,14 @@ bool LanVidVideoStudioApp::start_services(uint16_t video_port, uint16_t tally_po
         return false;
     }
     intercom_.set_wifi_redundancy(cfg_.wifi_redundancy, 1500);
+    intercom_.set_video_config_sync_callback([this](const lv::VideoConfigSyncPayload& vc) {
+        std::lock_guard<std::mutex> lk(vcfg_mu_);
+        pending_vcfg_.push_back(vc);
+    });
+    multicam_.set_idr_callback([this](uint32_t slot, uint32_t cam_id) {
+        (void)slot;
+        if (cam_id > 0) intercom_.studio_request_keyframe(cam_id);
+    });
 
     // 3. Discovery on the Video port (5023, role="video") + best-effort legacy :5099
     discovery_.set_role("video");
@@ -186,6 +206,17 @@ void LanVidVideoStudioApp::apply_slot_config() {
             multicam_.set_slot_label(i, cfg_.video_slot_labels[i]);
         if (i < cfg_.video_slot_ips.size() && !cfg_.video_slot_ips[i].empty())
             multicam_.pin_slot(i, cfg_.video_slot_ips[i]);
+        if (i < cfg_.video_slot_delay_ms.size()) delay_ms_[i] = std::clamp(cfg_.video_slot_delay_ms[i], 5, 250);
+        else delay_ms_[i] = std::clamp(cfg_.video_default_delay_ms, 5, 250);
+        if (i < cfg_.video_slot_fixed_delay.size()) fixed_delay_[i] = cfg_.video_slot_fixed_delay[i] != 0;
+        else fixed_delay_[i] = cfg_.video_default_fixed_delay;
+        multicam_.set_slot_playout_config(i, uint32_t(delay_ms_[i]), fixed_delay_[i]);
+
+        if (i < cfg_.video_slot_cam_numbers.size() && cfg_.video_slot_cam_numbers[i] > 0)
+            assigned_num_[i] = std::clamp(cfg_.video_slot_cam_numbers[i], 1, 16);
+        if (i < cfg_.video_slot_cam_tags.size() && !cfg_.video_slot_cam_tags[i].empty())
+            std::snprintf(assigned_tag_[i].data(), assigned_tag_[i].size(), "%s", cfg_.video_slot_cam_tags[i].c_str());
+        multicam_.set_slot_assigned_camera(i, uint8_t(assigned_num_[i]), assigned_tag_[i].data());
     }
     multicam_.set_vcam(uint32_t(std::clamp(cfg_.vcam_count, 0, 8)), cfg_.vcam_placeholder);
     multicam_.set_program_slot(pgm_slot_);
@@ -196,10 +227,18 @@ void LanVidVideoStudioApp::persist_slot_labels() {
     const uint32_t n = multicam_.slot_count();
     cfg_.video_slot_labels.resize(n);
     cfg_.video_slot_ips.resize(n);
+    cfg_.video_slot_delay_ms.resize(n);
+    cfg_.video_slot_fixed_delay.resize(n);
+    cfg_.video_slot_cam_numbers.resize(n);
+    cfg_.video_slot_cam_tags.resize(n);
     for (uint32_t i = 0; i < n; ++i) {
         const auto info = multicam_.slot_info(i);
         cfg_.video_slot_labels[i] = info.label;
         cfg_.video_slot_ips[i] = info.pinned_ip;
+        cfg_.video_slot_delay_ms[i] = delay_ms_[i];
+        cfg_.video_slot_fixed_delay[i] = fixed_delay_[i] ? 1 : 0;
+        cfg_.video_slot_cam_numbers[i] = assigned_num_[i];
+        cfg_.video_slot_cam_tags[i] = assigned_tag_[i].data();
     }
 }
 
@@ -257,8 +296,76 @@ void LanVidVideoStudioApp::sync_tally() {
     }
 }
 
+void LanVidVideoStudioApp::send_slot_video_config_sync(uint32_t slot, bool request_idr) {
+    if (slot >= multicam_.slot_count() || slot >= lv::kMultiCamMaxSlots) return;
+    const auto info = multicam_.slot_info(slot);
+    if (!info.camera_id) return;
+
+    static constexpr uint8_t kFpsTable[5] = {24, 25, 30, 50, 60};
+    static constexpr uint8_t kCodecTable[3] = {uint8_t(lv::VideoCodecId::kH264), uint8_t(lv::VideoCodecId::kH265),
+                                               uint8_t(lv::VideoCodecId::kLanVidDct)};
+
+    lv::VideoConfigSyncPayload vc{};
+    vc.camera_id = info.camera_id;
+    vc.assigned_cam_number = uint8_t(std::clamp(assigned_num_[slot], 1, 16));
+    std::snprintf(vc.assigned_cam_tag, sizeof(vc.assigned_cam_tag), "%s",
+                  assigned_tag_[slot][0] ? assigned_tag_[slot].data() : ("CAM " + std::to_string(vc.assigned_cam_number)).c_str());
+    vc.resolution_preset = uint8_t(std::clamp(quality_[slot], 0, 3));
+    vc.target_fps = kFpsTable[std::clamp(fps_idx_[slot], 0, 4)];
+    vc.codec = kCodecTable[std::clamp(codec_idx_[slot], 0, 2)];
+    vc.bitrate_kbps = uint32_t(std::clamp(bitrate_mbps_[slot], 5, 150)) * 1000u;
+    vc.video_delay_ms = uint16_t(std::clamp(delay_ms_[slot], 5, 250));
+    vc.fixed_delay_mode = fixed_delay_[slot] ? 1 : 0;
+    vc.camera_lens = uint8_t(std::clamp(lens_[slot], 0, 3));
+    vc.flags = request_idr ? lv::kVideoConfigFlagRequestIdr : 0;
+    if (intercom_.send_video_config_sync(info.camera_id, vc)) {
+        synced_[slot] = true;
+        multicam_.set_slot_config_synced(slot, true);
+    }
+}
+
+void LanVidVideoStudioApp::apply_remote_video_config(const lv::VideoConfigSyncPayload& vc) {
+    static constexpr int kFpsTable[5] = {24, 25, 30, 50, 60};
+    for (uint32_t i = 0; i < multicam_.slot_count() && i < lv::kMultiCamMaxSlots; ++i) {
+        const auto info = multicam_.slot_info(i);
+        if (info.camera_id != vc.camera_id || vc.camera_id == 0) continue;
+        quality_[i] = std::clamp<int>(vc.resolution_preset, 0, 3);
+        int best_fps_idx = 4;
+        int best_diff = 999;
+        for (int k = 0; k < 5; ++k) {
+            const int d = std::abs(int(vc.target_fps) - kFpsTable[k]);
+            if (d < best_diff) {
+                best_diff = d;
+                best_fps_idx = k;
+            }
+        }
+        fps_idx_[i] = best_fps_idx;
+        if (vc.codec == uint8_t(lv::VideoCodecId::kLanVidDct)) codec_idx_[i] = 2;
+        else if (vc.codec == uint8_t(lv::VideoCodecId::kH265)) codec_idx_[i] = 1;
+        else codec_idx_[i] = 0;
+        if (vc.bitrate_kbps >= 1000) bitrate_mbps_[i] = std::clamp<int>(int(vc.bitrate_kbps / 1000), 5, 150);
+        lens_[i] = std::clamp<int>(vc.camera_lens, 0, 3);
+        if (vc.video_delay_ms >= 5) {
+            delay_ms_[i] = std::clamp<int>(vc.video_delay_ms, 5, 250);
+            fixed_delay_[i] = vc.fixed_delay_mode != 0;
+            multicam_.set_slot_playout_config(i, uint32_t(delay_ms_[i]), fixed_delay_[i]);
+        }
+        synced_[i] = true;
+        multicam_.set_slot_config_synced(i, true);
+        break;
+    }
+}
+
 void LanVidVideoStudioApp::poll_services() {
     intercom_.poll();
+    {
+        std::vector<lv::VideoConfigSyncPayload> batch;
+        {
+            std::lock_guard<std::mutex> lk(vcfg_mu_);
+            batch.swap(pending_vcfg_);
+        }
+        for (const auto& vc : batch) apply_remote_video_config(vc);
+    }
     sync_tally();
     // AUTO transition: after 0.5 s the preview becomes program
     if (auto_t0_ >= 0.0 && clock_s_ - auto_t0_ >= 0.5) {
@@ -603,7 +710,7 @@ void LanVidVideoStudioApp::draw_multiview() {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float gap = 10.0f;
     const float cw = (avail.x - gap * float(grid - 1)) / float(grid);
-    const float ch = std::max(220.0f, (avail.y - gap * float(grid - 1)) / float(grid));
+    const float ch = std::max(310.0f, (avail.y - gap * float(grid - 1)) / float(grid));
     for (uint32_t i = 0; i < shown; ++i) {
         if (i % uint32_t(grid)) ImGui::SameLine(0.0f, gap);
         draw_camera_card(i, cw, ch);
@@ -615,11 +722,11 @@ void LanVidVideoStudioApp::draw_camera_card(uint32_t slot, float w, float h) {
     const auto info = multicam_.slot_info(slot);
     update_slot_texture(slot, slot);
     ImGui::PushID(int(slot));
-    ImGui::BeginChild("##card", ImVec2(w, h), true, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("##card", ImVec2(w, h), true);
 
-    // header: editable label + tally / vcam pills
+    // header: editable label + tally / vcam / sync pills
     if (editing_slot_ == int(slot)) {
-        ImGui::SetNextItemWidth(w * 0.5f);
+        ImGui::SetNextItemWidth(w * 0.42f);
         if (ImGui::InputText("##lbl", label_buf_, sizeof(label_buf_), ImGuiInputTextFlags_EnterReturnsTrue) ||
             ImGui::IsItemDeactivated()) {
             multicam_.set_slot_label(slot, label_buf_);
@@ -639,13 +746,17 @@ void LanVidVideoStudioApp::draw_camera_card(uint32_t slot, float w, float h) {
     const bool is_pgm = int(slot) == pgm_slot_, is_pvw = int(slot) == pvw_slot_;
     draw_status_pill(is_pgm ? "PGM" : is_pvw ? "PVW" : "STBY", is_pgm ? p.red : is_pvw ? p.green : p.text_muted, is_pgm || is_pvw);
     ImGui::SameLine();
-    draw_status_pill(info.vcam_active ? "Virtual Cam: Active" : "Virtual Cam: Off", info.vcam_active ? p.accent_teal : p.text_muted,
-                     false);
+    draw_status_pill(info.vcam_active ? "vCam On" : "vCam Off", info.vcam_active ? p.accent_teal : p.text_muted, false);
+    if (synced_[slot] || info.config_synced) {
+        ImGui::SameLine();
+        draw_status_pill("Synced with Phone", p.green, true);
+    }
 
     // live preview
-    const float pv_h = std::max(90.0f, h - 120.0f);
+    const float pv_h = std::max(88.0f, h - 220.0f);
     char overlay[96];
-    std::snprintf(overlay, sizeof(overlay), "CAM %u", slot + 1);
+    const char* badge_tag = assigned_tag_[slot][0] ? assigned_tag_[slot].data() : "CAM";
+    std::snprintf(overlay, sizeof(overlay), "%s (#%d)", badge_tag, assigned_num_[slot]);
     draw_preview_image(int(slot), ImGui::GetContentRegionAvail().x, pv_h, overlay,
                        is_pgm ? p.red : is_pvw ? p.green : p.border);
 
@@ -661,8 +772,11 @@ void LanVidVideoStudioApp::draw_camera_card(uint32_t slot, float w, float h) {
         ImGui::SameLine();
         ImGui::TextColored(info.battery_pct < 20 ? p.red : p.text_muted, " · 🔋%d%% · %d°C", info.battery_pct, info.temp_c);
     }
+    ImGui::TextColored(p.accent_ind, "Buffer: %.0f ms (%s) • Jitter: %.1f ms • Drops: %llu",
+                       info.playout_effective_ms, info.playout_fixed_mode ? "Fixed" : "Adaptive",
+                       info.playout_jitter_ms, static_cast<unsigned long long>(info.playout_drops));
 
-    // controls
+    // primary actions: REC / PVW / PGM / Force IDR
     if (info.recording) ImGui::PushStyleColor(ImGuiCol_Button, p.red);
     if (ImGui::SmallButton(info.recording ? "■ STOP" : "● REC")) multicam_.rec_slot(slot, !info.recording);
     if (info.recording) ImGui::PopStyleColor();
@@ -670,23 +784,97 @@ void LanVidVideoStudioApp::draw_camera_card(uint32_t slot, float w, float h) {
     if (ImGui::SmallButton("PVW")) set_preview(int(slot));
     ImGui::SameLine();
     if (ImGui::SmallButton("PGM")) take_program(int(slot));
-    if (slot < lv::kMultiCamMaxSlots && info.camera_id) {
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Force IDR")) {
+        multicam_.force_slot_idr(slot);
+        send_slot_video_config_sync(slot, true);
+    }
+
+    // Camera Number Assignment (CAM 1..16 + custom short tag)
+    if (slot < lv::kMultiCamMaxSlots) {
+        static const char* kCamNums[16] = {"CAM 1", "CAM 2", "CAM 3", "CAM 4", "CAM 5", "CAM 6", "CAM 7", "CAM 8",
+                                           "CAM 9", "CAM 10", "CAM 11", "CAM 12", "CAM 13", "CAM 14", "CAM 15", "CAM 16"};
+        int num_idx = std::clamp(assigned_num_[slot] - 1, 0, 15);
+        ImGui::SetNextItemWidth(76);
+        if (ImGui::Combo("##camnum", &num_idx, kCamNums, 16)) {
+            assigned_num_[slot] = num_idx + 1;
+            std::snprintf(assigned_tag_[slot].data(), assigned_tag_[slot].size(), "CAM %d", assigned_num_[slot]);
+            multicam_.set_slot_assigned_camera(slot, uint8_t(assigned_num_[slot]), assigned_tag_[slot].data());
+            send_slot_video_config_sync(slot, false);
+            persist_slot_labels();
+            save_app_config(cfg_, config_path_);
+        }
         ImGui::SameLine();
+        ImGui::SetNextItemWidth(66);
+        ImGui::InputTextWithHint("##tag", "A/CAM1", assigned_tag_[slot].data(), assigned_tag_[slot].size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Значок→Тел")) {
+            multicam_.set_slot_assigned_camera(slot, uint8_t(assigned_num_[slot]), assigned_tag_[slot].data());
+            send_slot_video_config_sync(slot, false);
+            persist_slot_labels();
+            save_app_config(cfg_, config_path_);
+        }
+
+        // VideoPlayoutBuffer: Fixed vs Adaptive + 16/33/50/80 ms presets + 5..250 ms slider
+        bool buf_changed = false;
+        int mode_idx = fixed_delay_[slot] ? 0 : 1;
+        const char* buf_modes[] = {"Fixed", "Adaptive"};
+        ImGui::SetNextItemWidth(78);
+        if (ImGui::Combo("##bufmode", &mode_idx, buf_modes, 2)) {
+            fixed_delay_[slot] = (mode_idx == 0);
+            buf_changed = true;
+        }
+        for (int pms : {16, 33, 50, 80}) {
+            ImGui::SameLine();
+            const bool sel_ms = (delay_ms_[slot] == pms);
+            if (sel_ms) ImGui::PushStyleColor(ImGuiCol_Button, p.accent_blue);
+            char bl[16];
+            std::snprintf(bl, sizeof(bl), "%dms", pms);
+            if (ImGui::SmallButton(bl)) {
+                delay_ms_[slot] = pms;
+                buf_changed = true;
+            }
+            if (sel_ms) ImGui::PopStyleColor();
+        }
+        ImGui::SetNextItemWidth(std::max(100.0f, w - 36.0f));
+        if (ImGui::SliderInt("##delay", &delay_ms_[slot], 5, 250, "Буфер %d ms")) buf_changed = true;
+        if (buf_changed) {
+            multicam_.set_slot_playout_config(slot, uint32_t(delay_ms_[slot]), fixed_delay_[slot]);
+            send_slot_video_config_sync(slot, false);
+            persist_slot_labels();
+            save_app_config(cfg_, config_path_);
+        }
+
+        // Synced camera parameters (720p/1080p/4K, FPS, Codec, Bitrate, Lens, AF)
         const char* lenses[] = {"Wide", "Ultra", "Tele", "Front"};
         const char* q[] = {"360p", "720p", "1080p", "4K"};
-        ImGui::SetNextItemWidth(70);
-        bool send = ImGui::Combo("##lens", &lens_[slot], lenses, 4);
+        const char* fps_opts[] = {"24p", "25p", "30p", "50p", "60p"};
+        const char* codec_opts[] = {"H.264", "HEVC", "DCT"};
+        bool send_cfg = false;
+        bool send_legacy_ctl = false;
+        ImGui::SetNextItemWidth(62);
+        if (ImGui::Combo("##q", &quality_[slot], q, 4)) { send_cfg = true; send_legacy_ctl = true; }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(70);
-        send |= ImGui::Combo("##q", &quality_[slot], q, 4);
+        ImGui::SetNextItemWidth(54);
+        if (ImGui::Combo("##fps", &fps_idx_[slot], fps_opts, 5)) send_cfg = true;
         ImGui::SameLine();
-        send |= ImGui::Checkbox("AF", &af_[slot]);
+        ImGui::SetNextItemWidth(64);
+        if (ImGui::Combo("##cdc", &codec_idx_[slot], codec_opts, 3)) send_cfg = true;
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(64);
+        if (ImGui::Combo("##lens", &lens_[slot], lenses, 4)) { send_cfg = true; send_legacy_ctl = true; }
+
+        ImGui::SetNextItemWidth(std::max(90.0f, w - 160.0f));
+        if (ImGui::SliderInt("##br", &bitrate_mbps_[slot], 5, 150, "%d Mbps")) send_cfg = true;
+        ImGui::SameLine();
+        if (ImGui::Checkbox("AF", &af_[slot])) send_legacy_ctl = true;
         if (!af_[slot]) {
             ImGui::SameLine();
-            ImGui::SetNextItemWidth(80);
-            send |= ImGui::SliderInt("##focus", &focus_[slot], 0, 1000, "F %d");
+            ImGui::SetNextItemWidth(70);
+            if (ImGui::SliderInt("##focus", &focus_[slot], 0, 1000, "F %d")) send_legacy_ctl = true;
         }
-        if (send) {
+        if (send_cfg) send_slot_video_config_sync(slot, false);
+        if (send_legacy_ctl && info.camera_id) {
             lv::CameraControlPayload cc;
             cc.lens = uint8_t(lens_[slot]);
             cc.quality = uint8_t(quality_[slot]);

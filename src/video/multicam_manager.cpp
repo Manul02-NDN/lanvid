@@ -44,8 +44,15 @@ struct MultiCamManager::Slot {
     int battery = -1;
     int temp = -100;
     uint8_t tally = 0;
+    uint8_t assigned_cam_number = 0;
+    std::string assigned_cam_tag;
+    uint8_t badge_accent_rgba[4] = {0, 0, 0, 0};
+    bool config_synced = false;
 
-    // video (frame_mu)
+    // video + playout buffer (pub_mu -> frame_mu -> bus_mu_)
+    mutable std::mutex pub_mu;
+    mutable VideoPlayoutBuffer playout;
+    mutable uint64_t playout_pub_seq = 0;
     mutable std::mutex frame_mu;
     Image frame;
     uint64_t frame_seq = 0;
@@ -129,11 +136,20 @@ bool MultiCamManager::start(const MultiCamConfig& cfg) {
         auto s = std::make_unique<Slot>();
         s->index = i;
         s->label = "CAM " + std::to_string(i + 1);
+        s->assigned_cam_number = uint8_t(i + 1);
+        s->assigned_cam_tag = s->label;
         s->listen_port = cfg_.port_mode == MultiCamPortMode::kSequentialPorts ? uint16_t(cfg_.base_port + 2 * i)
                                                                                : cfg_.base_port;
+        VideoPlayoutConfig pc;
+        pc.fixed_delay_mode = cfg_.video_fixed_delay;
+        pc.target_delay_ms = std::clamp<uint32_t>(cfg_.video_delay_ms, 5, 250);
+        s->playout.set_config(pc);
+        s->playout.set_idr_request_callback([this, i]() { request_idr(i); });
         slots_.push_back(std::move(s));
     }
     stop_.store(false);
+    iso_stop_.store(false);
+    iso_thread_ = std::thread([this] { iso_worker_loop(); });
     if (cfg_.publish_video_bus) {
         if (bus_.open(cfg_.video_bus_name.empty() ? nullptr : cfg_.video_bus_name.c_str())) {
             bus_.set_active_vcams(cfg_.vcam_count, cfg_.vcam_placeholder);
@@ -169,6 +185,12 @@ bool MultiCamManager::start(const MultiCamConfig& cfg) {
 void MultiCamManager::stop() {
     rec_stop_all();
     stop_.store(true);
+    {
+        std::lock_guard<std::mutex> lk(iso_q_mu_);
+        iso_stop_.store(true);
+    }
+    iso_q_cv_.notify_all();
+    if (iso_thread_.joinable()) iso_thread_.join();
     if (demux_thread_.joinable()) demux_thread_.join();
     for (auto& s : slots_) {
         if (!s) continue;
@@ -299,8 +321,9 @@ void MultiCamManager::demux_loop() {
             for (auto& s : slots_)
                 if (s->rx) s->rx->service(now);
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
+        for (uint32_t i = 0; i < slots_.size(); ++i) publish_slot_playout(i, now);
         if (now >= next_house) {  // 5 Hz: virtual-camera slot state + bus heartbeat
             next_house = now + 200000;
             if (bus_.is_open()) {
@@ -326,6 +349,151 @@ void MultiCamManager::demux_loop() {
     }
 }
 
+void MultiCamManager::publish_slot_playout(uint32_t i, uint64_t now) const {
+    Slot* s = slot_ptr(i);
+    if (!s) return;
+    Image out;
+    bool got = false;
+    {
+        std::lock_guard<std::mutex> plk(s->pub_mu);
+        uint64_t seq = s->playout_pub_seq;
+        if (!s->playout.poll_frame(now, out, seq)) return;
+        s->playout_pub_seq = seq;
+        got = true;
+    }
+    if (!got || out.width <= 0) return;
+
+    double cur_fps = 0.0;
+    {
+        std::lock_guard<std::mutex> lk(s->frame_mu);
+        s->frame = out;
+        ++s->frame_seq;
+        cur_fps = s->fps;
+    }
+
+    // ---- OS virtual cameras (isolated from ISO recording) ----
+    const bool to_vcam = bus_.is_open() && i < kVideoBusCameraSlots && i < cfg_.vcam_count;
+    const bool to_pgm = bus_.is_open() && int(i) == program_slot();
+    if (to_vcam || to_pgm) {
+        std::lock_guard<std::mutex> lk(bus_mu_);
+        const uint32_t w = uint32_t(out.width), h = uint32_t(out.height);
+        const uint32_t fps100 = uint32_t(cur_fps * 100.0);
+        if (w * h <= 1920u * 1080u) {
+            if (to_vcam) bus_.publish(i, VideoBusFormat::kBGRA, w, h, out.data.data(), uint32_t(out.stride), now, fps100);
+            if (to_pgm)
+                bus_.publish(kVideoBusProgramSlot, VideoBusFormat::kBGRA, w, h, out.data.data(), uint32_t(out.stride), now,
+                             fps100);
+        } else {
+            const uint32_t ew = w & ~1u, eh = h & ~1u;
+            nv12_scratch_.resize(size_t(ew) * eh * 3 / 2);
+            video_bus_bgra_to_nv12(out.data.data(), ew, eh, uint32_t(out.stride), nv12_scratch_.data(), ew);
+            if (to_vcam) bus_.publish(i, VideoBusFormat::kNV12, ew, eh, nv12_scratch_.data(), ew, now, fps100);
+            if (to_pgm)
+                bus_.publish(kVideoBusProgramSlot, VideoBusFormat::kNV12, ew, eh, nv12_scratch_.data(), ew, now, fps100);
+        }
+    }
+}
+
+void MultiCamManager::iso_worker_loop() {
+    for (;;) {
+        IsoJob job;
+        {
+            std::unique_lock<std::mutex> lk(iso_q_mu_);
+            iso_q_cv_.wait(lk, [this] { return iso_stop_.load(std::memory_order_acquire) || !iso_q_.empty(); });
+            if (iso_stop_.load(std::memory_order_acquire) && iso_q_.empty()) break;
+            job = std::move(iso_q_.front());
+            iso_q_.pop_front();
+            iso_busy_ = true;
+        }
+
+        if (!job.is_program) {
+            Slot* s = slot_ptr(job.slot);
+            if (s) {
+                std::lock_guard<std::mutex> lk(s->rec_mu);
+                if (s->rec_on) {
+                    if (!s->enc || s->enc_w != job.image.width || s->enc_h != job.image.height) {
+                        VideoEncoderConfig ec;
+                        ec.width = job.image.width;
+                        ec.height = job.image.height;
+                        double fps_val = 30.0;
+                        {
+                            std::lock_guard<std::mutex> fl(s->frame_mu);
+                            if (s->fps > 1.0) fps_val = s->fps;
+                        }
+                        ec.fps = std::max(24.0, fps_val);
+                        ec.bitrate_kbps = uint32_t(std::clamp(job.image.width * job.image.height / 100, 4000, 40000));
+                        ec.keyframe_interval = 60;
+                        s->enc = create_video_encoder(VideoCodecId::kH264, ec);
+                        s->enc_w = job.image.width;
+                        s->enc_h = job.image.height;
+                    }
+                    if (s->enc) {
+                        EncodedVideoPacket pkt;
+                        if (s->enc->encode_image(job.image, pkt)) {
+                            if (!s->rec) open_slot_recorder(job.slot, IsoVideoCodec::kH264, job.image.width, job.image.height);
+                            if (s->rec)
+                                s->rec->write_video(pkt.data.data(), pkt.data.size(), pkt.is_keyframe, job.timestamp_us);
+                        }
+                    }
+                }
+            }
+        } else {
+            std::lock_guard<std::mutex> lk(rec_mu_);
+            if (session_active_ && session_.record_program) {
+                constexpr int kW = 1920, kH = 1080;
+                if (!program_enc_) {
+                    VideoEncoderConfig ec;
+                    ec.width = kW;
+                    ec.height = kH;
+                    ec.fps = 30.0;
+                    ec.bitrate_kbps = 16000;
+                    ec.keyframe_interval = 60;
+                    program_enc_ = create_video_encoder(VideoCodecId::kH264, ec);
+                }
+                if (program_enc_ && !program_rec_) {
+                    IsoRecorderConfig rc;
+                    rc.path = session_dir_ + "/PGM_Master." + iso_container_extension(session_.container);
+                    rc.container = session_.container;
+                    rc.codec = IsoVideoCodec::kH264;
+                    rc.width = kW;
+                    rc.height = kH;
+                    rc.timecode_fps = 30;
+                    rc.timecode_start_frame = session_tc_frame_;
+                    rc.creation_unix_s = session_unix_s_;
+                    rc.camera_label = "PGM Master Mix";
+                    program_rec_ = std::make_unique<IsoRecorder>();
+                    if (!program_rec_->open(rc)) program_rec_.reset();
+                }
+                if (program_enc_ && program_rec_) {
+                    Image scaled;
+                    scaled.allocate(kW, kH, PixelOrder::kBGRA);
+                    VideoBus::FrameInfo fi;
+                    fi.width = uint32_t(job.image.width);
+                    fi.height = uint32_t(job.image.height);
+                    fi.stride = uint32_t(job.image.stride);
+                    fi.format = VideoBusFormat::kBGRA;
+                    video_bus_convert_to_bgra(job.image.data.data(), fi, scaled.data.data(), kW, kH,
+                                              uint32_t(scaled.stride));
+                    EncodedVideoPacket pkt;
+                    if (program_enc_->encode_image(scaled, pkt))
+                        program_rec_->write_video(pkt.data.data(), pkt.data.size(), pkt.is_keyframe, job.timestamp_us);
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(iso_q_mu_);
+            iso_busy_ = false;
+            if (iso_q_.empty()) iso_idle_cv_.notify_all();
+        }
+    }
+}
+
+void MultiCamManager::drain_iso_queue() {
+    std::unique_lock<std::mutex> lk(iso_q_mu_);
+    iso_idle_cv_.wait(lk, [this] { return iso_q_.empty() && !iso_busy_; });
+}
+
 void MultiCamManager::on_frame(uint32_t i, const CompletedFrame& cf) {
     Slot* s = slot_ptr(i);
     if (!s || !cf.image || cf.image->width <= 0) return;
@@ -333,8 +501,6 @@ void MultiCamManager::on_frame(uint32_t i, const CompletedFrame& cf) {
     const uint64_t now = now_us();
     {
         std::lock_guard<std::mutex> lk(s->frame_mu);
-        s->frame = img;
-        ++s->frame_seq;
         if (!s->fps_t0) s->fps_t0 = now;
         ++s->fps_n;
         if (now - s->fps_t0 >= 1000000) {
@@ -349,92 +515,34 @@ void MultiCamManager::on_frame(uint32_t i, const CompletedFrame& cf) {
     s->frames.fetch_add(1);
     s->last_frame_us.store(now);
 
-    // ---- OS virtual cameras ----
-    const bool to_vcam = bus_.is_open() && i < kVideoBusCameraSlots && i < cfg_.vcam_count;
-    const bool to_pgm = bus_.is_open() && int(i) == program_slot();
-    if (to_vcam || to_pgm) {
-        std::lock_guard<std::mutex> lk(bus_mu_);
-        const uint32_t w = uint32_t(img.width), h = uint32_t(img.height);
-        const uint32_t fps100 = uint32_t(s->fps * 100.0);
-        if (w * h <= 1920u * 1080u) {
-            if (to_vcam) bus_.publish(i, VideoBusFormat::kBGRA, w, h, img.data.data(), uint32_t(img.stride), now, fps100);
-            if (to_pgm) bus_.publish(kVideoBusProgramSlot, VideoBusFormat::kBGRA, w, h, img.data.data(), uint32_t(img.stride), now, fps100);
-        } else {
-            const uint32_t ew = w & ~1u, eh = h & ~1u;
-            nv12_scratch_.resize(size_t(ew) * eh * 3 / 2);
-            video_bus_bgra_to_nv12(img.data.data(), ew, eh, uint32_t(img.stride), nv12_scratch_.data(), ew);
-            if (to_vcam) bus_.publish(i, VideoBusFormat::kNV12, ew, eh, nv12_scratch_.data(), ew, now, fps100);
-            if (to_pgm) bus_.publish(kVideoBusProgramSlot, VideoBusFormat::kNV12, ew, eh, nv12_scratch_.data(), ew, now, fps100);
-        }
-    }
+    // 1. Enqueue into per-slot VideoPlayoutBuffer (non-blocking, absorbs Wi-Fi jitter)
+    const bool corrupt = (cf.slices_corrupt > 0 || cf.slices_lost > 0) && cf.codec != VideoCodecId::kLanVidDct;
+    s->playout.push_frame(img, cf.frame_id, cf.sender_timestamp_us, now, cf.is_keyframe, corrupt);
+    publish_slot_playout(i, now);
 
-    // ---- ISO recording of DCT cameras (encode) ----
+    // 2. Non-blocking dispatch to background ISO encoder/writer (never stalls preview or vCam!)
+    bool need_dct_iso = false;
     if (cf.codec == VideoCodecId::kLanVidDct) {
         std::lock_guard<std::mutex> lk(s->rec_mu);
-        if (s->rec_on) {
-            if (!s->enc || s->enc_w != img.width || s->enc_h != img.height) {
-                VideoEncoderConfig ec;
-                ec.width = img.width;
-                ec.height = img.height;
-                ec.fps = std::max(24.0, s->fps > 1 ? s->fps : 30.0);
-                ec.bitrate_kbps = uint32_t(std::clamp(img.width * img.height / 100, 4000, 40000));
-                ec.keyframe_interval = 60;
-                s->enc = create_video_encoder(VideoCodecId::kH264, ec);
-                s->enc_w = img.width;
-                s->enc_h = img.height;
-            }
-            if (s->enc) {
-                EncodedVideoPacket pkt;
-                if (s->enc->encode_image(img, pkt)) {
-                    if (!s->rec) open_slot_recorder(i, IsoVideoCodec::kH264, img.width, img.height);
-                    if (s->rec) s->rec->write_video(pkt.data.data(), pkt.data.size(), pkt.is_keyframe, now - session_t0_us_);
-                }
-            }
-        }
+        need_dct_iso = s->rec_on;
     }
-
-    // ---- PGM Master Mix (program switch, encoded at 1920x1080) ----
+    bool need_pgm_iso = false;
     if (int(i) == program_slot()) {
         std::lock_guard<std::mutex> lk(rec_mu_);
-        if (session_active_ && session_.record_program) {
-            constexpr int kW = 1920, kH = 1080;
-            if (!program_enc_) {
-                VideoEncoderConfig ec;
-                ec.width = kW;
-                ec.height = kH;
-                ec.fps = 30.0;
-                ec.bitrate_kbps = 16000;
-                ec.keyframe_interval = 60;
-                program_enc_ = create_video_encoder(VideoCodecId::kH264, ec);
-            }
-            if (program_enc_ && !program_rec_) {
-                IsoRecorderConfig rc;
-                rc.path = session_dir_ + "/PGM_Master." + iso_container_extension(session_.container);
-                rc.container = session_.container;
-                rc.codec = IsoVideoCodec::kH264;
-                rc.width = kW;
-                rc.height = kH;
-                rc.timecode_fps = 30;
-                rc.timecode_start_frame = session_tc_frame_;
-                rc.creation_unix_s = session_unix_s_;
-                rc.camera_label = "PGM Master Mix";
-                program_rec_ = std::make_unique<IsoRecorder>();
-                if (!program_rec_->open(rc)) program_rec_.reset();
-            }
-            if (program_enc_ && program_rec_) {
-                Image scaled;
-                scaled.allocate(kW, kH, PixelOrder::kBGRA);
-                VideoBus::FrameInfo fi;
-                fi.width = uint32_t(img.width);
-                fi.height = uint32_t(img.height);
-                fi.stride = uint32_t(img.stride);
-                fi.format = VideoBusFormat::kBGRA;
-                video_bus_convert_to_bgra(img.data.data(), fi, scaled.data.data(), kW, kH, uint32_t(scaled.stride));
-                EncodedVideoPacket pkt;
-                if (program_enc_->encode_image(scaled, pkt))
-                    program_rec_->write_video(pkt.data.data(), pkt.data.size(), pkt.is_keyframe, now - session_t0_us_);
-            }
+        need_pgm_iso = session_active_ && session_.record_program;
+    }
+    if (need_dct_iso || need_pgm_iso) {
+        const uint64_t ts_rel = now > session_t0_us_ ? now - session_t0_us_ : 0;
+        std::lock_guard<std::mutex> qlk(iso_q_mu_);
+        if (need_dct_iso) {
+            if (iso_q_.size() >= 16) iso_q_.pop_front();
+            iso_q_.push_back(IsoJob{i, img, ts_rel, false});
         }
+        if (need_pgm_iso) {
+            if (iso_q_.size() >= 16) iso_q_.pop_front();
+            iso_q_.push_back(IsoJob{i, img, ts_rel, true});
+        }
+        iso_q_cv_.notify_one();
     }
 }
 
@@ -593,11 +701,25 @@ bool MultiCamManager::rec_start_all(const IsoSessionConfig& session) {
 void MultiCamManager::request_idr(uint32_t i) {
     Slot* s = slot_ptr(i);
     if (!s) return;
-    std::lock_guard<std::mutex> lk(slots_mu_);
-    if (s->bound && s->rx) s->rx->request_keyframe();  // start the file now, not at the next GOP
+    uint32_t cam_id = 0;
+    {
+        std::lock_guard<std::mutex> lk(slots_mu_);
+        if (s->bound && s->rx) s->rx->request_keyframe();  // start the file now, not at the next GOP
+    }
+    {
+        std::lock_guard<std::mutex> ilk(s->info_mu);
+        cam_id = s->camera_id;
+    }
+    std::function<void(uint32_t, uint32_t)> cb;
+    {
+        std::lock_guard<std::mutex> clk(idr_cb_mu_);
+        cb = idr_cb_;
+    }
+    if (cb) cb(i, cam_id);
 }
 
 void MultiCamManager::rec_stop_all() {
+    drain_iso_queue();
     for (auto& s : slots_) {
         if (!s) continue;
         std::lock_guard<std::mutex> lk(s->rec_mu);
@@ -725,7 +847,17 @@ MultiCamSlotInfo MultiCamManager::slot_info(uint32_t i) const {
         info.battery_pct = s->battery;
         info.temp_c = s->temp;
         info.tally = s->tally;
+        info.assigned_cam_number = s->assigned_cam_number;
+        info.assigned_cam_tag = s->assigned_cam_tag;
+        info.config_synced = s->config_synced;
     }
+    const auto ps = s->playout.stats();
+    info.playout_delay_ms = ps.target_delay_ms;
+    info.playout_effective_ms = ps.effective_delay_ms;
+    info.playout_fixed_mode = ps.fixed_mode;
+    info.playout_jitter_ms = ps.jitter_ms;
+    info.playout_drops = ps.frames_dropped_late + ps.frames_dropped_corrupt;
+    info.playout_holds = ps.frames_held;
     {
         std::lock_guard<std::mutex> lk(s->frame_mu);
         info.width = s->frame.width;
@@ -792,6 +924,9 @@ void MultiCamManager::release_slot(uint32_t i) {
         s->rx.reset();
         s->rx_raw.store(nullptr);
     }
+    std::lock_guard<std::mutex> plk(s->pub_mu);
+    s->playout.reset();
+    s->playout_pub_seq = 0;
     std::lock_guard<std::mutex> fl(s->frame_mu);
     s->frame = Image{};
     s->last_frame_us.store(0);
@@ -800,6 +935,7 @@ void MultiCamManager::release_slot(uint32_t i) {
 bool MultiCamManager::latest_frame(uint32_t i, Image& out, uint64_t& seq) const {
     const Slot* s = slot_ptr(i);
     if (!s) return false;
+    publish_slot_playout(i, now_us());
     std::lock_guard<std::mutex> lk(s->frame_mu);
     if (s->frame_seq == seq || s->frame.width <= 0) return false;
     out = s->frame;
@@ -839,5 +975,44 @@ void MultiCamManager::set_vcam(uint32_t count, bool placeholder) {
 }
 
 bool MultiCamManager::video_bus_open() const { return bus_.is_open(); }
+
+void MultiCamManager::set_slot_playout_config(uint32_t slot, uint32_t delay_ms, bool fixed_mode) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return;
+    s->playout.set_delay(delay_ms, fixed_mode);
+}
+
+VideoPlayoutStats MultiCamManager::slot_playout_stats(uint32_t slot) const {
+    const Slot* s = slot_ptr(slot);
+    return s ? s->playout.stats() : VideoPlayoutStats{};
+}
+
+void MultiCamManager::force_slot_idr(uint32_t slot) {
+    request_idr(slot);
+}
+
+void MultiCamManager::set_idr_callback(std::function<void(uint32_t slot, uint32_t camera_id)> cb) {
+    std::lock_guard<std::mutex> lk(idr_cb_mu_);
+    idr_cb_ = std::move(cb);
+}
+
+bool MultiCamManager::set_slot_assigned_camera(uint32_t slot, uint8_t cam_number, const std::string& tag,
+                                             const uint8_t rgba[4]) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return false;
+    std::lock_guard<std::mutex> lk(s->info_mu);
+    s->assigned_cam_number = std::min<uint8_t>(cam_number, 16);
+    s->assigned_cam_tag = tag.empty() ? (cam_number > 0 ? "CAM " + std::to_string(cam_number) : "") : tag.substr(0, 15);
+    if (rgba) std::memcpy(s->badge_accent_rgba, rgba, 4);
+    if (!s->assigned_cam_tag.empty()) s->label = s->assigned_cam_tag;
+    return true;
+}
+
+void MultiCamManager::set_slot_config_synced(uint32_t slot, bool synced) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return;
+    std::lock_guard<std::mutex> lk(s->info_mu);
+    s->config_synced = synced;
+}
 
 }  // namespace lv

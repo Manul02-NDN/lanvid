@@ -1,4 +1,4 @@
-// obs_lanvid_dock.cpp — Qt6 Studio Control Dock for OBS Studio
+// obs_lanvid_dock.cpp — Qt6 LanVid Studio Control Dock for OBS Studio
 #include "obs_lanvid_dock.hpp"
 
 #if defined(LV_HAVE_QT6_WIDGETS) && defined(LV_HAVE_REAL_LIBOBS)
@@ -16,6 +16,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
+#include <QSpinBox>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -41,8 +42,15 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
     auto* main_layout = new QVBoxLayout(root);
     main_layout->setSpacing(8);
 
-    // 1. Connected Cameras & Manual/Auto Tally Matrix
+    // 1. Connected & Discovered Cameras Matrix
     auto* cam_group = new QGroupBox(QString::fromUtf8(obs_module_text("LanVid.Dock.CamerasGroup")), root);
+    auto* cg_lay = new QVBoxLayout(cam_group);
+
+    discovered_lbl_ = new QLabel("LAN / SHM Discovery: scanning...", cam_group);
+    discovered_lbl_->setWordWrap(true);
+    discovered_lbl_->setStyleSheet("color: #a79ecc; font-size: 11px;");
+    cg_lay->addWidget(discovered_lbl_);
+
     auto* scroll = new QScrollArea(cam_group);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
@@ -51,8 +59,7 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
     cameras_layout_->setSpacing(6);
     cameras_layout_->addStretch();
     scroll->setWidget(cam_container);
-    auto* cg_lay = new QVBoxLayout(cam_group);
-    cg_lay->addWidget(scroll);
+    cg_lay->addWidget(scroll, 1);
     main_layout->addWidget(cam_group, 1);
 
     // 2. Built-in Duplex Intercom (Director Talkback)
@@ -71,12 +78,12 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
     ic_lay->addLayout(dev_row);
 
     auto* ctrl_row = new QHBoxLayout();
-    all_call_btn_ = new QPushButton("ALL CALL (Partyline)", ic_group);
+    all_call_btn_ = new QPushButton("ALL CALL", ic_group);
     all_call_btn_->setCheckable(true);
     connect(all_call_btn_, &QPushButton::toggled, this, [this](bool on) {
         all_call_active_ = on;
-        LanVidObsManager::instance().set_director_talk(0, on, true, on);
-        LanVidObsManager::instance().set_director_mic_active(on, false, ifb_vol_slider_->value() / 100.0f, 0.0f);
+        LanVidObsRuntime::instance().set_director_talk(0, on, true, on);
+        LanVidObsRuntime::instance().set_director_mic_active(on, false, ifb_vol_slider_->value() / 100.0f, 0.0f);
     });
     ctrl_row->addWidget(all_call_btn_);
 
@@ -85,7 +92,7 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
     ifb_vol_slider_->setRange(0, 150);
     ifb_vol_slider_->setValue(100);
     connect(ifb_vol_slider_, &QSlider::valueChanged, this, [this](int val) {
-        LanVidObsManager::instance().set_director_mic_active(all_call_active_, false, val / 100.0f, 0.0f);
+        LanVidObsRuntime::instance().set_director_mic_active(all_call_active_, false, val / 100.0f, 0.0f);
     });
     ctrl_row->addWidget(ifb_vol_slider_, 1);
     ic_lay->addLayout(ctrl_row);
@@ -96,14 +103,28 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
     ic_lay->addWidget(operator_vu_bar_);
     main_layout->addWidget(ic_group);
 
-    // 3. Live Telemetry & Panic Reset
+    // 3. Diagnostics & Telemetry Footer
+    diag_label_ = new QLabel("", root);
+    diag_label_->setWordWrap(true);
+    diag_label_->setStyleSheet("color: #93c5fd; font-size: 10px;");
+    diag_label_->setVisible(false);
+    main_layout->addWidget(diag_label_);
+
     auto* foot_row = new QHBoxLayout();
-    telemetry_label_ = new QLabel("RX: 0.0 Mbps | MasterClock: Locked | Dropped: 0", root);
-    auto* panic_btn = new QPushButton("Panic / Reset All Buffers", root);
+    telemetry_label_ = new QLabel("Active: 0 | RX: 0.0 Mbps | Dropped: 0", root);
+    auto* diag_btn = new QPushButton("Network & Port Check", root);
+    connect(diag_btn, &QPushButton::clicked, this, [this]() {
+        LanVidObsRuntime::instance().trigger_discovery_refresh();
+        const std::string rep = LanVidObsRuntime::instance().diagnose_network_and_ports();
+        diag_label_->setText(QString::fromStdString(rep));
+        diag_label_->setVisible(!diag_label_->isVisible());
+    });
+    auto* panic_btn = new QPushButton("Reset Buffers", root);
     connect(panic_btn, &QPushButton::clicked, this, []() {
-        LanVidObsManager::instance().panic_reset_all_buffers();
+        LanVidObsRuntime::instance().panic_reset_all_buffers();
     });
     foot_row->addWidget(telemetry_label_, 1);
+    foot_row->addWidget(diag_btn);
     foot_row->addWidget(panic_btn);
     main_layout->addLayout(foot_row);
 
@@ -111,93 +132,180 @@ LanVidControlDock::LanVidControlDock(QWidget* parent)
 
     poll_timer_ = new QTimer(this);
     connect(poll_timer_, &QTimer::timeout, this, &LanVidControlDock::on_tick);
-    poll_timer_->start(200);
+    poll_timer_->start(250);
 }
 
 LanVidControlDock::~LanVidControlDock() {
     if (poll_timer_) poll_timer_->stop();
 }
 
-void LanVidControlDock::rebuild_camera_rows() {
-    while (cameras_layout_->count() > 1) {
-        auto* item = cameras_layout_->takeAt(0);
-        if (item->widget()) item->widget()->deleteLater();
-        delete item;
+void LanVidControlDock::sync_camera_rows() {
+    const auto cams = LanVidObsRuntime::instance().snapshot_cameras();
+    const auto disc = LanVidObsRuntime::instance().discovered_cameras();
+
+    if (disc.empty()) {
+        discovered_lbl_->setText("LAN / SHM Discovery: no remote cameras detected yet (listening on :5021/:5023/:5099 + SHM)");
+    } else {
+        QStringList names;
+        for (const auto& d : disc) names << QString::fromStdString(d.display_name);
+        discovered_lbl_->setText(QString("Discovered (%1): %2").arg(disc.size()).arg(names.join(" · ")));
     }
 
-    const auto cams = LanVidObsManager::instance().snapshot_cameras();
+    bool structure_changed = (rows_.size() != cams.size());
+    if (!structure_changed) {
+        for (size_t i = 0; i < cams.size(); ++i) {
+            if (rows_[i].uid != cams[i].uid) {
+                structure_changed = true;
+                break;
+            }
+        }
+    }
+
+    if (structure_changed) {
+        for (auto& r : rows_) {
+            if (r.frame) {
+                cameras_layout_->removeWidget(r.frame);
+                r.frame->deleteLater();
+            }
+        }
+        rows_.clear();
+
+        for (const auto& c : cams) {
+            ActiveRowWidgets row{};
+            row.uid = c.uid;
+            row.camera_id = c.camera_id;
+            row.frame = new QFrame();
+            row.frame->setStyleSheet("QFrame { background: #1c1e28; border: 1px solid #2d3142; border-radius: 6px; padding: 6px; }");
+            auto* v = new QVBoxLayout(row.frame);
+            v->setSpacing(4);
+
+            row.info_lbl = new QLabel(row.frame);
+            row.info_lbl->setWordWrap(true);
+            v->addWidget(row.info_lbl);
+
+            auto* btn_row = new QHBoxLayout();
+            const uint32_t cam_id = c.camera_id;
+
+            row.badge_spin = new QSpinBox(row.frame);
+            row.badge_spin->setRange(1, 16);
+            row.badge_spin->setPrefix("CAM ");
+            row.badge_spin->setValue(c.assigned_cam_number > 0 ? c.assigned_cam_number : 1);
+            connect(row.badge_spin, QOverload<int>::of(&QSpinBox::valueChanged), this, [cam_id](int num) {
+                VideoConfigSyncPayload vc{};
+                vc.camera_id = cam_id;
+                vc.assigned_cam_number = static_cast<uint8_t>(num);
+                std::snprintf(vc.assigned_cam_tag, sizeof(vc.assigned_cam_tag), "CAM %d", num);
+                vc.bitrate_kbps = 0;
+                LanVidObsRuntime::instance().tally_engine().send_video_config_sync(cam_id, vc);
+            });
+
+            row.quality_combo = new QComboBox(row.frame);
+            row.quality_combo->addItems({"360p", "720p", "1080p", "4K60"});
+            row.quality_combo->setCurrentIndex(2);
+            connect(row.quality_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [cam_id](int idx) {
+                VideoConfigSyncPayload vc{};
+                vc.camera_id = cam_id;
+                vc.resolution_preset = static_cast<uint8_t>(idx);
+                vc.target_fps = (idx == 0) ? 30 : 60;
+                vc.bitrate_kbps = (idx == 0) ? 4000 : (idx == 1) ? 12000 : (idx == 2) ? 25000 : 85000;
+                LanVidObsRuntime::instance().tally_engine().send_video_config_sync(cam_id, vc);
+            });
+
+            row.auto_btn = new QPushButton("AUTO", row.frame);
+            row.stby_btn = new QPushButton("STBY", row.frame);
+            row.pvw_btn = new QPushButton("PVW", row.frame);
+            row.pgm_btn = new QPushButton("PGM", row.frame);
+            row.rec_btn = new QPushButton("REC", row.frame);
+            row.rec_btn->setCheckable(true);
+            row.talk_btn = new QPushButton("TALK", row.frame);
+            row.talk_btn->setCheckable(true);
+            auto* idr_btn = new QPushButton("IDR", row.frame);
+
+            connect(row.auto_btn, &QPushButton::clicked, this, [cam_id]() {
+                LanVidObsRuntime::instance().sync_all_tallies();
+                (void)cam_id;
+            });
+            connect(row.stby_btn, &QPushButton::clicked, this, [cam_id]() {
+                LanVidObsRuntime::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyStandby, "OBS STBY", false);
+            });
+            connect(row.pvw_btn, &QPushButton::clicked, this, [cam_id]() {
+                LanVidObsRuntime::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyPreview, "OBS PVW", false);
+            });
+            connect(row.pgm_btn, &QPushButton::clicked, this, [cam_id]() {
+                LanVidObsRuntime::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyProgram, "OBS PGM", false);
+            });
+            connect(row.rec_btn, &QPushButton::toggled, this, [cam_id](bool on) {
+                LanVidObsRuntime::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyProgram, "OBS REC", on);
+            });
+            connect(idr_btn, &QPushButton::clicked, this, [cam_id]() {
+                LanVidObsRuntime::instance().tally_engine().studio_request_keyframe(cam_id);
+            });
+            connect(row.talk_btn, &QPushButton::toggled, this, [cam_id](bool on) {
+                LanVidObsRuntime::instance().set_director_talk(cam_id, on, true, false);
+            });
+
+            btn_row->addWidget(row.badge_spin);
+            btn_row->addWidget(row.quality_combo);
+            btn_row->addWidget(row.auto_btn);
+            btn_row->addWidget(row.stby_btn);
+            btn_row->addWidget(row.pvw_btn);
+            btn_row->addWidget(row.pgm_btn);
+            btn_row->addWidget(row.rec_btn);
+            btn_row->addWidget(idr_btn);
+            btn_row->addWidget(row.talk_btn);
+            v->addLayout(btn_row);
+
+            cameras_layout_->insertWidget(cameras_layout_->count() - 1, row.frame);
+            rows_.push_back(row);
+        }
+    }
+
     double total_mbps = 0.0;
     uint64_t total_dropped = 0;
     bool any_op_speaking = false;
 
-    for (const auto& c : cams) {
+    for (size_t i = 0; i < cams.size() && i < rows_.size(); ++i) {
+        const auto& c = cams[i];
+        auto& r = rows_[i];
         total_mbps += c.mbps;
         total_dropped += c.dropped_frames;
         if (c.operator_speaking) any_op_speaking = true;
 
-        auto* card = new QFrame();
-        card->setStyleSheet("QFrame { background: #1c1e28; border: 1px solid #2d3142; border-radius: 6px; padding: 6px; }");
-        auto* v = new QVBoxLayout(card);
-        v->setSpacing(4);
-
         const char* tally_str = (c.effective_tally == lv::kTallyProgram) ? "PGM ON AIR"
                               : (c.effective_tally == lv::kTallyPreview) ? "PVW"
                                                                          : "STBY";
-        auto* hdr = new QLabel(QString("%1 (%2:%3) · %4x%5 @ %6 fps · %7 Mbps · Loss %8% · Bat %9% · %10°C · [%11]")
-                                   .arg(QString::fromStdString(c.name))
-                                   .arg(QString::fromStdString(c.peer_ip.empty() ? "LAN" : c.peer_ip))
-                                   .arg(c.listen_port)
-                                   .arg(c.width)
-                                   .arg(c.height)
-                                   .arg(c.fps, 0, 'f', 1)
-                                   .arg(c.mbps, 0, 'f', 1)
-                                   .arg(c.loss_pct, 0, 'f', 1)
-                                   .arg(c.battery_pct)
-                                   .arg(c.temp_c)
-                                   .arg(tally_str));
-        v->addWidget(hdr);
-
-        auto* btn_row = new QHBoxLayout();
-        const uint32_t cam_id = c.camera_id;
-        auto* b_pvw = new QPushButton("PVW");
-        auto* b_pgm = new QPushButton("PGM");
-        auto* b_stby = new QPushButton("STBY");
-        auto* b_talk = new QPushButton("TALK (PTT)");
-        b_talk->setCheckable(true);
-        b_talk->setChecked(c.talk_to_cam);
-        connect(b_stby, &QPushButton::clicked, this, [cam_id]() {
-            LanVidObsManager::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyStandby, "OBS STBY", false);
-        });
-        connect(b_pvw, &QPushButton::clicked, this, [cam_id]() {
-            LanVidObsManager::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyPreview, "OBS PVW", false);
-        });
-        connect(b_pgm, &QPushButton::clicked, this, [cam_id]() {
-            LanVidObsManager::instance().tally_engine().studio_set_camera_tally(cam_id, lv::kTallyProgram, "OBS PGM", false);
-        });
-        connect(b_talk, &QPushButton::toggled, this, [cam_id](bool on) {
-            LanVidObsManager::instance().set_director_talk(cam_id, on, true, false);
-        });
-
-        btn_row->addWidget(b_stby);
-        btn_row->addWidget(b_pvw);
-        btn_row->addWidget(b_pgm);
-        btn_row->addWidget(b_talk);
-        v->addLayout(btn_row);
-
-        cameras_layout_->insertWidget(cameras_layout_->count() - 1, card);
+        const QString badge = QString::fromStdString(
+            !c.assigned_cam_tag.empty() ? c.assigned_cam_tag : ("CAM " + std::to_string(c.assigned_cam_number)));
+        const QString conflict_str = c.has_port_conflict ? " [PORT CONFLICT]" : "";
+        r.info_lbl->setText(
+            QString("[%1] %2 (%3:%4)%5 · %6x%7 @ %8 fps · %9 Mbps · Buf %10ms (J %11ms) · Bat %12% · %13°C · [%14]")
+                .arg(badge)
+                .arg(QString::fromStdString(c.name))
+                .arg(QString::fromStdString(c.peer_ip.empty() ? "LAN" : c.peer_ip))
+                .arg(c.listen_port)
+                .arg(conflict_str)
+                .arg(c.width)
+                .arg(c.height)
+                .arg(c.fps, 0, 'f', 1)
+                .arg(c.mbps, 0, 'f', 1)
+                .arg(c.playout_delay_ms, 0, 'f', 0)
+                .arg(c.playout_jitter_ms, 0, 'f', 1)
+                .arg(c.battery_pct)
+                .arg(c.temp_c)
+                .arg(tally_str));
     }
 
     operator_vu_bar_->setValue(any_op_speaking ? 78 : 0);
     telemetry_label_->setText(
-        QString("Active Cameras: %1 | RX: %2 Mbps | MasterClock: Locked | Dropped: %3")
+        QString("Active: %1 | Discovered: %2 | RX: %3 Mbps | Dropped: %4")
             .arg(cams.size())
+            .arg(disc.size())
             .arg(total_mbps, 0, 'f', 1)
             .arg(total_dropped));
 }
 
 void LanVidControlDock::on_tick() {
-    LanVidObsManager::instance().poll_studio();
-    rebuild_camera_rows();
+    sync_camera_rows();
 }
 
 void register_lanvid_control_dock() {

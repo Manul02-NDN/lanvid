@@ -28,7 +28,7 @@
 
 namespace lv {
 
-constexpr int kMaxStudioCameras = 8;
+constexpr int kMaxStudioCameras = 16;
 constexpr uint16_t kDefaultTallyIntercomPort = 5022;
 constexpr int kIntercomFrameSamples = 480;  // 10 ms @ 48 kHz mono
 
@@ -48,6 +48,10 @@ struct StudioCameraInfo {
     uint64_t tally_tx_count = 0;
     uint64_t intercom_rx_pkts = 0;
     uint64_t intercom_tx_pkts = 0;
+    uint8_t assigned_cam_number = 0;
+    std::string assigned_cam_tag;
+    bool config_synced = false;
+    VideoConfigSyncPayload last_video_config{};
 };
 
 class TallyIntercomEngine {
@@ -88,6 +92,14 @@ public:
     CameraControlPayload camera_last_control() const;
     TallyStatePayload camera_last_tally() const;
     void camera_update_telemetry(uint8_t battery_pct, int8_t temp_c);
+
+    // ---- Bidirectional Video Config Sync & Camera Number Assignment (kVideoConfigSync = 0xF) ----
+    using VideoConfigSyncCallback = std::function<void(const VideoConfigSyncPayload&)>;
+    uint32_t origin_id() const { return origin_id_; }
+    bool send_video_config_sync(uint32_t camera_id, const VideoConfigSyncPayload& cfg);
+    bool studio_request_keyframe(uint32_t camera_id);
+    void set_video_config_sync_callback(VideoConfigSyncCallback cb);
+    VideoConfigSyncPayload last_video_config_sync() const;
 
     // ---- Duplex Intercom Voice API ----
     // Pushes 48 kHz mono float32 mic samples (Director mic in Studio, Operator mic in Camera).
@@ -142,6 +154,7 @@ private:
     std::atomic<uint64_t> dup_drops_{0};
     std::atomic<bool> wifi_redundancy_{false};
     std::atomic<uint32_t> dup_stagger_us_{1500};
+    uint32_t origin_id_ = 1;
 };
 
 }  // namespace lv

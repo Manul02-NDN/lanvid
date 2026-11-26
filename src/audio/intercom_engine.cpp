@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 
 #ifdef LV_HAVE_OPUS
 #include <opus.h>
@@ -40,6 +41,11 @@ struct TallyIntercomEngine::Impl {
         uint64_t tally_tx = 0;
         uint64_t ic_rx = 0;
         uint64_t ic_tx = 0;
+        uint8_t assigned_cam_number = 0;
+        std::string assigned_cam_tag;
+        bool config_synced = false;
+        uint64_t last_rx_vcfg_rev = 0;
+        VideoConfigSyncPayload last_vcfg{};
         std::array<uint32_t, 256> seen_seq{};
         std::array<uint8_t, 256> seen_valid{};
     };
@@ -70,6 +76,13 @@ struct TallyIntercomEngine::Impl {
     CameraControlCallback ctl_cb;
     CameraControlPayload last_ctl{};
     uint32_t ctl_revision = 0;
+    VideoConfigSyncCallback vcfg_cb;
+    VideoConfigSyncPayload last_vcfg{};
+    uint64_t vcfg_tx_revision = 0;
+    uint64_t cam_last_rx_vcfg_rev = 0;
+    uint32_t my_origin_id = 1;
+    uint8_t my_assigned_cam_number = 0;
+    std::string my_assigned_cam_tag;
     uint64_t last_director_voice_us = 0;
 
     // Local intercom controls
@@ -187,6 +200,25 @@ struct TallyIntercomEngine::Impl {
         if (redundant) queue_dup_locked(dgram, dlen, dst, stagger_us);
     }
 
+    void send_vcfg_dgram_locked(const VideoConfigSyncPayload& p, const Endpoint& dst, int repeats,
+                                bool redundant = false, uint32_t stagger_us = 1500) {
+        if (!dst.valid() || !sock.is_open()) return;
+        uint8_t body[kVideoConfigSyncSize];
+        write_video_config_sync(body, p);
+        PacketHeader ph{};
+        ph.type = PacketType::kVideoConfigSync;
+        ph.flags = kFlagHasCrc;
+        ph.frame_id = uint32_t(p.config_revision & 0xFFFFFFFFu);
+        ph.timestamp_us = now_us32();
+        uint8_t dgram[kPacketHeaderSize + kVideoConfigSyncSize];
+        const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
+        if (dlen == 0) return;
+        for (int r = 0; r < repeats; ++r) {
+            sock.send_to_qos(dgram, dlen, dst, QosTrafficClass::kSyncControl);
+        }
+        if (redundant) queue_dup_locked(dgram, dlen, dst, stagger_us);
+    }
+
     void encode_and_send_voice_locked(const float* pcm, int n, bool is_studio, bool all_call_flag,
                                       std::atomic<uint64_t>& tx_counter,
                                       bool redundant = false, uint32_t stagger_us = 1500) {
@@ -275,7 +307,13 @@ struct TallyIntercomEngine::Impl {
     }
 };
 
-TallyIntercomEngine::TallyIntercomEngine() : impl_(std::make_unique<Impl>()) {}
+TallyIntercomEngine::TallyIntercomEngine() : impl_(std::make_unique<Impl>()) {
+    std::random_device rd;
+    uint32_t oid = rd() ^ now_us32();
+    if (oid == 0) oid = 0x4C563031u;
+    origin_id_ = oid;
+    impl_->my_origin_id = oid;
+}
 TallyIntercomEngine::~TallyIntercomEngine() { stop(); }
 
 bool TallyIntercomEngine::start_studio(uint16_t bind_port, const std::string& bind_ip) {
@@ -334,6 +372,10 @@ void TallyIntercomEngine::stop() {
     impl_->rx_fifo.clear();
     impl_->pending_dups.clear();
     impl_->cam_seen_valid.fill(0);
+    impl_->cam_last_rx_vcfg_rev = 0;
+    impl_->last_vcfg = VideoConfigSyncPayload{};
+    impl_->my_assigned_cam_number = 0;
+    impl_->my_assigned_cam_tag.clear();
     for (auto& c : impl_->cams) c = Impl::CamSlot{};
     bound_port_ = 0;
 }
@@ -419,6 +461,72 @@ void TallyIntercomEngine::camera_update_telemetry(uint8_t battery_pct, int8_t te
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->my_battery = std::min<uint8_t>(battery_pct, 100);
     impl_->my_temp = temp_c;
+}
+
+bool TallyIntercomEngine::send_video_config_sync(uint32_t camera_id, const VideoConfigSyncPayload& cfg) {
+    if (!running_.load(std::memory_order_acquire)) return false;
+    const bool is_studio = studio_mode_.load(std::memory_order_relaxed);
+    const bool red = wifi_redundancy_.load(std::memory_order_acquire);
+    const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
+
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    VideoConfigSyncPayload p = cfg;
+    if (p.origin_id == 0) p.origin_id = impl_->my_origin_id;
+    if (p.config_revision == 0) p.config_revision = ++impl_->vcfg_tx_revision;
+    p.assigned_cam_tag[15] = '\0';
+
+    if (is_studio) {
+        p.flags &= uint8_t(~kVideoConfigFlagFromCamera);
+        bool sent_any = false;
+        for (auto& c : impl_->cams) {
+            if (!c.used || !c.ep.valid()) continue;
+            if (camera_id != 0 && c.camera_id != camera_id) continue;
+            p.camera_id = c.camera_id;
+            if (p.assigned_cam_number > 0) c.assigned_cam_number = p.assigned_cam_number;
+            if (p.assigned_cam_tag[0] != '\0') {
+                c.assigned_cam_tag = p.assigned_cam_tag;
+                c.label = c.assigned_cam_tag;
+            }
+            c.last_vcfg = p;
+            c.config_synced = true;
+            impl_->send_vcfg_dgram_locked(p, c.ep, 3, red, stag);
+            sent_any = true;
+        }
+        return sent_any;
+    }
+
+    if (!impl_->studio_ep.valid()) return false;
+    p.camera_id = impl_->my_camera_id;
+    p.flags |= kVideoConfigFlagFromCamera;
+    impl_->last_vcfg = p;
+    impl_->send_vcfg_dgram_locked(p, impl_->studio_ep, 3, red, stag);
+    return true;
+}
+
+bool TallyIntercomEngine::studio_request_keyframe(uint32_t camera_id) {
+    if (!running_.load(std::memory_order_acquire) || !studio_mode_.load(std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    const VideoConfigSyncPayload req = make_video_keyframe_req(camera_id, ++impl_->vcfg_tx_revision, impl_->my_origin_id);
+    bool sent = false;
+    for (auto& c : impl_->cams) {
+        if (!c.used || !c.ep.valid()) continue;
+        if (camera_id != 0 && c.camera_id != camera_id) continue;
+        VideoConfigSyncPayload p = req;
+        p.camera_id = c.camera_id;
+        impl_->send_vcfg_dgram_locked(p, c.ep, 3, false, 1500);
+        sent = true;
+    }
+    return sent;
+}
+
+void TallyIntercomEngine::set_video_config_sync_callback(VideoConfigSyncCallback cb) {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->vcfg_cb = std::move(cb);
+}
+
+VideoConfigSyncPayload TallyIntercomEngine::last_video_config_sync() const {
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    return impl_->last_vcfg;
 }
 
 void TallyIntercomEngine::set_intercom_state(bool talk_active, bool listen_muted, float rx_gain,
@@ -558,6 +666,48 @@ void TallyIntercomEngine::poll() {
                 ccb = impl_->ctl_cb;
             }
             if (ccb) ccb(cc);
+        } else if (h.type == PacketType::kVideoConfigSync) {
+            VideoConfigSyncPayload vc{};
+            if (!parse_video_config_sync(pl, h.payload_size, vc)) continue;
+            VideoConfigSyncCallback vcb;
+            {
+                std::lock_guard<std::mutex> lk(impl_->mu);
+                if (vc.origin_id != 0 && vc.origin_id == impl_->my_origin_id) continue;  // Echo Guard
+                if (is_studio) {
+                    const int idx = impl_->find_or_alloc_cam_locked(vc.camera_id, src);
+                    if (idx < 0) continue;
+                    auto& c = impl_->cams[idx];
+                    c.ep = src;
+                    c.last_seen_us = now;
+                    const bool is_idr = (vc.flags & kVideoConfigFlagRequestIdr) != 0;
+                    if (!is_idr && vc.config_revision != 0 && c.last_rx_vcfg_rev != 0 &&
+                        vc.config_revision <= c.last_rx_vcfg_rev) {
+                        continue;  // duplicate / stale
+                    }
+                    if (vc.config_revision != 0) c.last_rx_vcfg_rev = vc.config_revision;
+                    c.last_vcfg = vc;
+                    c.config_synced = true;
+                    if (vc.assigned_cam_number > 0) c.assigned_cam_number = vc.assigned_cam_number;
+                    if (vc.assigned_cam_tag[0] != '\0') c.assigned_cam_tag = vc.assigned_cam_tag;
+                    vcb = impl_->vcfg_cb;
+                } else {
+                    if (vc.camera_id != 0 && vc.camera_id != impl_->my_camera_id) continue;
+                    const bool is_idr = (vc.flags & kVideoConfigFlagRequestIdr) != 0;
+                    if (!is_idr && vc.config_revision != 0 && impl_->cam_last_rx_vcfg_rev != 0 &&
+                        vc.config_revision <= impl_->cam_last_rx_vcfg_rev) {
+                        continue;
+                    }
+                    if (vc.config_revision != 0) impl_->cam_last_rx_vcfg_rev = vc.config_revision;
+                    impl_->last_vcfg = vc;
+                    if (vc.assigned_cam_number > 0) impl_->my_assigned_cam_number = vc.assigned_cam_number;
+                    if (vc.assigned_cam_tag[0] != '\0') {
+                        impl_->my_assigned_cam_tag = vc.assigned_cam_tag;
+                        impl_->my_label = impl_->my_assigned_cam_tag.substr(0, 23);
+                    }
+                    vcb = impl_->vcfg_cb;
+                }
+            }
+            if (vcb) vcb(vc);
         } else if (h.type == PacketType::kIntercomAudio) {
             IntercomAudioHeader ih{};
             if (!parse_intercom_header(pl, h.payload_size, ih)) continue;
@@ -667,6 +817,10 @@ std::vector<StudioCameraInfo> TallyIntercomEngine::studio_cameras() const {
         info.tally_tx_count = c.tally_tx;
         info.intercom_rx_pkts = c.ic_rx;
         info.intercom_tx_pkts = c.ic_tx;
+        info.assigned_cam_number = c.assigned_cam_number;
+        info.assigned_cam_tag = c.assigned_cam_tag;
+        info.config_synced = c.config_synced;
+        info.last_video_config = c.last_vcfg;
         out.push_back(std::move(info));
     }
     return out;

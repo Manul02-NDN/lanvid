@@ -13,7 +13,10 @@
 // (VideoToolbox / Media Foundation / VA-API) into H.264.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,6 +27,7 @@
 #include "common/image.hpp"
 #include "video/iso_recorder.hpp"
 #include "video/video_bus.hpp"
+#include "video/video_playout_buffer.hpp"
 
 namespace lv {
 
@@ -45,6 +49,8 @@ struct MultiCamConfig {
     uint32_t vcam_count = 8;           // number of "LanVid Cam N" devices exposed (0..8)
     bool vcam_placeholder = true;
     uint32_t audio_latency_ms = 40;
+    uint32_t video_delay_ms = 33;      // VideoPlayoutBuffer target delay (5..250 ms)
+    bool video_fixed_delay = true;     // true = Fixed Delay, false = Adaptive Wi-Fi
 };
 
 struct MultiCamSlotInfo {
@@ -69,6 +75,16 @@ struct MultiCamSlotInfo {
     bool recording = false;
     bool vcam_active = false;          // published to the OS virtual camera of this slot
     uint64_t frames = 0;
+    // VideoPlayoutBuffer & Camera Badge Sync telemetry
+    uint32_t playout_delay_ms = 33;
+    double playout_effective_ms = 33.0;
+    bool playout_fixed_mode = true;
+    double playout_jitter_ms = 0.0;
+    uint64_t playout_drops = 0;
+    uint64_t playout_holds = 0;
+    uint8_t assigned_cam_number = 0;   // 1..16 (0 = unassigned)
+    std::string assigned_cam_tag;
+    bool config_synced = false;
 };
 
 struct IsoSessionConfig {
@@ -139,6 +155,15 @@ public:
     void set_vcam(uint32_t count, bool placeholder);
     bool video_bus_open() const;
 
+    // ---- VideoPlayoutBuffer & Camera Badge Sync ----
+    void set_slot_playout_config(uint32_t slot, uint32_t delay_ms, bool fixed_mode);
+    VideoPlayoutStats slot_playout_stats(uint32_t slot) const;
+    void force_slot_idr(uint32_t slot);
+    void set_idr_callback(std::function<void(uint32_t slot, uint32_t camera_id)> cb);
+    bool set_slot_assigned_camera(uint32_t slot, uint8_t cam_number, const std::string& tag,
+                                  const uint8_t rgba[4] = nullptr);
+    void set_slot_config_synced(uint32_t slot, bool synced);
+
     // Feeds one datagram as if it arrived on the base port from `src_ip:src_port` (tests / relays).
     void inject_datagram(const uint8_t* data, size_t len, uint32_t src_ip_be, uint16_t src_port);
 
@@ -152,6 +177,9 @@ private:
     void on_frame(uint32_t i, const struct CompletedFrame& cf);
     void on_bitstream(uint32_t i, int codec, const uint8_t* data, size_t size, bool key, uint64_t arrival_us);
     void on_audio(uint32_t i, const struct AudioHeader& hdr, const uint8_t* pcm);
+    void publish_slot_playout(uint32_t i, uint64_t now) const;
+    void iso_worker_loop();
+    void drain_iso_queue();
     bool open_slot_recorder(uint32_t i, IsoVideoCodec codec, int w, int h);
     void request_idr(uint32_t i);
     std::string slot_file_path(uint32_t i) const;
@@ -180,9 +208,27 @@ private:
     std::unique_ptr<class IVideoEncoder> program_enc_;
     std::vector<uint8_t> program_scaled_;
 
-    VideoBus bus_;
-    std::vector<uint8_t> nv12_scratch_;
-    std::mutex bus_mu_;
+    // Decoupled background ISO encode/write queue (never blocks video preview or vCam)
+    struct IsoJob {
+        uint32_t slot = 0;
+        Image image;
+        uint64_t timestamp_us = 0;
+        bool is_program = false;
+    };
+    std::mutex iso_q_mu_;
+    std::condition_variable iso_q_cv_;
+    std::condition_variable iso_idle_cv_;
+    std::deque<IsoJob> iso_q_;
+    bool iso_busy_ = false;
+    std::atomic<bool> iso_stop_{false};
+    std::thread iso_thread_;
+
+    std::mutex idr_cb_mu_;
+    std::function<void(uint32_t slot, uint32_t camera_id)> idr_cb_;
+
+    mutable VideoBus bus_;
+    mutable std::vector<uint8_t> nv12_scratch_;
+    mutable std::mutex bus_mu_;
 };
 
 }  // namespace lv

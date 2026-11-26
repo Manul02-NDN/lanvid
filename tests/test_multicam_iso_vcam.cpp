@@ -18,9 +18,11 @@
 #include "common/image.hpp"
 #include "gui/app_config.hpp"
 #include "lanvid.hpp"
+#include "net/packet.hpp"
 #include "video/iso_recorder.hpp"
 #include "video/multicam_manager.hpp"
 #include "video/video_bus.hpp"
+#include "video/video_playout_buffer.hpp"
 
 namespace fs = std::filesystem;
 
@@ -416,5 +418,202 @@ TEST(camera_remote_control_lens_focus_quality_roundtrip) {
     CHECK(calls.load() == 2 && last_lens.load() == lv::kLensFront && last_quality.load() == lv::kQuality1080p);
     CHECK(!studio.studio_set_camera_control(99, ctl));  // unknown camera
     camera.stop();
+    studio.stop();
+}
+
+TEST(video_playout_buffer_fixed_delay_absorbs_wifi_jitter) {
+    lv::VideoPlayoutConfig cfg{};
+    cfg.fixed_delay_mode = true;
+    cfg.target_delay_ms = 33;
+    cfg.adaptive_max_ms = 200;
+    cfg.idr_rate_limit_ms = 500;
+    lv::VideoPlayoutBuffer buf(cfg);
+
+    std::atomic<int> idr_requests{0};
+    buf.set_idr_request_callback([&]() { idr_requests.fetch_add(1, std::memory_order_relaxed); });
+
+    auto make_frame = [](uint8_t marker) {
+        lv::Image img;
+        img.allocate(16, 16, lv::PixelOrder::kBGRA);
+        std::memset(img.data.data(), marker, img.data.size());
+        return img;
+    };
+
+    // Simulate 20 jittered frames spaced 33.333 ms in media time with +0..18 ms Wi-Fi arrival jitter.
+    const uint64_t base_us = 10'000'000ULL;
+    const uint32_t jitter_offsets_ms[] = {0, 12, 4, 18, 2, 15, 7, 1, 14, 6};
+    uint32_t next_push = 0;
+    uint64_t out_seq = 0;
+    lv::Image out;
+    int released = 0;
+    for (uint64_t step_ms = 0; step_ms <= 750; step_ms += 10) {
+        const uint64_t sim_us = base_us + step_ms * 1000ULL;
+        while (next_push < 20) {
+            const uint32_t media_ts = 1'000'000u + next_push * 33333u;
+            const uint64_t arrival_us =
+                base_us + uint64_t(next_push) * 33333ULL + uint64_t(jitter_offsets_ms[next_push % 10]) * 1000ULL;
+            if (arrival_us > sim_us) break;
+            buf.push_frame(make_frame(uint8_t(10 + next_push)), next_push + 1, media_ts, arrival_us,
+                           (next_push % 10 == 0), false);
+            ++next_push;
+        }
+        if (buf.poll_frame(sim_us, out, out_seq)) {
+            ++released;
+        }
+    }
+    CHECK(released >= 18);
+
+    // Delayed frame gap -> Frame Hold keeps last clean image without changing out_seq.
+    const uint64_t prev_seq = out_seq;
+    const uint8_t prev_px = out.data[0];
+    CHECK(!buf.poll_frame(base_us + 800'000ULL, out, out_seq));
+    CHECK(out_seq == prev_seq);
+    CHECK(out.data[0] == prev_px);
+
+    // Push 5 corrupt P-frames 100 ms apart -> dropped cleanly, IDR requests rate-limited (<= 1 / 500 ms).
+    for (int k = 0; k < 5; ++k) {
+        const uint64_t t_us = base_us + 900'000ULL + uint64_t(k) * 100'000ULL;
+        buf.push_frame(make_frame(0xEE), 100u + uint32_t(k), uint32_t(900'000u + k * 100'000u), t_us, false, true);
+    }
+    auto st = buf.stats();
+    CHECK(st.fixed_mode);
+    CHECK(st.target_delay_ms == 33);
+    CHECK(st.frames_dropped_corrupt == 5);
+    CHECK(idr_requests.load() >= 1 && idr_requests.load() <= 2);
+
+    // Adaptive Wi-Fi mode clamps delay cleanly within [33, 200] ms.
+    buf.set_delay(40, false);
+    st = buf.stats();
+    CHECK(!st.fixed_mode);
+    CHECK(st.target_delay_ms == 40);
+    CHECK(st.effective_delay_ms >= 33.0 && st.effective_delay_ms <= 200.0);
+}
+
+TEST(video_config_sync_bidirectional_and_camera_badge_roundtrip) {
+    // 1. Wire serialization roundtrip (64 bytes)
+    lv::VideoConfigSyncPayload tx{};
+    tx.config_revision = 42;
+    tx.origin_id = 0x12345678u;
+    tx.camera_id = 7;
+    tx.assigned_cam_number = 3;
+    tx.resolution_preset = lv::kQuality4K;
+    tx.target_fps = 50;
+    tx.codec = uint8_t(lv::VideoCodecId::kH265);
+    tx.bitrate_kbps = 65000;
+    tx.video_delay_ms = 50;
+    tx.fixed_delay_mode = 1;
+    tx.camera_lens = lv::kLensTele;
+    tx.flags = lv::kVideoConfigFlagHasBadgeColor;
+    tx.badge_accent_rgba[0] = 139;
+    tx.badge_accent_rgba[1] = 92;
+    tx.badge_accent_rgba[2] = 246;
+    tx.badge_accent_rgba[3] = 255;
+    std::snprintf(tx.assigned_cam_tag, sizeof(tx.assigned_cam_tag), "CAM 3");
+
+    uint8_t wire[lv::kVideoConfigSyncSize]{};
+    lv::write_video_config_sync(wire, tx);
+    lv::VideoConfigSyncPayload rx{};
+    REQUIRE(lv::parse_video_config_sync(wire, sizeof(wire), rx));
+    CHECK(rx.config_revision == 42);
+    CHECK(rx.origin_id == 0x12345678u);
+    CHECK(rx.camera_id == 7);
+    CHECK(rx.assigned_cam_number == 3);
+    CHECK(rx.resolution_preset == lv::kQuality4K);
+    CHECK(rx.target_fps == 50);
+    CHECK(rx.codec == uint8_t(lv::VideoCodecId::kH265));
+    CHECK(rx.bitrate_kbps == 65000);
+    CHECK(rx.video_delay_ms == 50);
+    CHECK(rx.fixed_delay_mode == 1);
+    CHECK(rx.camera_lens == lv::kLensTele);
+    CHECK(rx.badge_accent_rgba[0] == 139 && rx.badge_accent_rgba[2] == 246);
+    CHECK(std::string(rx.assigned_cam_tag) == "CAM 3");
+
+    // 2. Live bidirectional sync between Studio and Phone + Echo Guard
+    lv::TallyIntercomEngine studio;
+    lv::TallyIntercomEngine phone;
+    REQUIRE(studio.start_studio(0, "127.0.0.1"));
+    const uint16_t port = studio.bound_port();
+    REQUIRE(port != 0);
+
+    std::atomic<int> phone_rx_count{0};
+    std::atomic<int> idr_count{0};
+    lv::VideoConfigSyncPayload phone_last{};
+    phone.set_video_config_sync_callback([&](const lv::VideoConfigSyncPayload& p) {
+        if ((p.flags & lv::kVideoConfigFlagRequestIdr) != 0) {
+            idr_count.fetch_add(1);
+            return;
+        }
+        phone_last = p;
+        phone_rx_count.fetch_add(1);
+    });
+
+    std::atomic<int> studio_rx_count{0};
+    lv::VideoConfigSyncPayload studio_last{};
+    studio.set_video_config_sync_callback([&](const lv::VideoConfigSyncPayload& p) {
+        studio_last = p;
+        studio_rx_count.fetch_add(1);
+    });
+
+    REQUIRE(phone.start_camera("127.0.0.1", port, 7, "Pixel 9 Pro"));
+    for (int i = 0; i < 60 && studio.studio_cameras().empty(); ++i) {
+        phone.poll();
+        studio.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    REQUIRE(!studio.studio_cameras().empty());
+
+    // Studio assigns CAM 4 + 35 Mbps + 33 ms Fixed delay -> Phone receives once (3x redundant deduped)
+    lv::VideoConfigSyncPayload assign{};
+    assign.config_revision = 10;
+    assign.origin_id = studio.origin_id();
+    assign.camera_id = 7;
+    assign.assigned_cam_number = 4;
+    assign.resolution_preset = lv::kQuality1080p;
+    assign.target_fps = 60;
+    assign.codec = uint8_t(lv::VideoCodecId::kH264);
+    assign.bitrate_kbps = 35000;
+    assign.video_delay_ms = 33;
+    assign.fixed_delay_mode = 1;
+    assign.camera_lens = lv::kLensWide;
+    std::snprintf(assign.assigned_cam_tag, sizeof(assign.assigned_cam_tag), "CAM 4");
+    REQUIRE(studio.send_video_config_sync(7, assign));
+
+    for (int i = 0; i < 50 && phone_rx_count.load() == 0; ++i) {
+        studio.poll();
+        phone.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(phone_rx_count.load() == 1);
+    CHECK(phone_last.assigned_cam_number == 4);
+    CHECK(std::string(phone_last.assigned_cam_tag) == "CAM 4");
+    CHECK(phone_last.bitrate_kbps == 35000);
+
+    // Phone sends local lens/fps update back to Studio -> Studio updates camera entry
+    lv::VideoConfigSyncPayload from_phone = assign;
+    from_phone.config_revision = 11;
+    from_phone.origin_id = phone.origin_id();
+    from_phone.flags = lv::kVideoConfigFlagFromCamera;
+    from_phone.target_fps = 50;
+    from_phone.camera_lens = lv::kLensUltraWide;
+    REQUIRE(phone.send_video_config_sync(7, from_phone));
+    for (int i = 0; i < 50 && studio_rx_count.load() == 0; ++i) {
+        phone.poll();
+        studio.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(studio_rx_count.load() == 1);
+    CHECK(studio_last.target_fps == 50);
+    CHECK(studio_last.camera_lens == lv::kLensUltraWide);
+
+    // Studio requests immediate IDR keyframe -> Phone callback sees kVideoConfigFlagRequestIdr
+    REQUIRE(studio.studio_request_keyframe(7));
+    for (int i = 0; i < 40 && idr_count.load() == 0; ++i) {
+        studio.poll();
+        phone.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    CHECK(idr_count.load() >= 1);
+
+    phone.stop();
     studio.stop();
 }

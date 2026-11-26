@@ -1,12 +1,16 @@
-// obs_lanvid_source.cpp — OBS Studio Input Source ("LanVid Camera / Stream Source")
-// Supports 360p..4K DCI 60fps + 9:16 vertical, dynamic resolution/FPS switching,
-// zero-copy NV12/I420/BGRA delivery, 64ch AoIP audio routing, LAN discovery & Auto-Tally.
+// obs_lanvid_source.cpp — Zero-Crash OBS Studio Input Source ("LanVid Camera / Stream Source")
+// Supports Auto-Discovery (LAN phones, Studios, and local LanVidVideoBus_v1 SHM) + Dedicated UDP Port,
+// VideoPlayoutBuffer (Fixed 5..250 ms / Adaptive Wi-Fi), Camera Number Badge Sync, Remote Camera Control,
+// Lavender Standby Placeholder, and 64ch AoIP Audio Routing.
 
 #include "obs_api_compat.hpp"
 #include "obs_lanvid_core.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 
 #if defined(LV_HAVE_REAL_LIBOBS)
@@ -15,13 +19,26 @@ namespace lv::obs {
 
 namespace {
 
+constexpr const char* kPropConnMode = "conn_mode";
 constexpr const char* kPropDevice = "lanvid_device";
 constexpr const char* kPropRefresh = "lanvid_refresh";
 constexpr const char* kPropBindIp = "bind_ip";
 constexpr const char* kPropPort = "listen_port";
+constexpr const char* kPropPeerIp = "peer_ip";
+constexpr const char* kPropPortStatus = "port_status";
 constexpr const char* kPropCamId = "camera_id";
+constexpr const char* kPropBadgeNum = "badge_number";
+constexpr const char* kPropBadgeTag = "badge_tag";
+constexpr const char* kPropApplyBadge = "apply_badge";
 constexpr const char* kPropJitter = "jitter_preset";
+constexpr const char* kPropDelayMs = "video_delay_ms";
+constexpr const char* kPropPlaceholder = "show_placeholder";
 constexpr const char* kPropForceIdr = "force_idr";
+constexpr const char* kPropRemoteQuality = "remote_quality";
+constexpr const char* kPropRemoteFps = "remote_fps";
+constexpr const char* kPropRemoteBitrate = "remote_bitrate";
+constexpr const char* kPropRemoteLens = "remote_lens";
+constexpr const char* kPropApplyRemote = "apply_remote";
 constexpr const char* kPropAudioRoute = "audio_route";
 constexpr const char* kPropAudioPair = "audio_pair";
 constexpr const char* kPropAudioLat = "audio_latency_ms";
@@ -32,25 +49,81 @@ constexpr const char* kPropSyncRec = "sync_remote_rec";
 
 struct LanVidSourceContext {
     obs_source_t* obs_source = nullptr;
-    LanVidObsSourceEngine engine;
+    std::shared_ptr<LanVidObsSourceEngine> engine;
+    std::shared_ptr<std::atomic<bool>> alive;
 };
+
+void parse_device_id(const std::string& dev_id, SourceConfig& cfg) {
+    cfg.shm_slot = -1;
+    if (dev_id.rfind("shm:", 0) == 0) {
+        cfg.shm_slot = std::clamp(std::atoi(dev_id.c_str() + 4), 0, int(lv::kVideoBusSlots) - 1);
+        return;
+    }
+    if (dev_id.rfind("tally:", 0) == 0) {
+        const std::string rest = dev_id.substr(6);
+        const auto c = rest.rfind(':');
+        if (c != std::string::npos) {
+            cfg.peer_ip = rest.substr(0, c);
+            const uint32_t cid = uint32_t(std::strtoul(rest.substr(c + 1).c_str(), nullptr, 10));
+            if (cid > 0) cfg.camera_id = cid;
+        }
+        return;
+    }
+    if (dev_id.rfind("lan:", 0) == 0) {
+        const std::string rest = dev_id.substr(4);
+        const auto c = rest.rfind(':');
+        if (c != std::string::npos) {
+            cfg.peer_ip = rest.substr(0, c);
+            const uint16_t p = uint16_t(std::atoi(rest.substr(c + 1).c_str()));
+            if (p >= 1024) cfg.listen_port = p;
+        }
+    }
+}
 
 SourceConfig config_from_settings(obs_data_t* settings, obs_source_t* src) {
     SourceConfig cfg{};
     const char* name = src ? obs_source_get_name(src) : "LanVid Camera";
     cfg.source_name = name ? name : "LanVid Camera";
+    cfg.connection_mode = static_cast<ConnectionMode>(obs_data_get_int(settings, kPropConnMode));
+
     const char* bind = obs_data_get_string(settings, kPropBindIp);
     cfg.bind_ip = (bind && bind[0]) ? bind : "0.0.0.0";
     cfg.listen_port = static_cast<uint16_t>(obs_data_get_int(settings, kPropPort));
-    if (cfg.listen_port == 0) cfg.listen_port = 5004;
+    if (cfg.listen_port == 0) cfg.listen_port = 5006;
+
+    const char* peer = obs_data_get_string(settings, kPropPeerIp);
+    cfg.peer_ip = peer ? peer : "";
+
     cfg.camera_id = static_cast<uint32_t>(obs_data_get_int(settings, kPropCamId));
     if (cfg.camera_id == 0) cfg.camera_id = 1;
+
+    const char* dev = obs_data_get_string(settings, kPropDevice);
+    cfg.device_id = dev ? dev : "";
+    if (cfg.connection_mode == ConnectionMode::kAutoDiscovery && !cfg.device_id.empty()) {
+        parse_device_id(cfg.device_id, cfg);
+    }
+
+    cfg.assigned_cam_number = static_cast<uint8_t>(std::clamp<long long>(obs_data_get_int(settings, kPropBadgeNum), 1, 16));
+    const char* btag = obs_data_get_string(settings, kPropBadgeTag);
+    cfg.assigned_cam_tag = (btag && btag[0]) ? std::string(btag).substr(0, 15)
+                                             : ("CAM " + std::to_string(cfg.assigned_cam_number));
+
     cfg.jitter_preset = static_cast<JitterPreset>(obs_data_get_int(settings, kPropJitter));
+    cfg.fixed_delay_mode = (cfg.jitter_preset != JitterPreset::kAdaptiveWifi);
+    const int custom_ms = static_cast<int>(obs_data_get_int(settings, kPropDelayMs));
+    if (cfg.jitter_preset == JitterPreset::kCustomFixed || cfg.jitter_preset == JitterPreset::kAdaptiveWifi) {
+        cfg.video_delay_ms = static_cast<uint32_t>(std::clamp(custom_ms > 0 ? custom_ms : 33, 5, 250));
+    } else {
+        cfg.video_delay_ms = jitter_preset_to_ms(cfg.jitter_preset);
+    }
+    cfg.show_placeholder = obs_data_get_bool(settings, kPropPlaceholder);
+
     cfg.audio_route = static_cast<AudioRouteMode>(obs_data_get_int(settings, kPropAudioRoute));
     cfg.audio_pair_index = static_cast<int>(obs_data_get_int(settings, kPropAudioPair));
     cfg.audio_latency_ms = static_cast<uint32_t>(obs_data_get_int(settings, kPropAudioLat));
     cfg.audio_channels = static_cast<uint32_t>(obs_data_get_int(settings, kPropAudioCh));
     if (cfg.audio_channels < 2) cfg.audio_channels = 2;
+
     cfg.auto_tally = obs_data_get_bool(settings, kPropAutoTally);
     cfg.only_on_air_when_live = obs_data_get_bool(settings, kPropLiveOnly);
     cfg.sync_remote_rec = obs_data_get_bool(settings, kPropSyncRec);
@@ -96,23 +169,87 @@ void push_obs_audio(obs_source_t* src, const AudioBlockView& av) {
     obs_source_output_audio(src, &audio);
 }
 
-bool on_refresh_devices(obs_properties_t* props, obs_property_t*, void*) {
+void populate_device_list(obs_properties_t* props) {
     obs_property_t* list = obs_properties_get(props, kPropDevice);
-    if (!list) return false;
+    if (!list) return;
     obs_property_list_clear(list);
-    obs_property_list_add_string(list, "Manual (Bind IP & UDP Port)", "");
-    const auto peers = LanVidObsManager::instance().scan_lan_devices(350);
-    for (const auto& p : peers) {
-        char label[128];
-        std::snprintf(label, sizeof(label), "%s (%s:%u)", p.name, p.ip, unsigned(p.port));
-        obs_property_list_add_string(list, label, p.ip);
+    obs_property_list_add_string(list, "Auto / Default Port (Listen for any sender)", "");
+    for (const auto& item : LanVidObsRuntime::instance().discovered_cameras()) {
+        obs_property_list_add_string(list, item.display_name.c_str(), item.id.c_str());
     }
+}
+
+void update_port_conflict_banner(obs_properties_t* props, void* data) {
+    obs_property_t* p = obs_properties_get(props, kPropPortStatus);
+    if (!p) return;
+    auto* ctx = static_cast<LanVidSourceContext*>(data);
+    if (!ctx || !ctx->engine) {
+        obs_property_set_description(p, "Port status: ready");
+        obs_property_text_set_info_type(p, OBS_TEXT_INFO_NORMAL);
+        return;
+    }
+    const auto cfg = ctx->engine->config();
+    if (cfg.shm_slot >= 0) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "Shared Memory Mode: reading LanVidVideoBus_v1 slot %d (0 ms LAN overhead)",
+                      cfg.shm_slot);
+        obs_property_set_description(p, msg);
+        obs_property_text_set_info_type(p, OBS_TEXT_INFO_NORMAL);
+        return;
+    }
+    const auto conflict = LanVidObsRuntime::instance().check_port_conflict(cfg.listen_port, ctx->engine->uid());
+    if (conflict.has_conflict) {
+        char msg[192];
+        std::snprintf(msg, sizeof(msg), "WARNING: UDP port %u is already used by '%s'! Pick another port (e.g. %u).",
+                      unsigned(cfg.listen_port), conflict.conflicting_source.c_str(), unsigned(cfg.listen_port + 2));
+        obs_property_set_description(p, msg);
+        obs_property_text_set_info_type(p, OBS_TEXT_INFO_WARNING);
+    } else {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "UDP port %u active and conflict-free.", unsigned(ctx->engine->bound_port()));
+        obs_property_set_description(p, msg);
+        obs_property_text_set_info_type(p, OBS_TEXT_INFO_NORMAL);
+    }
+}
+
+bool on_refresh_devices(obs_properties_t* props, obs_property_t*, void* data) {
+    LanVidObsRuntime::instance().refresh_discovery_now();
+    populate_device_list(props);
+    update_port_conflict_banner(props, data);
     return true;
 }
 
 bool on_force_idr(obs_properties_t*, obs_property_t*, void* data) {
     auto* ctx = static_cast<LanVidSourceContext*>(data);
-    if (ctx) ctx->engine.request_idr_keyframe();
+    if (ctx && ctx->engine) ctx->engine->request_idr_keyframe();
+    return false;
+}
+
+bool on_apply_badge(obs_properties_t*, obs_property_t*, void* data) {
+    auto* ctx = static_cast<LanVidSourceContext*>(data);
+    if (!ctx || !ctx->engine || !ctx->obs_source) return false;
+    obs_data_t* s = obs_source_get_settings(ctx->obs_source);
+    const uint8_t num = static_cast<uint8_t>(std::clamp<long long>(obs_data_get_int(s, kPropBadgeNum), 1, 16));
+    const char* tag = obs_data_get_string(s, kPropBadgeTag);
+    ctx->engine->assign_camera_number(num, tag ? tag : "");
+    obs_data_release(s);
+    return false;
+}
+
+bool on_apply_remote(obs_properties_t*, obs_property_t*, void* data) {
+    auto* ctx = static_cast<LanVidSourceContext*>(data);
+    if (!ctx || !ctx->engine || !ctx->obs_source) return false;
+    obs_data_t* s = obs_source_get_settings(ctx->obs_source);
+    RemoteCameraControl ctl{};
+    ctl.quality = static_cast<CameraQualityPreset>(obs_data_get_int(s, kPropRemoteQuality));
+    ctl.fps = static_cast<uint8_t>(std::clamp<long long>(obs_data_get_int(s, kPropRemoteFps), 24, 60));
+    ctl.bitrate_kbps = static_cast<uint32_t>(std::clamp<long long>(obs_data_get_int(s, kPropRemoteBitrate), 5000, 150000));
+    ctl.lens = static_cast<uint8_t>(std::clamp<long long>(obs_data_get_int(s, kPropRemoteLens), 0, 3));
+    const auto cfg = ctx->engine->config();
+    ctl.video_delay_ms = static_cast<uint16_t>(std::clamp<uint32_t>(cfg.video_delay_ms, 5, 250));
+    ctl.fixed_delay_mode = cfg.fixed_delay_mode;
+    ctx->engine->send_remote_camera_control(ctl);
+    obs_data_release(s);
     return false;
 }
 
@@ -121,10 +258,21 @@ const char* source_get_name(void*) {
 }
 
 void source_get_defaults(obs_data_t* settings) {
+    obs_data_set_default_int(settings, kPropConnMode, static_cast<int>(ConnectionMode::kAutoDiscovery));
+    obs_data_set_default_string(settings, kPropDevice, "");
     obs_data_set_default_string(settings, kPropBindIp, "0.0.0.0");
-    obs_data_set_default_int(settings, kPropPort, LanVidObsManager::instance().allocate_next_port());
+    obs_data_set_default_int(settings, kPropPort, LanVidObsRuntime::instance().allocate_next_port());
+    obs_data_set_default_string(settings, kPropPeerIp, "");
     obs_data_set_default_int(settings, kPropCamId, 1);
-    obs_data_set_default_int(settings, kPropJitter, static_cast<int>(JitterPreset::kBalanced));
+    obs_data_set_default_int(settings, kPropBadgeNum, 1);
+    obs_data_set_default_string(settings, kPropBadgeTag, "CAM 1");
+    obs_data_set_default_int(settings, kPropJitter, static_cast<int>(JitterPreset::kFixed33ms));
+    obs_data_set_default_int(settings, kPropDelayMs, 33);
+    obs_data_set_default_bool(settings, kPropPlaceholder, true);
+    obs_data_set_default_int(settings, kPropRemoteQuality, static_cast<int>(CameraQualityPreset::kStudio1080p));
+    obs_data_set_default_int(settings, kPropRemoteFps, 60);
+    obs_data_set_default_int(settings, kPropRemoteBitrate, 25000);
+    obs_data_set_default_int(settings, kPropRemoteLens, static_cast<int>(CameraLens::kLensWide));
     obs_data_set_default_int(settings, kPropAudioRoute, static_cast<int>(AudioRouteMode::kStereoMix));
     obs_data_set_default_int(settings, kPropAudioPair, 0);
     obs_data_set_default_int(settings, kPropAudioLat, 20);
@@ -137,25 +285,67 @@ void source_get_defaults(obs_data_t* settings) {
 obs_properties_t* source_get_properties(void* data) {
     obs_properties_t* props = obs_properties_create();
 
-    // 1. LAN / mDNS Auto-Discovery
-    obs_property_t* dev_list = obs_properties_add_list(props, kPropDevice, obs_module_text("LanVid.Source.Device"),
-                                                       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
-    obs_property_list_add_string(dev_list, "Manual (Bind IP & UDP Port)", "");
+    // 1. Connection & Discovery (NON-BLOCKING cached list!)
+    obs_property_t* mode = obs_properties_add_list(props, kPropConnMode, obs_module_text("LanVid.Source.ConnMode"),
+                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(mode, "Auto-Discovery (LAN Camera / Studio SHM)", static_cast<int>(ConnectionMode::kAutoDiscovery));
+    obs_property_list_add_int(mode, "Dedicated Port / IP", static_cast<int>(ConnectionMode::kDedicatedPort));
+
+    obs_properties_add_list(props, kPropDevice, obs_module_text("LanVid.Source.Device"),
+                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    populate_device_list(props);
     obs_properties_add_button(props, kPropRefresh, obs_module_text("LanVid.Source.RefreshDevices"), on_refresh_devices);
 
     obs_properties_add_text(props, kPropBindIp, obs_module_text("LanVid.Source.BindIp"), OBS_TEXT_DEFAULT);
     obs_properties_add_int(props, kPropPort, obs_module_text("LanVid.Source.UdpPort"), 1024, 65535, 1);
-    obs_properties_add_int(props, kPropCamId, obs_module_text("LanVid.Source.CameraId"), 1, 8, 1);
+    obs_properties_add_text(props, kPropPeerIp, obs_module_text("LanVid.Source.PeerIp"), OBS_TEXT_DEFAULT);
+    obs_properties_add_text(props, kPropPortStatus, obs_module_text("LanVid.Source.PortStatus"), OBS_TEXT_INFO);
+    update_port_conflict_banner(props, data);
 
-    // 2. Video Jitter & Sync Mode
+    // 2. Camera Number Badge & Tally ID
+    obs_properties_add_int(props, kPropCamId, obs_module_text("LanVid.Source.CameraId"), 1, 16, 1);
+    obs_properties_add_int(props, kPropBadgeNum, obs_module_text("LanVid.Source.BadgeNumber"), 1, 16, 1);
+    obs_properties_add_text(props, kPropBadgeTag, obs_module_text("LanVid.Source.BadgeTag"), OBS_TEXT_DEFAULT);
+    obs_properties_add_button(props, kPropApplyBadge, obs_module_text("LanVid.Source.ApplyBadge"), on_apply_badge);
+
+    // 3. VideoPlayoutBuffer
     obs_property_t* jit = obs_properties_add_list(props, kPropJitter, obs_module_text("LanVid.Source.JitterMode"),
                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(jit, "Ultra-Low Latency (5-10 ms)", static_cast<int>(JitterPreset::kUltraLow));
-    obs_property_list_add_int(jit, "Balanced (15-30 ms)", static_cast<int>(JitterPreset::kBalanced));
-    obs_property_list_add_int(jit, "Smooth Broadcast (50-100 ms)", static_cast<int>(JitterPreset::kSmooth));
+    obs_property_list_add_int(jit, "Fixed 16 ms (Ultra-Low LAN)", static_cast<int>(JitterPreset::kFixed16ms));
+    obs_property_list_add_int(jit, "Fixed 33 ms (Smooth Studio, Default)", static_cast<int>(JitterPreset::kFixed33ms));
+    obs_property_list_add_int(jit, "Fixed 50 ms (Wi-Fi Safe)", static_cast<int>(JitterPreset::kFixed50ms));
+    obs_property_list_add_int(jit, "Fixed 80 ms (Heavy Wi-Fi)", static_cast<int>(JitterPreset::kFixed80ms));
+    obs_property_list_add_int(jit, "Custom Fixed Delay (Slider)", static_cast<int>(JitterPreset::kCustomFixed));
+    obs_property_list_add_int(jit, "Adaptive Wi-Fi (Auto 33..200 ms)", static_cast<int>(JitterPreset::kAdaptiveWifi));
+    obs_properties_add_int_slider(props, kPropDelayMs, obs_module_text("LanVid.Source.DelayMs"), 5, 250, 1);
+    obs_properties_add_bool(props, kPropPlaceholder, obs_module_text("LanVid.Source.Placeholder"));
     obs_properties_add_button(props, kPropForceIdr, obs_module_text("LanVid.Source.ForceIdr"), on_force_idr);
 
-    // 3. Multi-Channel AoIP Audio Routing (up to 64ch)
+    // 4. Remote Camera Control
+    obs_property_t* rq = obs_properties_add_list(props, kPropRemoteQuality, obs_module_text("LanVid.Source.RemoteQuality"),
+                                                 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(rq, "360p Proxy (4 Mbps)", static_cast<int>(CameraQualityPreset::kProxy360p));
+    obs_property_list_add_int(rq, "720p HD (12 Mbps)", static_cast<int>(CameraQualityPreset::kHd720p));
+    obs_property_list_add_int(rq, "1080p Studio (25 Mbps)", static_cast<int>(CameraQualityPreset::kStudio1080p));
+    obs_property_list_add_int(rq, "4K60 Master (85 Mbps)", static_cast<int>(CameraQualityPreset::kMaster4K60));
+
+    obs_property_t* rfps = obs_properties_add_list(props, kPropRemoteFps, obs_module_text("LanVid.Source.RemoteFps"),
+                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    for (int f : {24, 25, 30, 50, 60}) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d fps", f);
+        obs_property_list_add_int(rfps, buf, f);
+    }
+    obs_properties_add_int_slider(props, kPropRemoteBitrate, obs_module_text("LanVid.Source.RemoteBitrate"), 5000, 150000, 1000);
+    obs_property_t* rlens = obs_properties_add_list(props, kPropRemoteLens, obs_module_text("LanVid.Source.RemoteLens"),
+                                                    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(rlens, "Wide (1x)", static_cast<int>(CameraLens::kLensWide));
+    obs_property_list_add_int(rlens, "Ultra-Wide (0.5x)", static_cast<int>(CameraLens::kLensUltraWide));
+    obs_property_list_add_int(rlens, "Tele (2x+)", static_cast<int>(CameraLens::kLensTele));
+    obs_property_list_add_int(rlens, "Front", static_cast<int>(CameraLens::kLensFront));
+    obs_properties_add_button(props, kPropApplyRemote, obs_module_text("LanVid.Source.ApplyRemote"), on_apply_remote);
+
+    // 5. Multi-Channel AoIP Audio Routing
     obs_property_t* route = obs_properties_add_list(props, kPropAudioRoute, obs_module_text("LanVid.Source.AudioRoute"),
                                                     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
     obs_property_list_add_int(route, "Stereo Mix (Ch 1-2)", static_cast<int>(AudioRouteMode::kStereoMix));
@@ -173,10 +363,11 @@ obs_properties_t* source_get_properties(void* data) {
 
     obs_property_t* lat = obs_properties_add_list(props, kPropAudioLat, obs_module_text("LanVid.Source.AudioLatency"),
                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-    obs_property_list_add_int(lat, "5 ms", 5);
-    obs_property_list_add_int(lat, "10 ms", 10);
-    obs_property_list_add_int(lat, "20 ms", 20);
-    obs_property_list_add_int(lat, "40 ms", 40);
+    for (int ms : {5, 10, 20, 40}) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d ms", ms);
+        obs_property_list_add_int(lat, buf, ms);
+    }
 
     obs_property_t* chs = obs_properties_add_list(props, kPropAudioCh, obs_module_text("LanVid.Source.AudioChannels"),
                                                   OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -186,48 +377,57 @@ obs_properties_t* source_get_properties(void* data) {
         obs_property_list_add_int(chs, buf, c);
     }
 
-    // 4. Studio Auto-Tally & Remote REC Sync
+    // 6. Auto-Tally & Remote REC
     obs_properties_add_bool(props, kPropAutoTally, obs_module_text("LanVid.Source.AutoTally"));
     obs_properties_add_bool(props, kPropLiveOnly, obs_module_text("LanVid.Source.OnlyOnAirWhenLive"));
     obs_properties_add_bool(props, kPropSyncRec, obs_module_text("LanVid.Source.SyncRemoteRec"));
 
-    on_refresh_devices(props, nullptr, data);
     return props;
 }
 
 void* source_create(obs_data_t* settings, obs_source_t* source) {
     auto* ctx = new LanVidSourceContext();
     ctx->obs_source = source;
+    ctx->alive = std::make_shared<std::atomic<bool>>(true);
+    ctx->engine = LanVidObsSourceEngine::create();
+
     const SourceConfig cfg = config_from_settings(settings, source);
-    LanVidObsManager::instance().ensure_studio_started();
-    ctx->engine.start(
+    LanVidObsRuntime::instance().startup();
+
+    auto alive_flag = ctx->alive;
+    ctx->engine->start(
         cfg,
-        [source](const VideoFrameView& fv) { push_obs_video(source, fv); },
-        [source](const AudioBlockView& av) { push_obs_audio(source, av); });
+        [source, alive_flag](const VideoFrameView& fv) {
+            if (alive_flag->load(std::memory_order_acquire)) push_obs_video(source, fv);
+        },
+        [source, alive_flag](const AudioBlockView& av) {
+            if (alive_flag->load(std::memory_order_acquire)) push_obs_audio(source, av);
+        });
     return ctx;
 }
 
 void source_destroy(void* data) {
     auto* ctx = static_cast<LanVidSourceContext*>(data);
     if (!ctx) return;
-    ctx->engine.stop();
+    if (ctx->alive) ctx->alive->store(false, std::memory_order_release);
+    if (ctx->engine) ctx->engine->stop();
     delete ctx;
 }
 
 void source_update(void* data, obs_data_t* settings) {
     auto* ctx = static_cast<LanVidSourceContext*>(data);
-    if (!ctx) return;
-    ctx->engine.update_config(config_from_settings(settings, ctx->obs_source));
+    if (!ctx || !ctx->engine) return;
+    ctx->engine->update_config(config_from_settings(settings, ctx->obs_source));
 }
 
 void source_activate(void* data) {
     auto* ctx = static_cast<LanVidSourceContext*>(data);
-    if (ctx) ctx->engine.set_obs_visibility(/*in_program=*/true, /*in_preview=*/false);
+    if (ctx && ctx->engine) ctx->engine->set_obs_visibility(/*in_program=*/true, /*in_preview=*/false);
 }
 
 void source_deactivate(void* data) {
     auto* ctx = static_cast<LanVidSourceContext*>(data);
-    if (ctx) ctx->engine.set_obs_visibility(/*in_program=*/false, /*in_preview=*/false);
+    if (ctx && ctx->engine) ctx->engine->set_obs_visibility(/*in_program=*/false, /*in_preview=*/false);
 }
 
 }  // namespace

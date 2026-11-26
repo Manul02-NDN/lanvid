@@ -340,12 +340,25 @@ namespace {
 std::recursive_mutex g_ti_mu;  // recursive: lv_tally_intercom_poll synchronously invokes on_android_tally
 LvTallyIntercomHandle* g_ti = nullptr;
 LV_TallyState g_last_tally{};
+LV_VideoConfigSync g_last_vcfg{};
+bool g_has_vcfg = false;
+uint64_t g_vcfg_tx_rev = 0;
 }  // namespace
 
 static void on_android_tally(const LV_TallyState* st, void*) {
     if (!st) return;
     std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
     g_last_tally = *st;
+}
+
+static void on_android_video_config_sync(const LV_VideoConfigSync* cfg, void*) {
+    if (!cfg) return;
+    if ((cfg->flags & 0x01u) != 0 && g_sender_running.load(std::memory_order_acquire) && g_sender) {
+        lv_sender_force_keyframe(g_sender);
+    }
+    std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
+    g_last_vcfg = *cfg;
+    g_has_vcfg = true;
 }
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyConnect(
@@ -362,6 +375,7 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyConnect(
                                            lbl.empty() ? "CAM 1" : lbl.c_str());
     if (!g_ti) return JNI_FALSE;
     lv_camera_set_tally_callback(g_ti, on_android_tally, nullptr);
+    lv_tally_intercom_set_video_config_sync_callback(g_ti, on_android_video_config_sync, nullptr);
     return JNI_TRUE;
 }
 
@@ -372,11 +386,49 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyDisconnect(JN
         g_ti = nullptr;
     }
     g_last_tally = {};
+    g_last_vcfg = {};
+    g_has_vcfg = false;
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeForceKeyframe(JNIEnv*, jclass) {
+    if (g_sender_running.load(std::memory_order_acquire) && g_sender) {
+        lv_sender_force_keyframe(g_sender);
+    }
+}
+
+JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetSenderBitrateKbps(JNIEnv*, jclass,
+                                                                                   jint bitrate_kbps) {
+    if (g_sender_running.load(std::memory_order_acquire) && g_sender && bitrate_kbps > 0) {
+        lv_sender_set_bitrate(g_sender, uint32_t(std::clamp(int(bitrate_kbps), 250, 150000)));
+    }
+}
+
+JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeSendVideoConfigSync(
+    JNIEnv* env, jclass, jint cam_num, jstring cam_tag, jint res_preset, jint fps, jint codec,
+    jint bitrate_kbps, jint delay_ms, jboolean fixed_delay, jint lens) {
+    std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
+    if (!g_ti) return JNI_FALSE;
+    LV_VideoConfigSync cfg{};
+    cfg.config_revision = ++g_vcfg_tx_rev;
+    cfg.assigned_cam_number = uint8_t(std::clamp(int(cam_num), 0, 16));
+    cfg.resolution_preset = uint8_t(std::clamp(int(res_preset), 0, 3));
+    cfg.target_fps = uint8_t(std::clamp(int(fps), 15, 120));
+    cfg.codec = uint8_t(std::clamp(int(codec), 0, 2));
+    cfg.bitrate_kbps = uint32_t(std::clamp(int(bitrate_kbps), 250, 150000));
+    cfg.video_delay_ms = uint16_t(std::clamp(int(delay_ms), 5, 250));
+    cfg.fixed_delay_mode = fixed_delay ? 1 : 0;
+    cfg.camera_lens = uint8_t(std::clamp(int(lens), 0, 3));
+    cfg.flags = 0x02u;  // kVideoConfigFlagFromCamera
+    const std::string tag = jstr_to_std(env, cam_tag);
+    std::snprintf(cfg.assigned_cam_tag, sizeof(cfg.assigned_cam_tag), "%s", tag.c_str());
+    return lv_tally_intercom_send_video_config_sync(g_ti, &cfg) == LV_OK ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
     JNIEnv* env, jclass, jint battery_pct, jint temp_c) {
     LV_TallyState st{};
+    LV_VideoConfigSync vc{};
+    bool has_vc = false;
     int dir_speaking = 0;
     float duck = 1.0f;
     {
@@ -385,19 +437,30 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
             lv_tally_intercom_update_camera_telemetry(g_ti, uint8_t(battery_pct), int8_t(temp_c));
             lv_tally_intercom_poll(g_ti);
             st = g_last_tally;
+            vc = g_last_vcfg;
+            has_vc = g_has_vcfg;
             dir_speaking = lv_tally_intercom_is_director_speaking(g_ti);
             duck = lv_tally_intercom_ducking_gain(g_ti);
         }
     }
-    char buf[320];
+    char buf[768];
     const int rec = (st.flags & 1u) ? 1 : 0;
-    std::snprintf(buf, sizeof(buf),
-                  "{\"tally\":%u,\"state\":%u,\"remoteRec\":%s,\"rec\":%d,"
-                  "\"directorSpeaking\":%s,\"ducking\":%.2f,\"label\":\"%s\"}",
-                  unsigned(st.tally_state), unsigned(st.tally_state),
-                  rec ? "true" : "false", rec,
-                  dir_speaking ? "true" : "false", duck,
-                  st.camera_label[0] ? st.camera_label : "CAM 1");
+    const uint32_t rgba = (uint32_t(vc.badge_accent_rgba[0]) << 24) | (uint32_t(vc.badge_accent_rgba[1]) << 16) |
+                          (uint32_t(vc.badge_accent_rgba[2]) << 8) | uint32_t(vc.badge_accent_rgba[3]);
+    std::snprintf(
+        buf, sizeof(buf),
+        "{\"tally\":%u,\"state\":%u,\"remoteRec\":%s,\"rec\":%d,"
+        "\"directorSpeaking\":%s,\"ducking\":%.2f,\"label\":\"%s\","
+        "\"configSynced\":%s,\"assignedCamNumber\":%u,\"assignedCamTag\":\"%s\","
+        "\"badgeAccentRgba\":%u,\"syncRev\":%llu,\"syncRes\":%u,\"syncFps\":%u,"
+        "\"syncCodec\":%u,\"syncBitrateKbps\":%u,\"syncDelayMs\":%u,\"syncFixedDelay\":%s,\"syncLens\":%u}",
+        unsigned(st.tally_state), unsigned(st.tally_state), rec ? "true" : "false", rec,
+        dir_speaking ? "true" : "false", duck, st.camera_label[0] ? st.camera_label : "CAM 1",
+        has_vc ? "true" : "false", unsigned(vc.assigned_cam_number), vc.assigned_cam_tag,
+        unsigned(rgba), static_cast<unsigned long long>(vc.config_revision),
+        unsigned(vc.resolution_preset), unsigned(vc.target_fps), unsigned(vc.codec),
+        unsigned(vc.bitrate_kbps), unsigned(vc.video_delay_ms ? vc.video_delay_ms : 33),
+        vc.fixed_delay_mode ? "true" : "false", unsigned(vc.camera_lens));
     return env->NewStringUTF(buf);
 }
 

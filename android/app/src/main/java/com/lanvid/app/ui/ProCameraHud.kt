@@ -24,6 +24,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,7 +84,19 @@ data class ProCameraState(
     val latchTalk: Boolean = false,
     val ifbMuted: Boolean = false,
     val ifbGain: Float = 1.0f,
-)
+    // Studio Camera Number Badge & Bidirectional Config Sync
+    val assignedCamNumber: Int = 0,
+    val assignedCamTag: String = "",
+    val configSynced: Boolean = false,
+    val syncedDelayMs: Int = 33,
+    val syncedFixedDelay: Boolean = true,
+    val lastSyncRev: Long = 0L,
+) {
+    val badgeDisplayText: String
+        get() = assignedCamTag.ifBlank {
+            if (assignedCamNumber > 0) "CAM $assignedCamNumber" else cameraLabel.take(8).ifBlank { "CAM 1" }
+        }
+}
 
 private val CineGlass = Color(0xCC18122B)
 private val CineLavender = Color(0xFFDDD6FE)
@@ -381,6 +397,74 @@ fun ProIntercomStrip(
                     val nxtMuted = !state.ifbMuted
                     onStateChange(state.copy(ifbMuted = nxtMuted))
                     onIntercomChanged(state.latchTalk || state.pttHeld, nxtMuted, state.ifbGain)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Compact glass badge showing the studio-assigned camera number ("CAM 1", "CAM 2", "A"...)
+ * with dynamic Tally border glow (Lavender STBY / Emerald PVW / Red PGM) and tap tooltip.
+ */
+@Composable
+fun CameraNumberBadge(
+    state: ProCameraState,
+    onOpenNetwork: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var showTooltip by remember { mutableStateOf(false) }
+    val borderColor = when (state.tally) {
+        TallyStatus.PROGRAM -> CineRed
+        TallyStatus.PREVIEW -> CineGreen
+        TallyStatus.STANDBY -> CineAccent
+    }
+    Column(modifier = modifier, horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Surface(
+            onClick = { showTooltip = !showTooltip },
+            color = CineGlass,
+            shape = RoundedCornerShape(12.dp),
+            border = BorderStroke(2.dp, borderColor),
+            shadowElevation = 4.dp,
+            modifier = Modifier.heightIn(min = 36.dp),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(borderColor))
+                Text(
+                    state.badgeDisplayText,
+                    color = Color.White,
+                    fontWeight = FontWeight.ExtraBold,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+        if (showTooltip) {
+            Surface(
+                color = CineGlass,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, borderColor.copy(alpha = 0.7f)),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    val modeTxt = if (state.syncedFixedDelay) "${state.syncedDelayMs} ms" else "Adaptive"
+                    val msg = if (state.configSynced) {
+                        "Призначено студією: ${state.badgeDisplayText} • Synced $modeTxt"
+                    } else {
+                        "Камера: ${state.badgeDisplayText} • Очікування синхронізації"
+                    }
+                    Text(msg, color = CineLavender, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                    CinePill("Мережа", false) {
+                        showTooltip = false
+                        onOpenNetwork()
+                    }
                 }
             }
         }

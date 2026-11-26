@@ -72,9 +72,24 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var cameraLabel: String {
         didSet { UserDefaults.standard.set(cameraLabel, forKey: "cam_label") }
     }
+    @Published var assignedCamNumber: Int {
+        didSet { UserDefaults.standard.set(assignedCamNumber, forKey: "cam_assigned_number") }
+    }
+    @Published var assignedCamTag: String {
+        didSet { UserDefaults.standard.set(assignedCamTag, forKey: "cam_assigned_tag") }
+    }
+    @Published var configSynced = false
+    @Published var syncedDelayMs: Int = 33
+    @Published var syncedFixedDelay = true
     @Published var isStreaming = false
     @Published var isDemoMode = false
     @Published var statusText = ""
+
+    var displayBadgeTag: String {
+        if !assignedCamTag.isEmpty { return assignedCamTag }
+        if assignedCamNumber > 0 { return "CAM \(assignedCamNumber)" }
+        return cameraLabel.isEmpty ? "CAM 1" : cameraLabel
+    }
 
     // MARK: - Tally & Duplex Intercom
     @Published var tallyState: ProTallyState = .standby
@@ -113,11 +128,31 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var secondaryExposureBias: Float = 0.0
 
     // MARK: - Encoder & Stream Profile
-    @Published var resolution: CineResolution = .fhd1080
-    @Published var fps: Int = 60
-    @Published var codec: CineCodec = .hevc
-    @Published var bitrateMbps: Double = 35.0
+    @Published var resolution: CineResolution = .fhd1080 {
+        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+    }
+    @Published var fps: Int = 60 {
+        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+    }
+    @Published var codec: CineCodec = .hevc {
+        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+    }
+    @Published var bitrateMbps: Double = 35.0 {
+        didSet {
+            if isStreaming && !isDemoMode {
+                senderLock.lock()
+                let s = senderHandle
+                senderLock.unlock()
+                if let s {
+                    lv_sender_set_bitrate(s, UInt32(max(2000, Int(bitrateMbps * 1000.0))))
+                }
+            }
+            if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
+        }
+    }
     @Published var colorProfile = "Rec.709"
+    private var isApplyingRemoteSync = false
+    private var localConfigSyncRev: UInt64 = 0
 
     // MARK: - iPhone Duo Mode
     @Published var duoMode: DuoMode = .singleHUD
@@ -155,6 +190,8 @@ final class CameraEngine: NSObject, ObservableObject {
         let tp = ud.integer(forKey: "cam_tally_port")
         self.tallyPort = tp > 0 ? tp : 5022
         self.cameraLabel = ud.string(forKey: "cam_label") ?? "CAM A"
+        self.assignedCamNumber = ud.integer(forKey: "cam_assigned_number")
+        self.assignedCamTag = ud.string(forKey: "cam_assigned_tag") ?? ""
         super.init()
 
         lv_init()
@@ -354,6 +391,14 @@ final class CameraEngine: NSObject, ObservableObject {
                     engine.applyRemoteStudioControl(ctrl)
                 }
             }, ctx)
+            lv_tally_intercom_set_video_config_sync_callback(th, { cfgPtr, userData in
+                guard let cfgPtr, let userData else { return }
+                let cfg = cfgPtr.pointee
+                let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
+                Task { @MainActor in
+                    engine.applyRemoteVideoConfigSync(cfg)
+                }
+            }, ctx)
             syncIntercomState()
         }
 
@@ -456,6 +501,7 @@ final class CameraEngine: NSObject, ObservableObject {
         if isStreaming && !isDemoMode && !duoMode.isMultiCam {
             configureAndStartCapture()
         }
+        if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
     }
 
     func applyManualCameraControls() {
@@ -529,6 +575,156 @@ final class CameraEngine: NSObject, ObservableObject {
             focusPosition = Float(min(1000, ctrl.focus_pos)) / 1000.0
         }
         applyManualCameraControls()
+    }
+
+    private func applyRemoteVideoConfigSync(_ cfg: LV_VideoConfigSync) {
+        if (cfg.flags & 0x01) != 0 {
+            senderLock.lock()
+            let s = senderHandle
+            senderLock.unlock()
+            if let s { lv_sender_force_keyframe(s) }
+        }
+
+        isApplyingRemoteSync = true
+        defer { isApplyingRemoteSync = false }
+
+        if cfg.assigned_cam_number > 0 {
+            assignedCamNumber = Int(cfg.assigned_cam_number)
+        }
+        let remoteTag = withUnsafePointer(to: cfg.assigned_cam_tag) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 16) { String(cString: $0) }
+        }
+        if !remoteTag.isEmpty {
+            assignedCamTag = remoteTag
+            cameraLabel = remoteTag
+        } else if cfg.assigned_cam_number > 0 {
+            assignedCamTag = "CAM \(cfg.assigned_cam_number)"
+            cameraLabel = assignedCamTag
+        }
+
+        if cfg.video_delay_ms >= 5 {
+            syncedDelayMs = Int(cfg.video_delay_ms)
+        }
+        syncedFixedDelay = (cfg.fixed_delay_mode != 0)
+        configSynced = true
+
+        let targetRes: CineResolution = {
+            switch cfg.resolution_preset {
+            case 0, 1: return .hd720
+            case 3: return .uhd4k
+            default: return .fhd1080
+            }
+        }()
+        let targetCodec: CineCodec = {
+            switch cfg.codec {
+            case 0: return .dct
+            case 1: return .h264
+            default: return .hevc
+            }
+        }()
+        let targetLens: CineLens = {
+            switch cfg.camera_lens {
+            case 1: return .ultraWide
+            case 2: return .tele
+            case 3: return .front
+            default: return .wide
+            }
+        }()
+        let targetFps = cfg.target_fps >= 15 ? Int(cfg.target_fps) : fps
+        let targetMbps = cfg.bitrate_kbps >= 1000 ? Double(cfg.bitrate_kbps) / 1000.0 : bitrateMbps
+
+        let needEncoderRestart = (targetRes != resolution || targetCodec != codec || targetFps != fps)
+        let needLensSwitch = (targetLens != lens)
+
+        resolution = targetRes
+        codec = targetCodec
+        fps = targetFps
+        bitrateMbps = min(150.0, max(5.0, targetMbps))
+
+        if needLensSwitch {
+            selectLens(targetLens)
+        }
+        if needEncoderRestart && isStreaming && !isDemoMode {
+            reconfigureVideoSenderOnly()
+        } else if isStreaming && !isDemoMode {
+            senderLock.lock()
+            let s = senderHandle
+            senderLock.unlock()
+            if let s { lv_sender_set_bitrate(s, UInt32(max(2000, Int(bitrateMbps * 1000.0)))) }
+        }
+    }
+
+    private func reconfigureVideoSenderOnly() {
+        guard let s = lv_sender_create() else { return }
+        var cfg = LV_SenderConfig()
+        lv_sdk_sender_config_default(&cfg)
+        let ipBytes = Array(destIp.utf8.prefix(63))
+        withUnsafeMutableBytes(of: &cfg.dest_ip) { raw in
+            raw.initializeMemory(as: UInt8.self, repeating: 0)
+            for (i, b) in ipBytes.enumerated() { raw[i] = b }
+        }
+        cfg.dest_port = UInt16(clamping: videoPort)
+        cfg.width = resolution.width
+        cfg.height = resolution.height
+        cfg.fps = Double(fps)
+        cfg.codec = codec.lvCodecValue
+        cfg.bitrate_kbps = UInt32(max(2000, Int(bitrateMbps * 1000.0)))
+        cfg.fec_group_size = 6
+        cfg.adaptive_quality = 1
+        cfg.keyframe_interval = UInt32(max(24, fps))
+
+        if lv_sdk_sender_start(s, &cfg) == LV_OK.rawValue {
+            senderLock.lock()
+            let old = senderHandle
+            senderHandle = s
+            senderLock.unlock()
+            if let old {
+                lv_sender_stop(old)
+                lv_sender_destroy(old)
+            }
+            if duoMode != .duoCompanion {
+                configureAndStartCapture()
+            }
+            statusText = "\(resolution.rawValue) \(fps)p \(codec.shortName) → \(destIp):\(videoPort)"
+        } else {
+            lv_sender_destroy(s)
+        }
+    }
+
+    func sendLocalConfigSyncToStudio() {
+        guard let th = tallyHandle else { return }
+        localConfigSyncRev &+= 1
+        var cfg = LV_VideoConfigSync()
+        cfg.config_revision = localConfigSyncRev
+        cfg.camera_id = cameraId
+        cfg.assigned_cam_number = UInt8(clamping: max(0, min(16, assignedCamNumber)))
+        cfg.resolution_preset = {
+            switch resolution {
+            case .hd720: return 1
+            case .fhd1080: return 2
+            case .uhd4k: return 3
+            }
+        }()
+        cfg.target_fps = UInt8(clamping: fps)
+        cfg.codec = UInt8(clamping: codec.lvCodecValue)
+        cfg.bitrate_kbps = UInt32(max(2000, Int(bitrateMbps * 1000.0)))
+        cfg.video_delay_ms = UInt16(clamping: max(5, min(250, syncedDelayMs)))
+        cfg.fixed_delay_mode = syncedFixedDelay ? 1 : 0
+        cfg.camera_lens = {
+            switch lens {
+            case .ultraWide: return 1
+            case .tele: return 2
+            case .front: return 3
+            case .wide: return 0
+            }
+        }()
+        cfg.flags = 0x02  // kVideoConfigFlagFromCamera
+        let tagBytes = Array(displayBadgeTag.utf8.prefix(15))
+        withUnsafeMutableBytes(of: &cfg.assigned_cam_tag) { raw in
+            raw.initializeMemory(as: UInt8.self, repeating: 0)
+            for (i, b) in tagBytes.enumerated() { raw[i] = b }
+        }
+        _ = lv_tally_intercom_send_video_config_sync(th, &cfg)
     }
 
     private func syncIntercomState() {

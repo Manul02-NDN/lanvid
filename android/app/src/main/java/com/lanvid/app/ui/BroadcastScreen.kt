@@ -209,6 +209,29 @@ fun BroadcastScreen(
     var battery by remember { mutableIntStateOf(-1) }
     var proState by remember { mutableStateOf(ProCameraState()) }
 
+    fun pushLocalConfigSync(nextUi: HudUiState, nextPro: ProCameraState) {
+        if (!nextUi.senderActive) return
+        val resIdx = when (nextUi.resolution) {
+            ResolutionPreset.HD_720 -> 1
+            ResolutionPreset.FHD_1080 -> 2
+            ResolutionPreset.UHD_4K -> 3
+        }
+        val fpsInt = nextPro.fps.toIntOrNull() ?: 60
+        scope.launch(Dispatchers.IO) {
+            LanVidNative.nativeSendVideoConfigSync(
+                camNum = nextPro.assignedCamNumber,
+                camTag = nextPro.badgeDisplayText,
+                resPreset = resIdx,
+                fps = fpsInt,
+                codec = nextUi.codec.id,
+                bitrateKbps = (nextUi.bitrateMbps * 1000).toInt(),
+                delayMs = nextPro.syncedDelayMs,
+                fixedDelay = nextPro.syncedFixedDelay,
+                lens = if (nextUi.source == CaptureSource.FRONT_CAM) 3 else 0
+            )
+        }
+    }
+
     fun saveTargetPc(ip: String, port: Int, name: String) {
         prefs.edit()
             .putString("destIp", ip)
@@ -297,13 +320,95 @@ fun BroadcastScreen(
                                 1 -> TallyStatus.PREVIEW
                                 else -> TallyStatus.STANDBY
                             }
+                            val newNum = obj.optInt("assignedCamNumber", proState.assignedCamNumber)
+                            val newTag = obj.optString("assignedCamTag", proState.assignedCamTag)
+                            val syncRev = obj.optLong("syncRev", 0L)
+                            val synced = obj.optBoolean("configSynced", false)
+                            val delayMs = obj.optInt("syncDelayMs", proState.syncedDelayMs).coerceIn(5, 250)
+                            val fixedDelay = obj.optBoolean("syncFixedDelay", proState.syncedFixedDelay)
+                            val nextLabel = newTag.ifBlank { obj.optString("label", proState.cameraLabel) }
+                                .ifBlank { proState.cameraLabel }
+
                             proState = proState.copy(
                                 tally = tState,
                                 remoteRec = obj.optBoolean("remoteRec", obj.optInt("rec", 0) != 0),
                                 directorSpeaking = obj.optBoolean("directorSpeaking", obj.optInt("director_speaking", 0) != 0),
                                 duckingGain = obj.optDouble("ducking", obj.optDouble("duck", 1.0)).toFloat(),
-                                cameraLabel = obj.optString("label", proState.cameraLabel).ifBlank { proState.cameraLabel }
+                                cameraLabel = nextLabel,
+                                assignedCamNumber = newNum,
+                                assignedCamTag = newTag,
+                                configSynced = synced,
+                                syncedDelayMs = delayMs,
+                                syncedFixedDelay = fixedDelay,
+                                lastSyncRev = maxOf(proState.lastSyncRev, syncRev)
                             )
+
+                            if (synced && syncRev > proState.lastSyncRev) {
+                                val syncRes = obj.optInt("syncRes", -1)
+                                val syncCodec = obj.optInt("syncCodec", -1)
+                                val syncBitrateKbps = obj.optInt("syncBitrateKbps", 0)
+                                val syncFps = obj.optInt("syncFps", 0)
+                                val syncLens = obj.optInt("syncLens", -1)
+
+                                val targetRes = when (syncRes) {
+                                    0, 1 -> ResolutionPreset.HD_720
+                                    2 -> ResolutionPreset.FHD_1080
+                                    3 -> ResolutionPreset.UHD_4K
+                                    else -> ui.resolution
+                                }
+                                val targetCodec = when (syncCodec) {
+                                    0 -> VideoCodecOption.DCT
+                                    1 -> VideoCodecOption.H264
+                                    2 -> VideoCodecOption.H265
+                                    else -> ui.codec
+                                }
+                                val targetBitrateMbps = if (syncBitrateKbps >= 1000) {
+                                    (syncBitrateKbps / 1000.0).coerceIn(5.0, 50.0)
+                                } else ui.bitrateMbps
+                                val targetSource = if (syncLens == 3) CaptureSource.FRONT_CAM
+                                else if (syncLens in 0..2 && ui.source == CaptureSource.FRONT_CAM) CaptureSource.BACK_CAM
+                                else ui.source
+
+                                val onlyBitrateChanged = (targetRes == ui.resolution &&
+                                    targetCodec == ui.codec &&
+                                    targetSource == ui.source &&
+                                    targetBitrateMbps != ui.bitrateMbps)
+
+                                val needRestartSender = (targetRes != ui.resolution || targetCodec != ui.codec)
+                                ui = ui.copy(
+                                    resolution = targetRes,
+                                    codec = targetCodec,
+                                    bitrateMbps = targetBitrateMbps,
+                                    source = targetSource
+                                )
+                                proState = proState.copy(
+                                    resolution = targetRes.label,
+                                    codec = when (targetCodec) {
+                                        VideoCodecOption.H265 -> "H.265"
+                                        VideoCodecOption.H264 -> "H.264"
+                                        VideoCodecOption.DCT -> "DCT"
+                                    },
+                                    bitrateMbps = targetBitrateMbps.toFloat(),
+                                    fps = if (syncFps > 0) syncFps.toString() else proState.fps,
+                                    lens = if (syncLens == 3) "Front" else if (syncLens == 1) "0.5x" else if (syncLens == 2) "2x" else "1x"
+                                )
+                                if (onlyBitrateChanged) {
+                                    withContext(Dispatchers.IO) {
+                                        LanVidNative.nativeSetSenderBitrateKbps((targetBitrateMbps * 1000).toInt())
+                                    }
+                                } else if (needRestartSender && ui.senderActive) {
+                                    val encW = targetRes.width
+                                    val encH = targetRes.height
+                                    val fpsVal = if (syncFps > 0) syncFps else 60
+                                    withContext(Dispatchers.IO) {
+                                        LanVidNative.nativeStartSender(
+                                            ui.destIp, ui.destPort, encW, encH, fpsVal,
+                                            ui.quality, ui.fecGroup, ui.adaptive, targetCodec.id,
+                                            (targetBitrateMbps * 1000).toInt()
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -674,6 +779,16 @@ fun BroadcastScreen(
                     .padding(12.dp)
             ) {
                 TallyBadge(tally, Modifier.align(Alignment.TopStart))
+                if (ui.mode == BroadcastMode.SENDER) {
+                    CameraNumberBadge(
+                        state = proState,
+                        onOpenNetwork = {
+                            hudHidden = false
+                            selectedTool = HudTool.NETWORK
+                        },
+                        modifier = Modifier.align(Alignment.TopEnd)
+                    )
+                }
                 if (ui.showTimer || ui.showTraffic) {
                     TrafficAndTimerCard(
                         traffic = traffic,
@@ -761,6 +876,16 @@ fun BroadcastScreen(
                             } else Modifier
                         )
                 ) {
+                    if (ui.mode == BroadcastMode.SENDER) {
+                        CameraNumberBadge(
+                            state = proState,
+                            onOpenNetwork = { selectedTool = HudTool.NETWORK },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+
                     // Dismissible status / error banner
                     ui.statusMessage?.let { msg ->
                         Box(
@@ -790,9 +915,14 @@ fun BroadcastScreen(
                             onStateChange = { next ->
                                 val prevLens = proState.lens
                                 proState = next
+                                var nextUi = ui
                                 if (next.lens != prevLens) {
                                     val nextSource = if (next.lens == "Front") CaptureSource.FRONT_CAM else CaptureSource.BACK_CAM
-                                    if (ui.source != nextSource) ui = ui.copy(source = nextSource)
+                                    if (ui.source != nextSource) {
+                                        nextUi = ui.copy(source = nextSource)
+                                        ui = nextUi
+                                    }
+                                    pushLocalConfigSync(nextUi, next)
                                 }
                             },
                             modifier = Modifier.align(Alignment.CenterStart)
@@ -814,11 +944,13 @@ fun BroadcastScreen(
                                     "H.264" -> VideoCodecOption.H264
                                     else -> VideoCodecOption.DCT
                                 }
-                                ui = ui.copy(
+                                val nextUi = ui.copy(
                                     resolution = nextRes,
                                     codec = nextCodec,
                                     bitrateMbps = next.bitrateMbps.toDouble().coerceIn(1.0, 50.0)
                                 )
+                                ui = nextUi
+                                pushLocalConfigSync(nextUi, next)
                             },
                             modifier = Modifier.align(Alignment.CenterEnd)
                         )

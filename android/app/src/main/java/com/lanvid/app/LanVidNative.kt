@@ -123,6 +123,19 @@ object LanVidNative {
     @JvmStatic external fun nativeTallyConnect(studioIp: String, studioPort: Int, cameraId: Int, label: String): Boolean
     @JvmStatic external fun nativeTallyDisconnect()
     @JvmStatic external fun nativeTallyPollJson(batteryPct: Int, tempC: Int): String
+    @JvmStatic external fun nativeForceKeyframe()
+    @JvmStatic external fun nativeSetSenderBitrateKbps(bitrateKbps: Int)
+    @JvmStatic external fun nativeSendVideoConfigSync(
+        camNum: Int,
+        camTag: String,
+        resPreset: Int,
+        fps: Int,
+        codec: Int,
+        bitrateKbps: Int,
+        delayMs: Int,
+        fixedDelay: Boolean,
+        lens: Int
+    ): Boolean
     @JvmStatic external fun nativeIntercomSetState(talk: Boolean, listenMuted: Boolean, rxGain: Float, sidetone: Float)
     @JvmStatic external fun nativeIntercomPushMic(samples: FloatArray, frames: Int)
     @JvmStatic external fun nativeIntercomPullRx(outSamples: FloatArray, frames: Int): Int

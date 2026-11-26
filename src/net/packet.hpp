@@ -32,6 +32,7 @@ enum class PacketType : uint8_t {
     kIntercomAudio = 0xC,  // Isolated full-duplex Director <-> Camera Operator voice talkback / IFB
     kMonitorAudioFlow = 0xD, // Dante-style compact multi-channel monitor UDP flow (up to 16 ch in 1 packet)
     kCameraControl = 0xE,    // Studio -> Camera remote control (lens, focus, quality preset) on the Tally port
+    kVideoConfigSync = 0xF,  // Bidirectional Video Config Sync + Camera Badge + Smart IDR Keyframe Req
 };
 
 enum class VideoCodecId : uint8_t {
@@ -493,6 +494,49 @@ struct CameraControlPayload {
 };
 void write_camera_control(uint8_t* out, const CameraControlPayload& c);
 bool parse_camera_control(const uint8_t* in, size_t len, CameraControlPayload& c);
+
+// ---------------------------------------------------------------------------------------------
+// Bidirectional Video Config Sync + Camera Number Assignment (PacketType::kVideoConfigSync = 0xF).
+// 64-byte payload with revision + origin_id Echo Guard + Smart IDR Request flag.
+// ---------------------------------------------------------------------------------------------
+constexpr size_t kVideoConfigSyncSize = 64;
+
+enum VideoConfigSyncFlags : uint8_t {
+    kVideoConfigFlagRequestIdr    = 0x01,  // kVideoKeyFrameReq: Studio -> Camera immediate IDR request
+    kVideoConfigFlagFromCamera    = 0x02,  // Sent by mobile camera (local encoder/lens update)
+    kVideoConfigFlagHasBadgeColor = 0x04,  // badge_accent_rgba[4] carries an explicit accent color
+    kVideoConfigFlagSyncAck       = 0x08,  // Acknowledgement / state confirmation
+};
+constexpr uint8_t kVideoKeyFrameReqFlag = kVideoConfigFlagRequestIdr;
+
+struct VideoConfigSyncPayload {
+    uint64_t config_revision = 0;       // monotonic revision (dedup + anti-loop)
+    uint32_t origin_id = 0;             // per-instance origin ID (Echo Guard)
+    uint32_t camera_id = 0;             // target camera ID (0 = wildcard / endpoint match)
+    uint8_t assigned_cam_number = 0;    // 0 = unassigned, 1..16 = studio slot / badge number
+    uint8_t resolution_preset = kQuality1080p;  // 0=360p, 1=720p, 2=1080p, 3=4K
+    uint8_t target_fps = 60;            // 24 / 25 / 30 / 50 / 60
+    uint8_t codec = uint8_t(VideoCodecId::kH264);  // 0=DCT, 1=H.264, 2=HEVC
+    uint32_t bitrate_kbps = 25000;      // 5000 .. 150000 kbps (0 = unchanged)
+    uint16_t video_delay_ms = 33;       // VideoPlayoutBuffer delay (5..250 ms)
+    uint8_t fixed_delay_mode = 1;       // 1 = Fixed Delay, 0 = Adaptive Wi-Fi
+    uint8_t camera_lens = kLensWide;    // 0=Wide, 1=UltraWide, 2=Tele, 3=Front
+    uint8_t flags = 0;                  // VideoConfigSyncFlags
+    uint8_t badge_accent_rgba[4] = {0, 0, 0, 0};
+    char assigned_cam_tag[16] = {};     // Short badge label e.g. "CAM 1", "CAM 2", "A", "B"
+};
+
+inline VideoConfigSyncPayload make_video_keyframe_req(uint32_t camera_id, uint64_t rev, uint32_t origin_id) {
+    VideoConfigSyncPayload p{};
+    p.config_revision = rev;
+    p.origin_id = origin_id;
+    p.camera_id = camera_id;
+    p.flags = kVideoConfigFlagRequestIdr;
+    return p;
+}
+
+void write_video_config_sync(uint8_t* out, const VideoConfigSyncPayload& p);
+bool parse_video_config_sync(const uint8_t* in, size_t len, VideoConfigSyncPayload& p);
 
 // ---------------------------------------------------------------------------------------------
 // Duplex Intercom Voice (PacketType::kIntercomAudio = 0xC, 16-byte header + Opus/PCM16 payload).

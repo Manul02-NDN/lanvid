@@ -2112,6 +2112,60 @@ void lv_camera_set_control_callback(LvTallyIntercomHandle* handle, LV_CameraCont
     });
 }
 
+int lv_tally_intercom_send_video_config_sync(LvTallyIntercomHandle* handle, const LV_VideoConfigSync* cfg) {
+    if (!handle || !handle->eng || !cfg) return LV_ERR_INVALID_ARG;
+    lv::VideoConfigSyncPayload p{};
+    p.config_revision = cfg->config_revision;
+    p.origin_id = cfg->origin_id;
+    p.camera_id = cfg->camera_id;
+    p.assigned_cam_number = cfg->assigned_cam_number;
+    p.resolution_preset = cfg->resolution_preset;
+    p.target_fps = cfg->target_fps;
+    p.codec = cfg->codec;
+    p.bitrate_kbps = cfg->bitrate_kbps;
+    p.video_delay_ms = cfg->video_delay_ms;
+    p.fixed_delay_mode = cfg->fixed_delay_mode;
+    p.camera_lens = cfg->camera_lens;
+    p.flags = cfg->flags;
+    std::memcpy(p.badge_accent_rgba, cfg->badge_accent_rgba, 4);
+    std::memcpy(p.assigned_cam_tag, cfg->assigned_cam_tag, sizeof(p.assigned_cam_tag));
+    p.assigned_cam_tag[15] = '\0';
+    return handle->eng->send_video_config_sync(cfg->camera_id, p) ? LV_OK : LV_ERR_SOCKET;
+}
+
+void lv_tally_intercom_set_video_config_sync_callback(LvTallyIntercomHandle* handle,
+                                                     LV_VideoConfigSyncCallback cb, void* user_data) {
+    if (!handle || !handle->eng) return;
+    if (!cb) {
+        handle->eng->set_video_config_sync_callback(nullptr);
+        return;
+    }
+    handle->eng->set_video_config_sync_callback([cb, user_data](const lv::VideoConfigSyncPayload& p) {
+        LV_VideoConfigSync out{};
+        out.config_revision = p.config_revision;
+        out.origin_id = p.origin_id;
+        out.camera_id = p.camera_id;
+        out.assigned_cam_number = p.assigned_cam_number;
+        out.resolution_preset = p.resolution_preset;
+        out.target_fps = p.target_fps;
+        out.codec = p.codec;
+        out.bitrate_kbps = p.bitrate_kbps;
+        out.video_delay_ms = p.video_delay_ms;
+        out.fixed_delay_mode = p.fixed_delay_mode;
+        out.camera_lens = p.camera_lens;
+        out.flags = p.flags;
+        std::memcpy(out.badge_accent_rgba, p.badge_accent_rgba, 4);
+        std::memcpy(out.assigned_cam_tag, p.assigned_cam_tag, sizeof(out.assigned_cam_tag));
+        out.assigned_cam_tag[15] = '\0';
+        cb(&out, user_data);
+    });
+}
+
+int lv_tally_intercom_request_keyframe(LvTallyIntercomHandle* handle, uint32_t camera_id) {
+    if (!handle || !handle->eng) return LV_ERR_INVALID_ARG;
+    return handle->eng->studio_request_keyframe(camera_id) ? LV_OK : LV_ERR_SOCKET;
+}
+
 void lv_tally_intercom_update_camera_telemetry(LvTallyIntercomHandle* handle, uint8_t battery_pct,
                                                int8_t temp_c) {
     if (handle && handle->eng) handle->eng->camera_update_telemetry(battery_pct, temp_c);
@@ -2941,4 +2995,16 @@ int lv_multicam_get_rec_stats(LvMultiCamHandle* mc, uint32_t slot, LV_IsoSlotSta
 
 void lv_multicam_set_vcam(LvMultiCamHandle* mc, uint32_t count, int placeholder) {
     if (mc) mc->mgr.set_vcam(count, placeholder != 0);
+}
+
+int lv_multicam_set_slot_playout(LvMultiCamHandle* mc, uint32_t slot, uint32_t delay_ms, int fixed_mode) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    mc->mgr.set_slot_playout_config(slot, delay_ms, fixed_mode != 0);
+    return LV_OK;
+}
+
+int lv_multicam_force_idr(LvMultiCamHandle* mc, uint32_t slot) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    mc->mgr.force_slot_idr(slot);
+    return LV_OK;
 }
