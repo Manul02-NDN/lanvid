@@ -187,6 +187,11 @@ TEST(toggle_audio_only_runtime_no_crash) {
     LV_AudioChannelStats r0{}, r1{};
     lv_receiver_get_channel_stats(rx, 0, &r0);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    // Slow / virtualized CI runners coarsen the pusher's 2.67 ms sleep (seen: ~16 ms per iteration on
+    // GitHub macOS), so wait for the same >50 pushes against a deadline instead of a fixed 400 ms window.
+    const auto settle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (pushes_ok.load() - pushes_before <= 50 && std::chrono::steady_clock::now() < settle_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     lv_receiver_get_channel_stats(rx, 0, &r1);
     stop.store(true);
     pusher.join();
