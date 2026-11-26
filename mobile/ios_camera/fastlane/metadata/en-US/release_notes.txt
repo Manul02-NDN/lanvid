@@ -1,0 +1,6 @@
+LanVid Camera v2.7.0 — Pro Cine, Tally, Duplex Intercom & iPhone Duo Mode:
+• Adaptive Pro Cinema HUD safe around Dynamic Island & Notch in Portrait and Landscape.
+• Full manual controls: Shutter Angle (45°–360°), ISO, White Balance (Kelvin), Focus Pull A↔B, Focus Peaking, Zebra & Guides.
+• iPhone Duo Mode: Single Cine HUD, Dual-Cam PIP / 50-50 Split (AVCaptureMultiCamSession), and paired iPhone Duo Sync (CAM A + CAM B / Director Companion).
+• Full-frame Tally borders (PGM ON AIR / PVW PREVIEW) & 48 kHz Duplex Intercom (IFB / PTT / Latch).
+• Built-in offline Open Demo Cine Studio mode.

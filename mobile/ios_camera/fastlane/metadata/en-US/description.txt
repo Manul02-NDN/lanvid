@@ -1,0 +1,19 @@
+LanVid Camera turns your iPhone into a professional low-latency studio cinema camera for LanVid Video, LanVid Studio and OBS Studio over your local Wi-Fi network.
+
+PRO CINEMA MANUAL CONTROLS
+• Hardware-accelerated H.265 (HEVC), H.264 (AVC) and LanVid DCT streaming up to 4K 60p.
+• Manual Shutter Angle (45° / 90° / 180° / 360°), ISO, Kelvin White Balance and Manual Focus with Rack Focus A↔B presets.
+• Live Histogram, stereo MIC/IFB VU meters, Focus Peaking, Exposure Zebra and Rule-of-Thirds cinema guides.
+
+IPHONE DUO MODE (3 ADAPTIVE WORKFLOWS)
+• Single Cine HUD — adapts cleanly to both compact iPhones and Pro Max screens without Dynamic Island or Notch overlap.
+• Dual-Cam PIP & 50/50 Split (AVCaptureMultiCamSession) — shoot Back + Front cameras simultaneously with independent exposure bias.
+• iPhone Duo Sync — pair two iPhones on Wi-Fi as CAM A + CAM B with synced SMPTE timecode and shared Tally, or switch one iPhone into Director Companion mode for wireless focus pull, Tally switching and intercom.
+
+LIVE STUDIO TALLY & FULL-DUPLEX INTERCOM
+• Instant full-frame Tally borders: Red PGM (ON AIR), Green PVW (PREVIEW), and Remote REC indicator.
+• Low-latency 48 kHz Duplex Intercom (Director IFB + Operator PTT / Latch) that keeps working even when the screen locks.
+
+100% LOCAL & PRIVATE
+• Works exclusively inside your local Wi-Fi network — no accounts, no cloud servers, no tracking or analytics.
+• Tap 'Open Demo Cine Studio' to explore every control, Tally state, Dual-Cam mode and Intercom offline without a computer.

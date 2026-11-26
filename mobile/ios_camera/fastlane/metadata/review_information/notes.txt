@@ -1,0 +1,19 @@
+Thank you for reviewing LanVid Camera!
+
+LanVid Camera is a local-network professional studio camera, Tally, and Duplex Intercom companion for LanVid Video / LanVid Studio.
+
+HOW TO TEST 100% OF FEATURES WITHOUT A DESKTOP PC:
+1. Launch the app and tap 'Open Demo Cine Studio' directly on the start card (also available inside Settings -> gear icon).
+2. In Demo Cine Studio, you can interactively test:
+   - DECK button: Manual Shutter Angle (45/90/180/360°), ISO, WB Kelvin, Manual Focus slider & Rack Focus A<->B, Focus Peaking, Zebra, Framing Guides.
+   - Tap the top-left Tally pill (or 'Cycle Tally' inside DECK) to switch between STBY, PVW PREVIEW (green border), and PGM ON AIR (red border + REC + Director Speaking badge).
+   - CODEC button: 4K/1080p/720p, 24/30/60p, H.265/H.264/DCT, Bitrate & IFB Volume.
+   - Bottom bar: Duplex Intercom TALK (PTT), LATCH, and IFB mute controls with live MIC/IFB VU meters.
+   - Top-right Duo button (split-screen icon): Switch between Single Cine HUD, Dual-Cam PIP, Dual-Cam 50/50 Split (AVCaptureMultiCamSession), and iPhone Duo Director Companion desk (also shows a simulated paired CAM B iPhone peer).
+3. Rotate the iPhone (Portrait, Landscape Left, Landscape Right) to verify Dynamic Island / Notch safe-area adaptation.
+
+PERMISSIONS:
+- Camera & Microphone: live video capture, Dual-Cam MultiCam, and Duplex Intercom.
+- Local Network (_lanvid._udp): discovers LanVid Video / Studio and paired iPhone Duo devices strictly on the local Wi-Fi network.
+- Background Audio: keeps Duplex Intercom voice active if the operator locks the screen.
+- No login, no account, no cloud servers, and no data collection.

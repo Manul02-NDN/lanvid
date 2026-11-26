@@ -1,0 +1,59 @@
+# XcodeGen spec for LanVid Camera (iOS). Generate the project:
+#   ./scripts/build_core.sh                 # LanVidCore.xcframework (once / after core changes)
+#   xcodegen generate                        # -> LanVidCamera.xcodeproj
+name: LanVidCamera
+options:
+  bundleIdPrefix: com.manul02
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "2.7.0"
+    # Build number: Fastlane / CI passes CURRENT_PROJECT_VERSION=$GITHUB_RUN_NUMBER (unique per upload)
+    CURRENT_PROJECT_VERSION: "270"
+targets:
+  LanVidCamera:
+    type: application
+    platform: iOS
+    sources:
+      - path: LanVidCamera
+    dependencies:
+      - framework: build/LanVidCore.xcframework
+        embed: false
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: Network.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreImage.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.manul02.lanvid.camera
+        PRODUCT_NAME: LanVid Camera
+        OTHER_LDFLAGS: ["-lc++"]
+        # iPhone only (no iPad screenshots / multitasking requirements at submission)
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: LanVidCamera/Info.plist
+      properties:
+        CFBundleDisplayName: LanVid Camera
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations: [en, uk]
+        UIBackgroundModes: [audio]
+        # Localized variants live in LanVidCamera/Resources/{en,uk}.lproj/InfoPlist.strings
+        NSCameraUsageDescription: "LanVid Camera uses your iPhone camera for professional cinema video capture and low-latency streaming to LanVid Video / Studio on your local network."
+        NSMicrophoneUsageDescription: "LanVid Camera uses your microphone to record program audio and enable full-duplex studio intercom (IFB / PTT) with the director."
+        NSLocalNetworkUsageDescription: "LanVid Camera discovers and connects to LanVid Video / Studio and paired iPhone Duo cameras on your local Wi-Fi network."
+        NSBonjourServices: [_lanvid._udp]
+        ITSAppUsesNonExemptEncryption: false

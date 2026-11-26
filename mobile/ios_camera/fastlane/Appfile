@@ -1,0 +1,3 @@
+app_identifier(ENV["APP_IDENTIFIER"] || "com.manul02.lanvid.camera")
+apple_id(ENV["APPLE_ID"]) if ENV["APPLE_ID"] && !ENV["APPLE_ID"].empty?
+team_id(ENV["TEAM_ID"]) if ENV["TEAM_ID"] && !ENV["TEAM_ID"].empty?

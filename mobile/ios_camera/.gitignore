@@ -1,0 +1,7 @@
+build/
+LanVidCamera.xcodeproj/
+fastlane/report.xml
+fastlane/Preview.html
+*.ipa
+*.dSYM.zip
+Gemfile.lock

@@ -1,0 +1,3 @@
+"NSCameraUsageDescription" = "LanVid Camera uses your iPhone camera for professional cinema video capture and low-latency streaming to LanVid Video / Studio on your local network.";
+"NSMicrophoneUsageDescription" = "LanVid Camera uses your microphone to record program audio and enable full-duplex studio intercom (IFB / PTT) with the director.";
+"NSLocalNetworkUsageDescription" = "LanVid Camera discovers and connects to LanVid Video / Studio and paired iPhone Duo cameras on your local Wi-Fi network.";
