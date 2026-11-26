@@ -68,8 +68,6 @@ def build_host_sdk() -> None:
         f'-DCMAKE_BUILD_TYPE=Release '
         f'-DLANVID_SDK_CORE_ONLY=ON '
         f'-DLANVID_BUILD_SHARED=ON '
-        f'-DLANVID_BUILD_GUI=OFF '
-        f'-DLANVID_BUILD_CLI=OFF '
         f'-DLANVID_BUILD_TESTS=OFF'
     )
     if platform.system() == "Windows":
@@ -80,8 +78,7 @@ def build_host_sdk() -> None:
         cmake_exe = shutil.which("cmake") or "cmake"
         run([cmake_exe, "-S", str(ROOT), "-B", str(BUILD_SDK_DIR), "-G", "Ninja",
              "-DCMAKE_BUILD_TYPE=Release", "-DLANVID_SDK_CORE_ONLY=ON",
-             "-DLANVID_BUILD_SHARED=ON", "-DLANVID_BUILD_GUI=OFF",
-             "-DLANVID_BUILD_CLI=OFF", "-DLANVID_BUILD_TESTS=OFF"])
+             "-DLANVID_BUILD_SHARED=ON", "-DLANVID_BUILD_TESTS=OFF"])
         run([cmake_exe, "--build", str(BUILD_SDK_DIR)])
         run([cmake_exe, "--install", str(BUILD_SDK_DIR), "--prefix", str(DIST_DIR)])
 

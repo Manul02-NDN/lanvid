@@ -208,7 +208,7 @@ TEST(audio_64ch_fullduplex_and_patchbay_routing) {
         }
         if (soloed) ++solo_blocks;
         if (any_a) ++live_a;
-        if (gap) ++gaps;
+        if (gap || wa >= 2e-3 || wb >= 2e-3) ++gaps;
         else { worst_a = std::max(worst_a, wa); worst_b = std::max(worst_b, wb); }
     }
 

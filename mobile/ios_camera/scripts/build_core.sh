@@ -30,7 +30,7 @@ slice() {  # name sysroot archs neon
   cmake -S "$ROOT" -B "$b" -G "$GEN" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$2" \
     -DCMAKE_OSX_ARCHITECTURES="$3" -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOY" \
-    -DLANVID_SDK_CORE_ONLY=ON -DLANVID_BUILD_SHARED=OFF -DLANVID_BUILD_GUI=OFF -DLANVID_BUILD_CLI=OFF \
+    -DLANVID_SDK_CORE_ONLY=ON -DLANVID_BUILD_SHARED=OFF \
     -DLANVID_BUILD_TESTS=OFF -DLANVID_ENABLE_AVX2=OFF -DLANVID_ENABLE_NEON="$4" >/dev/null
   cmake --build "$b" --target lanvid_core --parallel "$(sysctl -n hw.ncpu)"
   merge_opus "$b"
