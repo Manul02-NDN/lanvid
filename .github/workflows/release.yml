@@ -93,7 +93,7 @@ jobs:
   release-apple:
     name: Release Apple SDKs (XCFrameworks + Selectable macOS PKG/DMG)
     needs: version
-    runs-on: macos-26
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
