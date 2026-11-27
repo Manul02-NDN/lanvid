@@ -182,7 +182,9 @@ private:
     };
 
     Plan plan(const MasterClock& clk, uint64_t local_now_us, uint32_t frames);
-    void render_channel(uint16_t ch, const Plan& p, uint32_t frames, float* dst, size_t stride);
+    void build_atomic_lock_mask(const Plan& p, uint32_t num_channels, uint32_t frames);
+    void render_channel(uint16_t ch, const Plan& p, uint32_t frames, float* dst, size_t stride,
+                        const uint8_t* lock_mask = nullptr);
     bool sample_at(const Ring& r, int64_t pos, uint32_t epoch, float& v) const;
 
     uint32_t rate_;
@@ -213,6 +215,7 @@ private:
     bool started_ = false;
     uint32_t active_epoch_ = 1;
     std::vector<float> meter_scratch_;
+    std::vector<uint8_t> lock_mask_;
     std::atomic<double> ratio_limit_{500e-6};
     std::atomic<bool> prefill_enabled_{false};
     std::atomic<uint32_t> prefill_pct_{75};

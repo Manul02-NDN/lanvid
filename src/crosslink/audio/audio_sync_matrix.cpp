@@ -461,8 +461,47 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     return p;
 }
 
+void AudioSyncMatrix::build_atomic_lock_mask(const Plan& p, uint32_t num_channels, uint32_t frames) {
+    if (lock_mask_.size() < frames) lock_mask_.resize(frames);
+    auto has_pos = [&](const Ring& r, double base, double ratio, uint32_t i, uint32_t epoch) -> bool {
+        const double pos = base + double(i) * ratio;
+        if (pos < 0.0) return false;
+        const int64_t i0 = int64_t(std::floor(pos));
+        float dummy = 0.0f;
+        if (!sample_at(r, i0, epoch, dummy)) return false;
+        const double frac = pos - double(i0);
+        if (frac >= 1e-9) {
+            if (!sample_at(r, i0 + 1, epoch, dummy) || !sample_at(r, i0 + 2, epoch, dummy)) return false;
+        }
+        return true;
+    };
+
+    for (uint32_t i = 0; i < frames; ++i) {
+        bool new_ok = !p.hold;
+        bool old_ok = p.seek && i < kCrossfadeSamples;
+        bool any_active = false;
+        for (uint32_t c = 0; c < num_channels; ++c) {
+            const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
+            if (!r) continue;
+            if (!ch_[c].active.load(std::memory_order_relaxed) &&
+                ch_[c].write_count.load(std::memory_order_relaxed) == 0) {
+                continue;
+            }
+            any_active = true;
+            if (new_ok && !has_pos(*r, p.cursor, p.ratio, i, p.epoch)) new_ok = false;
+            if (old_ok && !has_pos(*r, p.old_cursor, 1.0, i, p.old_epoch)) old_ok = false;
+            if (!new_ok && !old_ok) break;
+        }
+        if (!any_active) {
+            new_ok = false;
+            old_ok = false;
+        }
+        lock_mask_[i] = uint8_t((new_ok ? 0x01u : 0u) | (old_ok ? 0x02u : 0u));
+    }
+}
+
 void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frames, float* dst,
-                                     size_t stride) {
+                                     size_t stride, const uint8_t* lock_mask) {
     Chan& c = ch_[chi];
     const Ring* r = c.ring.load(std::memory_order_acquire);
 
@@ -508,10 +547,18 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     bool resumed_after_gap = false;
     for (uint32_t i = 0; i < frames; ++i) {
         bool ok = false;
-        float v = p.hold ? 0.0f : read_at(p.cursor, p.ratio, i, p.epoch, ok);
+        float v = 0.0f;
+        if (!p.hold && (!lock_mask || (lock_mask[i] & 0x01u))) {
+            v = read_at(p.cursor, p.ratio, i, p.epoch, ok);
+            if (lock_mask && !ok) v = 0.0f;
+        }
         if (p.seek && i < kCrossfadeSamples) {
             bool ok_old = false;
-            const float vo = read_at(p.old_cursor, 1.0, i, p.old_epoch, ok_old);
+            float vo = 0.0f;
+            if (!lock_mask || (lock_mask[i] & 0x02u)) {
+                vo = read_at(p.old_cursor, 1.0, i, p.old_epoch, ok_old);
+                if (lock_mask && !ok_old) vo = 0.0f;
+            }
             const float w = float(i + 1) / float(kCrossfadeSamples + 1);
             v = v * w + vo * (1.0f - w);
             ok = ok || ok_old;
@@ -576,35 +623,18 @@ void AudioSyncMatrix::pop_planar(const MasterClock& clk, uint64_t local_now_us, 
     if (frames == 0) return;
     num_channels = std::min(num_channels, kChannels);
     const Plan p = plan(clk, local_now_us, frames);
+    const uint8_t* mask_ptr = nullptr;
+    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
+        build_atomic_lock_mask(p, num_channels, frames);
+        mask_ptr = lock_mask_.data();
+    }
     for (uint32_t c = 0; c < kChannels; ++c) {
         if (c < num_channels && out && out[c]) {
-            render_channel(uint16_t(c), p, frames, out[c], 1);
+            render_channel(uint16_t(c), p, frames, out[c], 1, mask_ptr);
         } else if (ch_[c].ring.load(std::memory_order_acquire)) {
             // Meter-only channels still need to advance their activity/level state.
             if (meter_scratch_.size() < frames) meter_scratch_.resize(frames);
-            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1);
-        }
-    }
-    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
-        // Strict atomic frame lock: if any active channel missed sample `pos` (unrecovered by FEC),
-        // zero all rendered channels for that exact sample index simultaneously -> 0-sample skew.
-        for (uint32_t i = 0; i < frames; ++i) {
-            const int64_t i0 = int64_t(std::floor(p.cursor + double(i) * p.ratio));
-            bool frame_incomplete = false;
-            for (uint32_t c = 0; c < num_channels; ++c) {
-                if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
-                const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
-                float dummy = 0.0f;
-                if (!r || !sample_at(*r, i0, p.epoch, dummy)) {
-                    frame_incomplete = true;
-                    break;
-                }
-            }
-            if (frame_incomplete) {
-                for (uint32_t c = 0; c < num_channels; ++c) {
-                    if (out[c]) out[c][i] = 0.0f;
-                }
-            }
+            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1, nullptr);
         }
     }
     cursor_ = p.cursor + double(frames) * p.ratio;
@@ -616,30 +646,17 @@ void AudioSyncMatrix::pop_interleaved(const MasterClock& clk, uint64_t local_now
     if (frames == 0) return;
     num_channels = std::min(num_channels, kChannels);
     const Plan p = plan(clk, local_now_us, frames);
+    const uint8_t* mask_ptr = nullptr;
+    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
+        build_atomic_lock_mask(p, num_channels, frames);
+        mask_ptr = lock_mask_.data();
+    }
     for (uint32_t c = 0; c < kChannels; ++c) {
         if (c < num_channels && out) {
-            render_channel(uint16_t(c), p, frames, out + c, num_channels);
+            render_channel(uint16_t(c), p, frames, out + c, num_channels, mask_ptr);
         } else if (ch_[c].ring.load(std::memory_order_acquire)) {
             if (meter_scratch_.size() < frames) meter_scratch_.resize(frames);
-            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1);
-        }
-    }
-    if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
-        for (uint32_t i = 0; i < frames; ++i) {
-            const int64_t i0 = int64_t(std::floor(p.cursor + double(i) * p.ratio));
-            bool frame_incomplete = false;
-            for (uint32_t c = 0; c < num_channels; ++c) {
-                if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
-                const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
-                float dummy = 0.0f;
-                if (!r || !sample_at(*r, i0, p.epoch, dummy)) {
-                    frame_incomplete = true;
-                    break;
-                }
-            }
-            if (frame_incomplete) {
-                std::memset(out + size_t(i) * num_channels, 0, size_t(num_channels) * sizeof(float));
-            }
+            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1, nullptr);
         }
     }
     cursor_ = p.cursor + double(frames) * p.ratio;

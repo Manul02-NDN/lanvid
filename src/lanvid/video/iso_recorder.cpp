@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace lv {
 
