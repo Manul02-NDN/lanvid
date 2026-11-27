@@ -45,6 +45,7 @@ struct TallyIntercomEngine::Impl {
         std::string assigned_cam_tag;
         bool config_synced = false;
         uint64_t last_rx_vcfg_rev = 0;
+        uint64_t last_rx_idr_rev = 0;
         VideoConfigSyncPayload last_vcfg{};
         std::array<uint32_t, 256> seen_seq{};
         std::array<uint8_t, 256> seen_valid{};
@@ -84,6 +85,7 @@ struct TallyIntercomEngine::Impl {
     VideoConfigSyncPayload last_vcfg{};
     uint64_t vcfg_tx_revision = 0;
     uint64_t cam_last_rx_vcfg_rev = 0;
+    uint64_t cam_last_rx_idr_rev = 0;
     uint32_t my_origin_id = 1;
     uint8_t my_assigned_cam_number = 0;
     std::string my_assigned_cam_tag;
@@ -435,6 +437,7 @@ void TallyIntercomEngine::stop() {
     impl_->pending_dups.clear();
     impl_->cam_seen_valid.fill(0);
     impl_->cam_last_rx_vcfg_rev = 0;
+    impl_->cam_last_rx_idr_rev = 0;
     impl_->last_vcfg = VideoConfigSyncPayload{};
     impl_->last_tally = TallyStatePayload{};
     impl_->my_assigned_cam_number = 0;
@@ -778,31 +781,47 @@ void TallyIntercomEngine::poll() {
                     c.ep = src;
                     c.last_seen_us = now;
                     const bool is_idr = (vc.flags & kVideoConfigFlagRequestIdr) != 0;
-                    if (!is_idr && vc.config_revision != 0 && c.last_rx_vcfg_rev != 0 &&
-                        vc.config_revision <= c.last_rx_vcfg_rev) {
-                        continue;  // duplicate / stale
+                    if (is_idr) {
+                        if (vc.config_revision != 0 && vc.config_revision == c.last_rx_idr_rev) {
+                            continue;  // deduplicate 3x redundant IDR packet
+                        }
+                        if (vc.config_revision != 0) c.last_rx_idr_rev = vc.config_revision;
+                        vcb = impl_->vcfg_cb;
+                    } else {
+                        if (vc.config_revision != 0 && c.last_rx_vcfg_rev != 0 &&
+                            vc.config_revision <= c.last_rx_vcfg_rev) {
+                            continue;  // duplicate / stale
+                        }
+                        if (vc.config_revision != 0) c.last_rx_vcfg_rev = vc.config_revision;
+                        c.last_vcfg = vc;
+                        c.config_synced = true;
+                        if (vc.assigned_cam_number > 0) c.assigned_cam_number = vc.assigned_cam_number;
+                        if (vc.assigned_cam_tag[0] != '\0') c.assigned_cam_tag = vc.assigned_cam_tag;
+                        vcb = impl_->vcfg_cb;
                     }
-                    if (vc.config_revision != 0) c.last_rx_vcfg_rev = vc.config_revision;
-                    c.last_vcfg = vc;
-                    c.config_synced = true;
-                    if (vc.assigned_cam_number > 0) c.assigned_cam_number = vc.assigned_cam_number;
-                    if (vc.assigned_cam_tag[0] != '\0') c.assigned_cam_tag = vc.assigned_cam_tag;
-                    vcb = impl_->vcfg_cb;
                 } else {
                     if (vc.camera_id != 0 && vc.camera_id != impl_->my_camera_id) continue;
                     const bool is_idr = (vc.flags & kVideoConfigFlagRequestIdr) != 0;
-                    if (!is_idr && vc.config_revision != 0 && impl_->cam_last_rx_vcfg_rev != 0 &&
-                        vc.config_revision <= impl_->cam_last_rx_vcfg_rev) {
-                        continue;
+                    if (is_idr) {
+                        if (vc.config_revision != 0 && vc.config_revision == impl_->cam_last_rx_idr_rev) {
+                            continue;  // deduplicate 3x redundant IDR request; never overwrite saved config!
+                        }
+                        if (vc.config_revision != 0) impl_->cam_last_rx_idr_rev = vc.config_revision;
+                        vcb = impl_->vcfg_cb;
+                    } else {
+                        if (vc.config_revision != 0 && impl_->cam_last_rx_vcfg_rev != 0 &&
+                            vc.config_revision <= impl_->cam_last_rx_vcfg_rev) {
+                            continue;
+                        }
+                        if (vc.config_revision != 0) impl_->cam_last_rx_vcfg_rev = vc.config_revision;
+                        impl_->last_vcfg = vc;
+                        if (vc.assigned_cam_number > 0) impl_->my_assigned_cam_number = vc.assigned_cam_number;
+                        if (vc.assigned_cam_tag[0] != '\0') {
+                            impl_->my_assigned_cam_tag = vc.assigned_cam_tag;
+                            impl_->my_label = impl_->my_assigned_cam_tag.substr(0, 23);
+                        }
+                        vcb = impl_->vcfg_cb;
                     }
-                    if (vc.config_revision != 0) impl_->cam_last_rx_vcfg_rev = vc.config_revision;
-                    impl_->last_vcfg = vc;
-                    if (vc.assigned_cam_number > 0) impl_->my_assigned_cam_number = vc.assigned_cam_number;
-                    if (vc.assigned_cam_tag[0] != '\0') {
-                        impl_->my_assigned_cam_tag = vc.assigned_cam_tag;
-                        impl_->my_label = impl_->my_assigned_cam_tag.substr(0, 23);
-                    }
-                    vcb = impl_->vcfg_cb;
                 }
             }
             if (vcb) vcb(vc);

@@ -70,45 +70,45 @@ enum StabilizationLevel: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .off: return tr("Вимк.", "Off")
-        case .standard: return tr("Стандарт", "Standard")
-        case .cinematic: return tr("Кіно", "Cinematic")
-        case .active: return tr("Активна", "Active")
+        case .standard: return tr("Лайт", "Low-Lat")
+        case .cinematic: return tr("Станд.", "Standard")
+        case .active: return tr("Кіно", "Cinema")
         case .ultra: return tr("Макс", "Ultra")
         }
     }
 
     var shortBadge: String {
         switch self {
-        case .off: return tr("EIS Вимк", "EIS Off")
-        case .standard: return tr("EIS Станд", "EIS Std")
-        case .cinematic: return tr("EIS Кіно", "EIS Cine")
-        case .active: return tr("EIS Актив", "EIS Act")
-        case .ultra: return tr("EIS Макс", "EIS Max")
+        case .off: return tr("OIS 0 мс", "OIS 0 ms")
+        case .standard: return tr("EIS ~30 мс", "EIS ~30 ms")
+        case .cinematic: return tr("EIS ~90 мс", "EIS ~90 ms")
+        case .active: return tr("Кіно ~0.5 с", "Cine ~0.5 s")
+        case .ultra: return tr("Макс ~1.8 с!", "Max ~1.8 s!")
         }
     }
 
     var subtitle: String {
         switch self {
         case .off:
-            return tr("Без кропу · 0 мс буфера · штатив / стабілізатор", "Zero crop · 0 ms buffer · tripod / gimbal")
+            return tr("Апаратна OIS · 0 мс буфера · найкраще для Live", "Hardware OIS · 0 ms buffer · best for Live")
         case .standard:
-            return tr("Оптична + легка EIS · ~5% кроп · ~16 мс", "Optical + light EIS · ~5% crop · ~16 ms")
+            return tr("Низька затримка EIS · ~5% кроп · +20–35 мс (Live)", "Low-latency EIS · ~5% crop · +20–35 ms (Live)")
         case .cinematic:
-            return tr("Плавне кінодемпфування · ~10% кроп · ~33 мс", "Smooth cinema damping · ~10% crop · ~33 ms")
+            return tr("Стандартна EIS · ~10% кроп · +70–100 мс (Live)", "Standard EIS · ~10% crop · +70–100 ms (Live)")
         case .active:
-            return tr("Для ходьби та динаміки · ~15% кроп · ~50 мс", "Walking & handheld motion · ~15% crop · ~50 ms")
+            return tr("Кіно-буфер Apple · ~12% кроп · +0.4–0.6 с затримки", "Apple Cinema buffer · ~12% crop · +0.4–0.6 s delay")
         case .ultra:
-            return tr("Максимальна екшн-стабілізація · ~20% кроп · ~66 мс", "Maximum action stabilization · ~20% crop · ~66 ms")
+            return tr("Максимальний буфер Apple · +1.5–2.0 с затримки (не для Live!)", "Apple Max lookahead · +1.5–2.0 s delay (not for Live!)")
         }
     }
 
     var systemIcon: String {
         switch self {
-        case .off: return "nosign"
+        case .off: return "bolt.horizontal"
         case .standard: return "gyroscope"
-        case .cinematic: return "film"
-        case .active: return "figure.walk"
-        case .ultra: return "bolt.fill"
+        case .cinematic: return "video.badge.checkmark"
+        case .active: return "film"
+        case .ultra: return "exclamationmark.triangle"
         }
     }
 
@@ -117,7 +117,7 @@ enum StabilizationLevel: String, CaseIterable, Identifiable, Codable {
         case .off: return 0
         case .standard: return 5
         case .cinematic: return 10
-        case .active: return 15
+        case .active: return 12
         case .ultra: return 20
         }
     }
@@ -125,10 +125,10 @@ enum StabilizationLevel: String, CaseIterable, Identifiable, Codable {
     var latencyHintMs: Int {
         switch self {
         case .off: return 0
-        case .standard: return 16
-        case .cinematic: return 33
-        case .active: return 50
-        case .ultra: return 66
+        case .standard: return 30
+        case .cinematic: return 90
+        case .active: return 500
+        case .ultra: return 1800
         }
     }
 

@@ -81,6 +81,12 @@ final class DuoSyncBrowser: ObservableObject {
         searching = false
     }
 
+    /// Stops active /24 UDP probing during live video streaming so Wi-Fi stays jitter-free (Bonjour remains passive).
+    func pauseActiveSweep() {
+        sweepTask?.cancel()
+        sweepTask = nil
+    }
+
     /// Sends a lightweight Duo Sync state or Director Companion control packet to a paired iPhone over unicast UDP.
     func sendDuoPacket(to host: String, role: DuoRole, label: String, tally: ProTallyState,
                        timecode: String, focus: Float, iso: Float, shutter: Int, wb: Float, isCommand: Bool) {
@@ -287,7 +293,9 @@ final class DuoSyncBrowser: ObservableObject {
 
             let duoPing = Array("LV_DUO|SYNC|\(myRole.rawValue)|\(myLabel)|0|01:00:00:00|0.500|400|180|5600".utf8)
 
-            while !Task.isCancelled {
+            // Run a single clean /24 discovery sweep (avoid continuous Wi-Fi ARP flooding during camera operation;
+            // Bonjour `_lanvid._udp` continues passively in the background, and user can re-trigger via Refresh).
+            do {
                 let nonce = UInt32.random(in: 1...UInt32.max)
                 let probe = Array("LVDS_PRB|\(nonce)".utf8)
 
@@ -299,7 +307,6 @@ final class DuoSyncBrowser: ObservableObject {
                     addr.sin_family = sa_family_t(AF_INET)
                     inet_pton(AF_INET, ipStr, &addr.sin_addr)
 
-                    // Probe both LanVid Video discovery port (:5023) and legacy discovery port (:5099)
                     for port in [Self.videoDiscoveryPort, Self.legacyDiscoveryPort] {
                         addr.sin_port = port.bigEndian
                         _ = probe.withUnsafeBytes { buf in
@@ -319,12 +326,12 @@ final class DuoSyncBrowser: ObservableObject {
                             }
                         }
                     }
-                    try? await Task.sleep(nanoseconds: 450_000)
+                    try? await Task.sleep(nanoseconds: 1_500_000)
                 }
 
-                // Collect replies for 600 ms
+                // Collect replies for 800 ms
                 var rxBuf = [UInt8](repeating: 0, count: 512)
-                for _ in 0..<24 {
+                for _ in 0..<32 {
                     if Task.isCancelled { break }
                     var from = sockaddr_in()
                     var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -345,7 +352,6 @@ final class DuoSyncBrowser: ObservableObject {
                         try? await Task.sleep(nanoseconds: 25_000_000)
                     }
                 }
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
             }
         }
     }

@@ -23,6 +23,7 @@ struct CameraLayerPreview: UIViewRepresentable {
 
         // Gesture tracking state
         private var pinchStartZoom: CGFloat = 1.0
+        private var isPinching: Bool = false
         private var panAxis: PanAxis = .undetermined
         private var panStartEv: Float = 0.0
         private var panStartFocus: Float = 0.5
@@ -30,7 +31,7 @@ struct CameraLayerPreview: UIViewRepresentable {
         enum PanAxis { case undetermined, vertical, horizontal }
 
         @objc func handleTap(_ gr: UITapGestureRecognizer) {
-            guard let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else { return }
+            guard !isPinching, let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else { return }
             let pt = gr.location(in: v)
             let norm = CGPoint(x: max(0.05, min(0.95, pt.x / v.bounds.width)),
                                y: max(0.08, min(0.92, pt.y / v.bounds.height)))
@@ -39,11 +40,12 @@ struct CameraLayerPreview: UIViewRepresentable {
         }
 
         @objc func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+            guard !isPinching else { return }
             callbacks?.onDoubleTapReset()
         }
 
         @objc func handleLongPress(_ gr: UILongPressGestureRecognizer) {
-            guard gr.state == .began, let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else { return }
+            guard !isPinching, gr.state == .began, let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else { return }
             let pt = gr.location(in: v)
             let norm = CGPoint(x: max(0.05, min(0.95, pt.x / v.bounds.width)),
                                y: max(0.08, min(0.92, pt.y / v.bounds.height)))
@@ -54,17 +56,23 @@ struct CameraLayerPreview: UIViewRepresentable {
         @objc func handlePinch(_ gr: UIPinchGestureRecognizer) {
             switch gr.state {
             case .began:
+                isPinching = true
+                panAxis = .undetermined
                 pinchStartZoom = callbacks?.currentZoom() ?? 1.0
                 callbacks?.onZoomActiveChanged(true)
             case .changed:
                 callbacks?.onPinchZoom(pinchStartZoom * gr.scale)
             default:
+                isPinching = false
                 callbacks?.onZoomActiveChanged(false)
             }
         }
 
         @objc func handlePan(_ gr: UIPanGestureRecognizer) {
-            guard let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else { return }
+            guard !isPinching, gr.numberOfTouches <= 1, let v = containerView, v.bounds.width > 1, v.bounds.height > 1 else {
+                panAxis = .undetermined
+                return
+            }
             let tr = gr.translation(in: v)
             switch gr.state {
             case .began:
@@ -73,7 +81,7 @@ struct CameraLayerPreview: UIViewRepresentable {
                 panStartFocus = callbacks?.currentFocusPosition() ?? 0.5
             case .changed:
                 if panAxis == .undetermined {
-                    if abs(tr.y) > 12 || abs(tr.x) > 12 {
+                    if abs(tr.y) > 10 || abs(tr.x) > 10 {
                         panAxis = abs(tr.y) >= abs(tr.x) ? .vertical : .horizontal
                     } else {
                         return
@@ -81,11 +89,9 @@ struct CameraLayerPreview: UIViewRepresentable {
                 }
                 switch panAxis {
                 case .vertical:
-                    // Swipe UP brightens (+EV), swipe DOWN darkens (-EV)
                     let deltaEv = Float(-tr.y / max(180.0, v.bounds.height * 0.42)) * 3.0
                     callbacks?.onExposureDrag(panStartEv + deltaEv, true)
                 case .horizontal:
-                    // Swipe RIGHT focuses farther, swipe LEFT focuses closer
                     let deltaFocus = Float(tr.x / max(180.0, v.bounds.width * 0.65))
                     callbacks?.onFocusDrag(panStartFocus + deltaFocus, true)
                 case .undetermined:
@@ -104,6 +110,11 @@ struct CameraLayerPreview: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            // Allow pinch to engage immediately if a second finger lands during 1-finger pan
+            if (gestureRecognizer is UIPinchGestureRecognizer && otherGestureRecognizer is UIPanGestureRecognizer) ||
+               (gestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer is UIPinchGestureRecognizer) {
+                return true
+            }
             return false
         }
     }
@@ -133,11 +144,15 @@ struct CameraLayerPreview: UIViewRepresentable {
         let conn = context.coordinator.multiCamConnection ?? uiView.previewLayer.connection
         if let conn, conn.isVideoOrientationSupported {
             let interfaceOrient = uiView.window?.windowScene?.interfaceOrientation
+            let desired: AVCaptureVideoOrientation
             switch interfaceOrient {
-            case .landscapeLeft: conn.videoOrientation = .landscapeLeft
-            case .landscapeRight: conn.videoOrientation = .landscapeRight
-            case .portraitUpsideDown: conn.videoOrientation = .portraitUpsideDown
-            default: conn.videoOrientation = .portrait
+            case .landscapeLeft: desired = .landscapeLeft
+            case .landscapeRight: desired = .landscapeRight
+            case .portraitUpsideDown: desired = .portraitUpsideDown
+            default: desired = .portrait
+            }
+            if conn.videoOrientation != desired {
+                conn.videoOrientation = desired
             }
         }
     }
@@ -160,7 +175,6 @@ struct CameraLayerPreview: UIViewRepresentable {
 
         let singleTap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
         singleTap.numberOfTapsRequired = 1
-        singleTap.require(toFail: doubleTap)
 
         let longPress = UILongPressGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleLongPress(_:)))
         longPress.minimumPressDuration = 0.45
@@ -169,9 +183,9 @@ struct CameraLayerPreview: UIViewRepresentable {
         pinch.delegate = coordinator
 
         let pan = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.minimumNumberOfTouches = 1
         pan.maximumNumberOfTouches = 1
         pan.delegate = coordinator
-        pan.require(toFail: pinch)
 
         view.addGestureRecognizer(doubleTap)
         view.addGestureRecognizer(singleTap)
@@ -237,6 +251,7 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
         weak var view: UIView?
         var callbacks: ViewfinderGestureCallbacks
         private var pinchStartZoom: CGFloat = 1.0
+        private var isPinching: Bool = false
         private var panAxis: Int = 0 // 0=none, 1=vertical, 2=horizontal
         private var panStartEv: Float = 0.0
         private var panStartFocus: Float = 0.5
@@ -251,17 +266,18 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
         }
 
         @objc func handleTap(_ gr: UITapGestureRecognizer) {
-            guard let v = view else { return }
+            guard !isPinching, let v = view else { return }
             let norm = normalized(gr.location(in: v), in: v)
             callbacks.onTapFocus(norm, norm)
         }
 
         @objc func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+            guard !isPinching else { return }
             callbacks.onDoubleTapReset()
         }
 
         @objc func handleLongPress(_ gr: UILongPressGestureRecognizer) {
-            guard gr.state == .began, let v = view else { return }
+            guard !isPinching, gr.state == .began, let v = view else { return }
             let norm = normalized(gr.location(in: v), in: v)
             callbacks.onLongPressLock(norm, norm)
         }
@@ -269,17 +285,23 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
         @objc func handlePinch(_ gr: UIPinchGestureRecognizer) {
             switch gr.state {
             case .began:
+                isPinching = true
+                panAxis = 0
                 pinchStartZoom = callbacks.currentZoom()
                 callbacks.onZoomActiveChanged(true)
             case .changed:
                 callbacks.onPinchZoom(pinchStartZoom * gr.scale)
             default:
+                isPinching = false
                 callbacks.onZoomActiveChanged(false)
             }
         }
 
         @objc func handlePan(_ gr: UIPanGestureRecognizer) {
-            guard let v = view else { return }
+            guard !isPinching, gr.numberOfTouches <= 1, let v = view else {
+                panAxis = 0
+                return
+            }
             let tr = gr.translation(in: v)
             switch gr.state {
             case .began:
@@ -288,7 +310,7 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
                 panStartFocus = callbacks.currentFocusPosition()
             case .changed:
                 if panAxis == 0 {
-                    if abs(tr.y) > 12 || abs(tr.x) > 12 {
+                    if abs(tr.y) > 10 || abs(tr.x) > 10 {
                         panAxis = abs(tr.y) >= abs(tr.x) ? 1 : 2
                     } else { return }
                 }
@@ -310,6 +332,14 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
                 panAxis = 0
             }
         }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            if (gestureRecognizer is UIPinchGestureRecognizer && otherGestureRecognizer is UIPanGestureRecognizer) ||
+               (gestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer is UIPinchGestureRecognizer) {
+                return true
+            }
+            return false
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(callbacks: callbacks) }
@@ -323,13 +353,14 @@ private struct DemoTouchSurfaceView: UIViewRepresentable {
         let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
-        singleTap.require(toFail: doubleTap)
         let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
         longPress.minimumPressDuration = 0.45
         let pinch = UIPinchGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        pinch.delegate = context.coordinator
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.minimumNumberOfTouches = 1
         pan.maximumNumberOfTouches = 1
-        pan.require(toFail: pinch)
+        pan.delegate = context.coordinator
 
         v.addGestureRecognizer(doubleTap)
         v.addGestureRecognizer(singleTap)

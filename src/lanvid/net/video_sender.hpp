@@ -118,6 +118,8 @@ public:
     uint16_t fec_group_size() const { return fec_group_size_.load(std::memory_order_relaxed); }
     void set_adaptive_quality(bool enabled, int q_min, int q_max, int current_q);
     void set_bitrate_kbps(uint32_t bitrate_kbps);
+    void set_codec(VideoCodecId codec);
+    void set_fps(double fps);
     void force_keyframe() { force_idr_.store(true, std::memory_order_release); }
 
     int active_quality() const {
@@ -125,7 +127,7 @@ public:
         return aq_.current_quality();
     }
     uint32_t active_bitrate_kbps() const { return target_bitrate_kbps_.load(std::memory_order_relaxed); }
-    VideoCodecId active_codec() const { return cfg_.codec; }
+    VideoCodecId active_codec() const { return VideoCodecId(active_codec_.load(std::memory_order_acquire)); }
     std::string encoder_backend_name() const;
     bool encoder_is_hardware() const;
     const AdaptiveQualityController& adaptive_controller() const { return aq_; }
@@ -159,6 +161,10 @@ private:
     std::unique_ptr<IVideoEncoder> video_enc_;
     int enc_w_ = 0;
     int enc_h_ = 0;
+    VideoCodecId enc_codec_ = VideoCodecId::kLanVidDct;
+    double enc_fps_ = 0.0;
+    std::atomic<uint8_t> active_codec_{uint8_t(VideoCodecId::kLanVidDct)};
+    std::atomic<double> target_fps_{60.0};
     uint32_t applied_bitrate_kbps_ = 0;
     std::atomic<uint32_t> target_bitrate_kbps_{8000};
     std::atomic<bool> force_idr_{false};

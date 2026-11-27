@@ -246,6 +246,15 @@ inline VideoConfigSyncPayload make_video_keyframe_req(uint32_t camera_id, uint64
     p.config_revision = rev;
     p.origin_id = origin_id;
     p.camera_id = camera_id;
+    // Clear encoder/lens defaults so IDR-only requests can never be mistaken for a config push.
+    p.assigned_cam_number = 0;
+    p.resolution_preset = 0;
+    p.target_fps = 0;
+    p.codec = 0;
+    p.bitrate_kbps = 0;
+    p.video_delay_ms = 0;
+    p.fixed_delay_mode = 0;
+    p.camera_lens = 0;
     p.flags = kVideoConfigFlagRequestIdr;
     return p;
 }

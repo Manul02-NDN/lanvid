@@ -1,6 +1,7 @@
 #include "net/video_sender.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -15,6 +16,8 @@ namespace lv {
 UdpSender::UdpSender(const SenderConfig& cfg)
     : cfg_(cfg),
       pool_(cfg.threads),
+      active_codec_(uint8_t(cfg.codec)),
+      target_fps_(cfg.fps > 1.0 ? cfg.fps : 60.0),
       target_bitrate_kbps_(cfg.bitrate_kbps > 0 ? cfg.bitrate_kbps : 8000u),
       enc_backend_name_(std::string("LanVid DCT (") + dct_kernels_best().name + ")"),
       aq_(cfg.adaptive),
@@ -208,24 +211,32 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
 }
 
 bool UdpSender::prepare_encoder(int width, int height) {
-    if (cfg_.codec == VideoCodecId::kLanVidDct) return true;
+    if (active_codec() == VideoCodecId::kLanVidDct) return true;
     return ensure_video_encoder(width, height);
 }
 
 bool UdpSender::ensure_video_encoder(int width, int height) {
-    if (video_enc_ && enc_w_ == width && enc_h_ == height) return true;
+    const VideoCodecId want_codec = active_codec();
+    const double want_fps = target_fps_.load(std::memory_order_acquire);
+    if (video_enc_ && enc_w_ == width && enc_h_ == height && enc_codec_ == want_codec &&
+        std::abs(enc_fps_ - want_fps) < 0.5) {
+        return true;
+    }
+    video_enc_.reset();
     VideoEncoderConfig ecfg;
     ecfg.width = width;
     ecfg.height = height;
-    ecfg.fps = cfg_.fps > 1.0 ? cfg_.fps : 60.0;
+    ecfg.fps = want_fps > 1.0 ? want_fps : 60.0;
     ecfg.bitrate_kbps = target_bitrate_kbps_.load(std::memory_order_relaxed);
-    ecfg.keyframe_interval = cfg_.keyframe_interval_frames > 0 ? cfg_.keyframe_interval_frames : 120u;
+    ecfg.keyframe_interval = std::max<uint32_t>(24u, uint32_t(ecfg.fps + 0.5));
     ecfg.prefer_hardware = true;
 
-    video_enc_ = create_video_encoder(cfg_.codec, ecfg);
+    video_enc_ = create_video_encoder(want_codec, ecfg);
     if (!video_enc_) return false;
     enc_w_ = width;
     enc_h_ = height;
+    enc_codec_ = want_codec;
+    enc_fps_ = ecfg.fps;
     applied_bitrate_kbps_ = ecfg.bitrate_kbps;
     {
         std::lock_guard<std::mutex> lk(enc_meta_mu_);
@@ -237,7 +248,8 @@ bool UdpSender::ensure_video_encoder(int width, int height) {
 
 bool UdpSender::send_frame(const Image& img, const CodecParams& params, uint32_t frame_id,
                            uint32_t capture_ts_us) {
-    if (cfg_.codec != VideoCodecId::kLanVidDct) {
+    const VideoCodecId codec = active_codec();
+    if (codec != VideoCodecId::kLanVidDct) {
         if (!ensure_video_encoder(img.width, img.height)) return false;
         if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
             video_enc_->force_keyframe();
@@ -249,7 +261,7 @@ bool UdpSender::send_frame(const Image& img, const CodecParams& params, uint32_t
         }
         if (!video_enc_->encode_image(img, enc_pkt_) || enc_pkt_.data.empty()) return false;
         const uint8_t extra_flags =
-            uint8_t(encode_codec_flags(cfg_.codec) |
+            uint8_t(encode_codec_flags(codec) |
                     (enc_pkt_.is_keyframe ? kFlagKeyFrame : 0) |
                     (enc_pkt_.has_codec_config ? kFlagCodecConfig : 0));
         send_encoded_slice(frame_id, capture_ts_us, 0, 1, enc_pkt_.data.data(), enc_pkt_.data.size(),
@@ -268,7 +280,8 @@ bool UdpSender::send_frame(const Image& img, const CodecParams& params, uint32_t
 
 bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& params, uint32_t frame_id,
                                   uint32_t capture_ts_us) {
-    if (cfg_.codec != VideoCodecId::kLanVidDct) {
+    const VideoCodecId codec = active_codec();
+    if (codec != VideoCodecId::kLanVidDct) {
         if (!ensure_video_encoder(params.width, params.height)) return false;
         if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
             video_enc_->force_keyframe();
@@ -283,7 +296,7 @@ bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& para
             return false;
         }
         const uint8_t extra_flags =
-            uint8_t(encode_codec_flags(cfg_.codec) |
+            uint8_t(encode_codec_flags(codec) |
                     (enc_pkt_.is_keyframe ? kFlagKeyFrame : 0) |
                     (enc_pkt_.has_codec_config ? kFlagCodecConfig : 0));
         send_encoded_slice(frame_id, capture_ts_us, 0, 1, enc_pkt_.data.data(), enc_pkt_.data.size(),
@@ -302,7 +315,8 @@ bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& para
 
 bool UdpSender::send_frame_native(const void* native_buf, int width, int height, uint32_t frame_id,
                                   uint32_t capture_ts_us) {
-    if (!native_buf || cfg_.codec == VideoCodecId::kLanVidDct) return false;
+    const VideoCodecId codec = active_codec();
+    if (!native_buf || codec == VideoCodecId::kLanVidDct) return false;
     const int even_w = width & ~1;
     const int even_h = height & ~1;
     if (!ensure_video_encoder(even_w, even_h)) return false;
@@ -319,7 +333,7 @@ bool UdpSender::send_frame_native(const void* native_buf, int width, int height,
         return false;
     }
     const uint8_t extra_flags =
-        uint8_t(encode_codec_flags(cfg_.codec) |
+        uint8_t(encode_codec_flags(codec) |
                 (enc_pkt_.is_keyframe ? kFlagKeyFrame : 0) |
                 (enc_pkt_.has_codec_config ? kFlagCodecConfig : 0));
     send_encoded_slice(frame_id, capture_ts_us, 0, 1, enc_pkt_.data.data(), enc_pkt_.data.size(),
@@ -393,6 +407,22 @@ void UdpSender::set_bitrate_kbps(uint32_t bitrate_kbps) {
     target_bitrate_kbps_.store(clamped, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(aq_mu_);
     aq_.set_target_bitrate_kbps(clamped);
+}
+
+void UdpSender::set_codec(VideoCodecId codec) {
+    active_codec_.store(uint8_t(codec), std::memory_order_release);
+    force_idr_.store(true, std::memory_order_release);
+    if (codec == VideoCodecId::kLanVidDct) {
+        std::lock_guard<std::mutex> lk(enc_meta_mu_);
+        enc_backend_name_ = std::string("LanVid DCT (") + dct_kernels_best().name + ")";
+        enc_is_hw_ = false;
+    }
+}
+
+void UdpSender::set_fps(double fps) {
+    const double clamped = std::clamp(fps, 1.0, 240.0);
+    target_fps_.store(clamped, std::memory_order_release);
+    force_idr_.store(true, std::memory_order_release);
 }
 
 std::string UdpSender::encoder_backend_name() const {
@@ -472,7 +502,7 @@ void UdpSender::service_control_locked() {
             }
             {
                 std::lock_guard<std::mutex> alk(aq_mu_);
-                if (aq_.on_feedback(fb, now) && cfg_.codec != VideoCodecId::kLanVidDct) {
+                if (aq_.on_feedback(fb, now) && active_codec() != VideoCodecId::kLanVidDct) {
                     target_bitrate_kbps_.store(aq_.current_bitrate_kbps(), std::memory_order_relaxed);
                 }
             }
@@ -502,7 +532,7 @@ SenderStats UdpSender::stats() const {
             cur_q,
             fb.packet_loss_permille,
             fb.fec_recovered_permille,
-            cfg_.codec,
+            active_codec(),
             target_bitrate_kbps_.load(std::memory_order_relaxed),
             pli_received_.load(std::memory_order_relaxed)};
 }

@@ -93,6 +93,8 @@ LV_API int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps);
 LV_API int lv_sender_force_keyframe(LvSenderHandle* handle);
 LV_API int lv_sender_set_fec_group(LvSenderHandle* handle, int fec_group_size);
 LV_API int lv_sender_set_adaptive_quality(LvSenderHandle* handle, int enabled, int q_min, int q_max);
+LV_API int lv_sender_set_codec(LvSenderHandle* handle, int codec);
+LV_API int lv_sender_set_fps(LvSenderHandle* handle, double fps);
 
 LV_API int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out);
 

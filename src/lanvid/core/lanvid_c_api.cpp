@@ -920,6 +920,25 @@ int lv_sender_set_adaptive_quality(LvSenderHandle* handle, int enabled, int q_mi
     return LV_OK;
 }
 
+int lv_sender_set_codec(LvSenderHandle* handle, int codec) {
+    if (!handle || codec < LV_CODEC_LANVID_DCT || codec > LV_CODEC_H265) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    const auto cid = (codec == LV_CODEC_H265)   ? lv::VideoCodecId::kH265
+                     : (codec == LV_CODEC_H264) ? lv::VideoCodecId::kH264
+                                                : lv::VideoCodecId::kLanVidDct;
+    handle->sender->set_codec(cid);
+    return LV_OK;
+}
+
+int lv_sender_set_fps(LvSenderHandle* handle, double fps) {
+    if (!handle || fps < 1.0 || fps > 240.0) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    if (!handle->sender) return LV_ERR_NOT_RUNNING;
+    handle->sender->set_fps(fps);
+    return LV_OK;
+}
+
 int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     if (!handle || !out) return LV_ERR_INVALID_ARG;
     std::memset(out, 0, sizeof(*out));

@@ -442,6 +442,8 @@ static void on_android_video_config_sync(const LV_VideoConfigSync* cfg, void*) {
         if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
             lv_sender_force_keyframe(g_sender);
         }
+        // Pure IDR keyframe request: never overwrite local camera/encoder config!
+        return;
     }
     std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
     g_last_vcfg = *cfg;

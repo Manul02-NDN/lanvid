@@ -49,12 +49,18 @@ public:
 
         CFMutableDictionaryRef enc_spec = CFDictionaryCreateMutable(
             kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (enc_spec) {
 #if !TARGET_OS_IPHONE
-        if (cfg.prefer_hardware && enc_spec) {
-            CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
-                                 kCFBooleanTrue);
-        }
+            if (cfg.prefer_hardware) {
+                CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+                                     kCFBooleanTrue);
+            }
 #endif
+            if (@available(iOS 14.5, macOS 11.3, *)) {
+                CFDictionarySetValue(enc_spec, kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
+                                     kCFBooleanTrue);
+            }
+        }
         CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(
             kCFAllocatorDefault, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         if (src_attrs) {
@@ -85,10 +91,25 @@ public:
                                  kCFBooleanTrue);
         }
 
+        // Strict zero-frame encoder lookahead for ultra-low-latency live camera links
+        int32_t max_delay = 0;
+        CFNumberRef delay_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &max_delay);
+        if (delay_num) {
+            VTSessionSetProperty(session_, kVTCompressionPropertyKey_MaxFrameDelayCount, delay_num);
+            CFRelease(delay_num);
+        }
+
         int32_t kf_int = int32_t(keyint_);
         CFNumberRef kf_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &kf_int);
         VTSessionSetProperty(session_, kVTCompressionPropertyKey_MaxKeyFrameInterval, kf_num);
         CFRelease(kf_num);
+
+        double kf_dur = std::max(0.5, double(keyint_) / fps_);
+        CFNumberRef kf_dur_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &kf_dur);
+        if (kf_dur_num) {
+            VTSessionSetProperty(session_, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kf_dur_num);
+            CFRelease(kf_dur_num);
+        }
 
         double fps_val = fps_;
         CFNumberRef fps_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &fps_val);

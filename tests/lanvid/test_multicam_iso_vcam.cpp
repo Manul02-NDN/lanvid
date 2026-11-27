@@ -572,14 +572,18 @@ TEST(video_config_sync_bidirectional_and_camera_badge_roundtrip) {
     CHECK(studio_last.target_fps == 50);
     CHECK(studio_last.camera_lens == lv::kLensUltraWide);
 
-    // Studio requests immediate IDR keyframe -> Phone callback sees kVideoConfigFlagRequestIdr
+    // Studio requests immediate IDR keyframe -> Phone callback sees kVideoConfigFlagRequestIdr once
+    // (3x redundant packets deduped) and MUST NOT clobber phone's stored VideoConfigSync!
     REQUIRE(studio.studio_request_keyframe(7));
-    for (int i = 0; i < 40 && idr_count.load() == 0; ++i) {
+    for (int i = 0; i < 40; ++i) {
         studio.poll();
         phone.poll();
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
-    CHECK(idr_count.load() >= 1);
+    CHECK(idr_count.load() == 1);
+    CHECK(phone_rx_count.load() == 1);
+    CHECK(phone.last_video_config_sync().target_fps == 50);
+    CHECK(phone.last_video_config_sync().camera_lens == lv::kLensUltraWide);
 
     phone.stop();
     studio.stop();

@@ -200,6 +200,9 @@ struct CameraSettingsView: View {
             }
         }
         .preferredColorScheme(engine.themeMode == .dark ? .dark : .light)
+        .onDisappear {
+            engine.reconnectIfEndpointChanged()
+        }
     }
 
     private func sectionBlock<Content: View>(title: String, @ViewBuilder content: @escaping () -> Content) -> some View {
