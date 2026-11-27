@@ -37,9 +37,9 @@ android {
         create("release") {
             val ks = rootProject.file("lanvid-release.jks")
             storeFile = ks
-            storePassword = System.getenv("LANVID_KS_PASS") ?: "lanvid2026"
-            keyAlias = System.getenv("LANVID_KEY_ALIAS") ?: "lanvid"
-            keyPassword = System.getenv("LANVID_KEY_PASS") ?: "lanvid2026"
+            storePassword = System.getenv("LANVID_KS_PASS")?.takeIf { it.isNotBlank() } ?: "lanvid2026"
+            keyAlias = System.getenv("LANVID_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "lanvid"
+            keyPassword = System.getenv("LANVID_KEY_PASS")?.takeIf { it.isNotBlank() } ?: "lanvid2026"
         }
     }
 
