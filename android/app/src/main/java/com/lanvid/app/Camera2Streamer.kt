@@ -3,6 +3,7 @@ package com.lanvid.app
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
@@ -10,8 +11,10 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.MeteringRectangle
 import android.hardware.camera2.params.RggbChannelVector
 import android.media.ImageReader
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -22,15 +25,29 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
+import kotlin.math.roundToInt
+
+/** Multi-level hardware image stabilization (OIS + EIS / Preview Stabilization on Android 13+). */
+enum class StabilizationLevel(
+    val title: String,
+    val shortBadge: String,
+    val cropPct: Int,
+    val latencyMs: Int,
+    val subtitle: String
+) {
+    OFF("Вимк.", "EIS Вимк", 0, 0, "Без кропу · 0 мс буфера · штатив / стаб"),
+    STANDARD("Стандарт", "OIS Станд", 5, 16, "Оптична OIS · мінімальний кроп (~5%)"),
+    CINEMATIC("Кіно", "EIS Кіно", 10, 33, "Плавна відеостабілізація EIS (~10% кроп)"),
+    ACTIVE("Активна", "EIS Актив", 15, 50, "Зйомка з рук та в русі (~15% кроп)"),
+    ULTRA("Макс", "EIS Макс", 20, 66, "Максимальна OIS + EIS екшн-стабілізація")
+}
 
 /**
  * Direct Camera2 YUV_420_888 streamer: pushes plane ByteBuffers directly into liblanvid_core.so
  * via JNI GetDirectBufferAddress with ZERO RGB conversion and ARM64 NEON slice encoding.
  *
- * Thread-safe & race-free lifecycle:
- *  - Camera control serialized on "CameraBackground" HandlerThread + cameraLock
- *  - ImageReader frame encoding runs on a separate "CameraEncode" HandlerThread with reusable direct buffers
- *  - Monotonic sessionGen counter discards stale callbacks from rapid lens switches / lifecycle stops
+ * Includes multi-level hardware stabilization (OIS + EIS), continuous optical/digital zoom,
+ * tap-to-focus & AE metering, vertical EV exposure compensation, manual focus pull, and AE/AF lock.
  */
 class Camera2Streamer(private val context: Context) {
     private val cameraLock = Any()
@@ -64,6 +81,18 @@ class Camera2Streamer(private val context: Context) {
     @Volatile var sensorBufferHeight: Int = 720
         private set
     @Volatile var streamRotationDeg: Int = 90
+        private set
+
+    // Stabilization & Touch state preserved across session restarts
+    @Volatile var stabilizationLevel: StabilizationLevel = StabilizationLevel.STANDARD
+        private set
+    @Volatile var activeHardwareStabilization: StabilizationLevel = StabilizationLevel.OFF
+        private set
+    @Volatile var currentZoomRatio: Float = 1.0f
+        private set
+    @Volatile var minZoomRatio: Float = 1.0f
+        private set
+    @Volatile var maxZoomRatio: Float = 8.0f
         private set
 
     fun setStreamingEnabled(enabled: Boolean) {
@@ -140,11 +169,103 @@ class Camera2Streamer(private val context: Context) {
     private fun pickBestFpsRange(chars: CameraCharacteristics, targetFps: Int): Range<Int>? {
         val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
         val desired = targetFps.coerceIn(15, 60)
-        // Prefer exact fixed range [desired, desired], then range containing desired with upper == desired
         return ranges.firstOrNull { it.lower == desired && it.upper == desired }
             ?: ranges.firstOrNull { it.upper == desired && it.lower >= (desired / 2) }
             ?: ranges.firstOrNull { it.lower <= desired && it.upper >= desired }
             ?: ranges.minByOrNull { abs(it.upper - desired) }
+    }
+
+    private fun applyStabilizationToBuilder(
+        req: CaptureRequest.Builder,
+        chars: CameraCharacteristics,
+        level: StabilizationLevel
+    ): StabilizationLevel {
+        val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0)
+        val videoModes = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        val hasOis = oisModes.contains(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+        val hasVideoEis = videoModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        val hasPreviewEis = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            videoModes.contains(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)
+
+        return when (level) {
+            StabilizationLevel.OFF -> {
+                if (hasOis) req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+                if (hasVideoEis || hasPreviewEis) {
+                    req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                }
+                StabilizationLevel.OFF
+            }
+            StabilizationLevel.STANDARD -> {
+                if (hasOis) {
+                    req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    if (hasVideoEis || hasPreviewEis) {
+                        req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                    }
+                    StabilizationLevel.STANDARD
+                } else if (hasVideoEis) {
+                    req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                    StabilizationLevel.STANDARD
+                } else {
+                    StabilizationLevel.OFF
+                }
+            }
+            StabilizationLevel.CINEMATIC -> {
+                if (hasVideoEis) {
+                    req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                    if (hasOis) req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    StabilizationLevel.CINEMATIC
+                } else if (hasOis) {
+                    req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    StabilizationLevel.STANDARD
+                } else {
+                    StabilizationLevel.OFF
+                }
+            }
+            StabilizationLevel.ACTIVE, StabilizationLevel.ULTRA -> {
+                if (hasPreviewEis && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    req.set(
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                        CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION
+                    )
+                    if (hasOis) req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    level
+                } else if (hasVideoEis) {
+                    req.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+                    if (hasOis) req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    StabilizationLevel.CINEMATIC
+                } else if (hasOis) {
+                    req.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON)
+                    StabilizationLevel.STANDARD
+                } else {
+                    StabilizationLevel.OFF
+                }
+            }
+        }
+    }
+
+    private fun applyZoomToBuilder(req: CaptureRequest.Builder, chars: CameraCharacteristics, ratio: Float) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val range = chars.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE)
+            val lo = range?.lower ?: 1.0f
+            val hi = (range?.upper ?: 8.0f).coerceAtMost(10.0f)
+            minZoomRatio = lo
+            maxZoomRatio = hi
+            val clamped = ratio.coerceIn(lo, hi)
+            currentZoomRatio = clamped
+            req.set(CaptureRequest.CONTROL_ZOOM_RATIO, clamped)
+        } else {
+            val maxDigital = (chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 4.0f).coerceAtMost(10.0f)
+            minZoomRatio = 1.0f
+            maxZoomRatio = maxDigital
+            val clamped = ratio.coerceIn(1.0f, maxDigital)
+            currentZoomRatio = clamped
+            val activeArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return
+            val cropW = (activeArray.width() / clamped).roundToInt().coerceAtLeast(2)
+            val cropH = (activeArray.height() / clamped).roundToInt().coerceAtLeast(2)
+            val dx = (activeArray.width() - cropW) / 2
+            val dy = (activeArray.height() - cropH) / 2
+            req.set(CaptureRequest.SCALER_CROP_REGION, Rect(dx, dy, dx + cropW, dy + cropH))
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -206,7 +327,6 @@ class Camera2Streamer(private val context: Context) {
                 return@post
             }
 
-            // Derive actual facing from selected camera characteristics (in case fallback camera was picked)
             val actualFrontFacing =
                 chars.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
 
@@ -330,6 +450,8 @@ class Camera2Streamer(private val context: Context) {
                                     CaptureRequest.CONTROL_AF_MODE,
                                     CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
                                 )
+                                activeHardwareStabilization = applyStabilizationToBuilder(this, chars, stabilizationLevel)
+                                applyZoomToBuilder(this, chars, currentZoomRatio)
                             }
                         } catch (_: IllegalStateException) {
                             return
@@ -401,6 +523,145 @@ class Camera2Streamer(private val context: Context) {
         }
     }
 
+    // MARK: - Live Multi-Level Stabilization & Touch Camera Controls
+
+    fun setStabilization(level: StabilizationLevel, onApplied: ((StabilizationLevel) -> Unit)? = null) {
+        stabilizationLevel = level
+        val h = synchronized(cameraLock) { bgHandler } ?: run {
+            onApplied?.invoke(level)
+            return
+        }
+        h.post {
+            val applied = synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                val chars = activeChars ?: return@post
+                val resolved = applyStabilizationToBuilder(req, chars, level)
+                activeHardwareStabilization = resolved
+                try {
+                    s.setRepeatingRequest(req.build(), null, h)
+                } catch (_: Exception) {}
+                resolved
+            }
+            if (onApplied != null) mainHandler.post { onApplied(applied) }
+        }
+    }
+
+    fun setZoomRatio(ratio: Float) {
+        val h = synchronized(cameraLock) { bgHandler } ?: return
+        h.post {
+            synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                val chars = activeChars ?: return@post
+                applyZoomToBuilder(req, chars, ratio)
+                try {
+                    s.setRepeatingRequest(req.build(), null, h)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun focusAndMeterAt(normX: Float, normY: Float, lockAfter: Boolean = false) {
+        val h = synchronized(cameraLock) { bgHandler } ?: return
+        h.post {
+            synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                val chars = activeChars ?: return@post
+                val activeRect = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return@post
+
+                val cx = (normX.coerceIn(0.05f, 0.95f) * activeRect.width()).roundToInt()
+                val cy = (normY.coerceIn(0.05f, 0.95f) * activeRect.height()).roundToInt()
+                val halfW = (activeRect.width() * 0.08f).roundToInt().coerceAtLeast(40)
+                val halfH = (activeRect.height() * 0.08f).roundToInt().coerceAtLeast(40)
+                val region = MeteringRectangle(
+                    (cx - halfW).coerceIn(0, activeRect.width() - 2),
+                    (cy - halfH).coerceIn(0, activeRect.height() - 2),
+                    (halfW * 2).coerceAtMost(activeRect.width()),
+                    (halfH * 2).coerceAtMost(activeRect.height()),
+                    MeteringRectangle.METERING_WEIGHT_MAX - 1
+                )
+
+                val maxAf = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF) ?: 0
+                val maxAe = chars.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE) ?: 0
+                if (maxAf > 0) req.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
+                if (maxAe > 0) req.set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
+
+                req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                req.set(CaptureRequest.CONTROL_AE_LOCK, lockAfter)
+                req.set(
+                    CaptureRequest.CONTROL_AF_MODE,
+                    if (lockAfter) CaptureRequest.CONTROL_AF_MODE_AUTO else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+                )
+                req.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+                try {
+                    s.capture(req.build(), null, h)
+                    req.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+                    s.setRepeatingRequest(req.build(), null, h)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun setExposureCompensationEv(ev: Float) {
+        val h = synchronized(cameraLock) { bgHandler } ?: return
+        h.post {
+            synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                val chars = activeChars ?: return@post
+                val range = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: return@post
+                val step = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0.333f
+                if (step <= 0f) return@post
+                val index = (ev / step).roundToInt().coerceIn(range.lower, range.upper)
+                req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                req.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, index)
+                try {
+                    s.setRepeatingRequest(req.build(), null, h)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun setManualFocusNormalized(focusNormalized: Float) {
+        val h = synchronized(cameraLock) { bgHandler } ?: return
+        h.post {
+            synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                val chars = activeChars ?: return@post
+                val minFocusDist = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                if (minFocusDist > 0f) {
+                    req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                    val diopters = (1f - focusNormalized.coerceIn(0f, 1f)) * minFocusDist
+                    req.set(CaptureRequest.LENS_FOCUS_DISTANCE, diopters)
+                    try {
+                        s.setRepeatingRequest(req.build(), null, h)
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    fun resetAutoFocusAndExposure() {
+        val h = synchronized(cameraLock) { bgHandler } ?: return
+        h.post {
+            synchronized(cameraLock) {
+                val s = session ?: return@post
+                val req = activeReqBuilder ?: return@post
+                req.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                req.set(CaptureRequest.CONTROL_AE_LOCK, false)
+                req.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, 0)
+                req.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                req.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
+                try {
+                    s.setRepeatingRequest(req.build(), null, h)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
     /**
      * Applies manual exposure (ISO + shutter angle), white balance (Kelvin), and manual focus
      * live to the active Camera2 repeating request when hardware supports manual controls.
@@ -443,7 +704,6 @@ class Camera2Streamer(private val context: Context) {
 
                 if (manualWb) {
                     val temp = wbKelvin.coerceIn(2500, 10000).toFloat()
-                    // Approximate RGGB gains from Kelvin (neutral at 5600K)
                     val norm = (temp - 5600f) / 4400f
                     val rGain = (1.8f + norm * 0.9f).coerceIn(1.0f, 3.0f)
                     val bGain = (1.8f - norm * 0.9f).coerceIn(1.0f, 3.0f)

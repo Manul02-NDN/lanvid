@@ -128,6 +128,7 @@ LV_API void lv_receiver_set_volume(LvReceiverHandle* handle, float volume);
 LV_API void lv_receiver_set_concealment(LvReceiverHandle* handle, int mode);
 LV_API int lv_receiver_save_screenshot(LvReceiverHandle* handle, const char* ppm_path);
 LV_API int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out);
+LV_API int lv_receiver_request_keyframe(LvReceiverHandle* handle);
 
 /* ---- Tally (Standby / Preview / Program ON AIR) & Full-Duplex Intercom (Director <-> Camera) ---- */
 typedef struct LvTallyIntercomHandle LvTallyIntercomHandle;
@@ -208,6 +209,48 @@ LV_API int lv_tally_intercom_set_camera_intercom(LvTallyIntercomHandle* studio, 
 LV_API int lv_tally_intercom_is_director_speaking(LvTallyIntercomHandle* handle);
 LV_API float lv_tally_intercom_ducking_gain(LvTallyIntercomHandle* handle);
 
+/* Extended Studio Tally & Intercom introspection + Wi-Fi 1+1 redundancy (v3.0.1 ABI-compatible). */
+typedef struct LV_StudioCameraInfo {
+    uint32_t camera_id;
+    char label[64];
+    char address[64];
+    uint8_t tally_state;
+    uint8_t rec_trigger;
+    uint8_t talk_to_cam;
+    uint8_t listen_from_cam;
+    uint8_t battery_pct;
+    int8_t temp_c;
+    uint8_t operator_speaking;
+    uint8_t connected;
+    float voice_peak_dbfs;
+    uint64_t tally_tx_count;
+    uint64_t intercom_rx_pkts;
+    uint64_t intercom_tx_pkts;
+    uint8_t assigned_cam_number;
+    uint8_t config_synced;
+    uint16_t reserved;
+    char assigned_cam_tag[16];
+} LV_StudioCameraInfo;
+
+typedef struct LV_IntercomStats {
+    int32_t running;
+    uint16_t bound_port;
+    uint8_t director_speaking;
+    uint8_t wifi_redundancy;
+    float ducking_gain;
+    float tx_peak_dbfs;
+    float rx_peak_dbfs;
+    uint64_t tx_packets;
+    uint64_t rx_packets;
+    uint64_t duplicates_dropped;
+} LV_IntercomStats;
+
+LV_API int lv_tally_intercom_list_cameras(LvTallyIntercomHandle* studio, LV_StudioCameraInfo* out_cams,
+                                          int max_count);
+LV_API int lv_tally_intercom_get_stats(LvTallyIntercomHandle* handle, LV_IntercomStats* out);
+LV_API void lv_tally_intercom_set_wifi_redundancy(LvTallyIntercomHandle* handle, int enabled,
+                                                  uint32_t stagger_us);
+
 /* ---- Network Interface Enumeration ---- */
 LV_API int lv_net_list_interfaces(LvNetInterfaceInfo* out_list, int max_count);
 LV_API int lv_net_list_interfaces_ex(LvNetInterfaceInfo* out_list, int max_count,
@@ -281,6 +324,51 @@ LV_API int lv_multicam_get_rec_stats(LvMultiCamHandle* mc, uint32_t slot, LV_Iso
 LV_API void lv_multicam_set_vcam(LvMultiCamHandle* mc, uint32_t count, int placeholder);
 LV_API int lv_multicam_set_slot_playout(LvMultiCamHandle* mc, uint32_t slot, uint32_t delay_ms, int fixed_mode);
 LV_API int lv_multicam_force_idr(LvMultiCamHandle* mc, uint32_t slot);
+
+/* Extended Multi-Cam controls, stereo audio pull, playout stats, and session info (v3.0.1). */
+typedef struct LV_MultiCamSlotExt {
+    char pinned_ip[48];
+    uint32_t playout_delay_ms;
+    double playout_effective_ms;
+    int32_t playout_fixed_mode;
+    double playout_jitter_ms;
+    uint64_t playout_drops;
+    uint64_t playout_holds;
+    uint8_t assigned_cam_number;
+    uint8_t config_synced;
+    uint8_t badge_rgba[4];
+    uint16_t reserved;
+    char assigned_cam_tag[16];
+    uint64_t packets_total;
+    uint64_t fec_recovered;
+    uint64_t crc_errors;
+    uint64_t late_packets;
+    uint64_t frames_concealed;
+    uint64_t audio_packets;
+    double audio_buffer_ms;
+    double packet_loss_pct;
+    int32_t decoder_is_hw;
+    char decoder_backend[64];
+} LV_MultiCamSlotExt;
+
+typedef struct LV_MultiCamSessionInfo {
+    int32_t recording_any;
+    int32_t video_bus_open;
+    char session_dir[512];
+    char session_timecode[32];
+    uint64_t disk_free_bytes;
+    LV_IsoSlotStats program_stats;
+} LV_MultiCamSessionInfo;
+
+LV_API int lv_multicam_set_preview(LvMultiCamHandle* mc, int slot);
+LV_API int lv_multicam_sync_tally_telemetry(LvMultiCamHandle* mc, LvTallyIntercomHandle* studio);
+LV_API int lv_multicam_get_slot_ext(LvMultiCamHandle* mc, uint32_t slot, LV_MultiCamSlotExt* out);
+LV_API int lv_multicam_get_session_info(LvMultiCamHandle* mc, const char* disk_path, LV_MultiCamSessionInfo* out);
+LV_API int lv_multicam_pop_slot_audio_pcm16(LvMultiCamHandle* mc, uint32_t slot, int16_t* out_stereo, int num_frames);
+LV_API int lv_multicam_set_slot_audio_config(LvMultiCamHandle* mc, uint32_t slot, double target_ms, float volume);
+LV_API int lv_multicam_set_slot_concealment(LvMultiCamHandle* mc, uint32_t slot, int conceal_mode);
+LV_API int lv_multicam_set_slot_assigned_camera(LvMultiCamHandle* mc, uint32_t slot, uint8_t cam_number,
+                                                const char* tag, const uint8_t rgba[4]);
 
 /* ---- LAN Video Auto-Discovery ---- */
 /* Scans the LAN for active video receivers (discovery_port=0 -> default 5099). */

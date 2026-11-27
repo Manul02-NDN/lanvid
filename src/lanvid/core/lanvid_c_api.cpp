@@ -1395,6 +1395,60 @@ float lv_tally_intercom_ducking_gain(LvTallyIntercomHandle* handle) {
     return (handle && handle->eng) ? handle->eng->ducking_gain() : 1.0f;
 }
 
+int lv_tally_intercom_list_cameras(LvTallyIntercomHandle* studio, LV_StudioCameraInfo* out_cams, int max_count) {
+    if (!studio || !studio->eng) return 0;
+    const auto list = studio->eng->studio_cameras();
+    if (out_cams && max_count > 0) {
+        const int n = std::min<int>(int(list.size()), max_count);
+        for (int i = 0; i < n; ++i) {
+            const auto& c = list[size_t(i)];
+            auto& d = out_cams[i];
+            std::memset(&d, 0, sizeof(d));
+            d.camera_id = c.camera_id;
+            lv_copy_str(d.label, c.label);
+            lv_copy_str(d.address, c.address);
+            d.tally_state = c.tally_state;
+            d.rec_trigger = c.rec_trigger ? 1 : 0;
+            d.talk_to_cam = c.talk_to_cam ? 1 : 0;
+            d.listen_from_cam = c.listen_from_cam ? 1 : 0;
+            d.battery_pct = c.battery_pct;
+            d.temp_c = c.temp_c;
+            d.operator_speaking = c.operator_speaking ? 1 : 0;
+            d.connected = c.connected ? 1 : 0;
+            d.voice_peak_dbfs = c.voice_peak_dbfs;
+            d.tally_tx_count = c.tally_tx_count;
+            d.intercom_rx_pkts = c.intercom_rx_pkts;
+            d.intercom_tx_pkts = c.intercom_tx_pkts;
+            d.assigned_cam_number = c.assigned_cam_number;
+            d.config_synced = c.config_synced ? 1 : 0;
+            lv_copy_str(d.assigned_cam_tag, c.assigned_cam_tag);
+        }
+    }
+    return int(list.size());
+}
+
+int lv_tally_intercom_get_stats(LvTallyIntercomHandle* handle, LV_IntercomStats* out) {
+    if (!handle || !handle->eng || !out) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    out->running = handle->eng->is_running() ? 1 : 0;
+    out->bound_port = handle->eng->bound_port();
+    out->director_speaking = handle->eng->is_director_speaking() ? 1 : 0;
+    out->wifi_redundancy = handle->eng->wifi_redundancy() ? 1 : 0;
+    out->ducking_gain = handle->eng->ducking_gain();
+    out->tx_peak_dbfs = handle->eng->tx_peak_dbfs();
+    out->rx_peak_dbfs = handle->eng->rx_peak_dbfs();
+    out->tx_packets = handle->eng->intercom_tx_packets();
+    out->rx_packets = handle->eng->intercom_rx_packets();
+    out->duplicates_dropped = handle->eng->intercom_duplicates_dropped();
+    return LV_OK;
+}
+
+void lv_tally_intercom_set_wifi_redundancy(LvTallyIntercomHandle* handle, int enabled, uint32_t stagger_us) {
+    if (handle && handle->eng) {
+        handle->eng->set_wifi_redundancy(enabled != 0, stagger_us > 0 ? stagger_us : 1500u);
+    }
+}
+
 /* ---- LAN Video Auto-Discovery ---- */
 int lv_discovery_scan_peers(int timeout_ms, uint16_t discovery_port, LV_DiscoveredPeer* out_peers,
                             int max_peers) {
@@ -1600,6 +1654,101 @@ int lv_multicam_set_slot_playout(LvMultiCamHandle* mc, uint32_t slot, uint32_t d
 int lv_multicam_force_idr(LvMultiCamHandle* mc, uint32_t slot) {
     if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
     mc->mgr.force_slot_idr(slot);
+    return LV_OK;
+}
+
+int lv_multicam_set_preview(LvMultiCamHandle* mc, int slot) {
+    if (!mc) return LV_ERR_INVALID_ARG;
+    mc->mgr.set_preview_slot(slot);
+    return LV_OK;
+}
+
+int lv_multicam_sync_tally_telemetry(LvMultiCamHandle* mc, LvTallyIntercomHandle* studio) {
+    if (!mc || !studio || !studio->eng) return LV_ERR_INVALID_ARG;
+    mc->mgr.update_camera_telemetry(studio->eng->studio_cameras());
+    lv::TallyIntercomEngine* eng = studio->eng.get();
+    mc->mgr.set_idr_callback([eng](uint32_t /*slot*/, uint32_t camera_id) {
+        if (eng && camera_id != 0) eng->studio_request_keyframe(camera_id);
+    });
+    return LV_OK;
+}
+
+int lv_multicam_get_slot_ext(LvMultiCamHandle* mc, uint32_t slot, LV_MultiCamSlotExt* out) {
+    if (!mc || !out || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    const auto info = mc->mgr.slot_info(slot);
+    const auto rx = mc->mgr.slot_rx_telemetry(slot);
+    lv_copy_str(out->pinned_ip, info.pinned_ip);
+    out->playout_delay_ms = info.playout_delay_ms;
+    out->playout_effective_ms = info.playout_effective_ms;
+    out->playout_fixed_mode = info.playout_fixed_mode ? 1 : 0;
+    out->playout_jitter_ms = info.playout_jitter_ms;
+    out->playout_drops = info.playout_drops;
+    out->playout_holds = info.playout_holds;
+    out->assigned_cam_number = info.assigned_cam_number;
+    out->config_synced = info.config_synced ? 1 : 0;
+    lv_copy_str(out->assigned_cam_tag, info.assigned_cam_tag);
+    out->packets_total = rx.packets_total;
+    out->fec_recovered = rx.fec_recovered;
+    out->crc_errors = rx.crc_errors;
+    out->late_packets = rx.late_packets;
+    out->frames_concealed = rx.frames_concealed;
+    out->audio_packets = rx.audio_packets;
+    out->audio_buffer_ms = rx.audio_buffer_ms;
+    out->packet_loss_pct = rx.packet_loss_pct;
+    out->decoder_is_hw = rx.decoder_is_hw ? 1 : 0;
+    lv_copy_str(out->decoder_backend, rx.decoder_backend);
+    return LV_OK;
+}
+
+int lv_multicam_get_session_info(LvMultiCamHandle* mc, const char* disk_path, LV_MultiCamSessionInfo* out) {
+    if (!mc || !out) return LV_ERR_INVALID_ARG;
+    std::memset(out, 0, sizeof(*out));
+    out->recording_any = mc->mgr.recording_any() ? 1 : 0;
+    out->video_bus_open = mc->mgr.video_bus_open() ? 1 : 0;
+    lv_copy_str(out->session_dir, mc->mgr.session_dir());
+    lv_copy_str(out->session_timecode, mc->mgr.session_timecode());
+    const std::string dp = (disk_path && *disk_path) ? disk_path : lv::MultiCamManager::default_output_dir();
+    out->disk_free_bytes = lv::MultiCamManager::disk_free_bytes(dp);
+    const auto ps = mc->mgr.rec_program_stats();
+    out->program_stats.recording = ps.recording ? 1 : 0;
+    out->program_stats.waiting_for_keyframe = ps.waiting_for_keyframe ? 1 : 0;
+    lv_copy_str(out->program_stats.path, ps.path);
+    out->program_stats.bytes = ps.bytes;
+    out->program_stats.duration_us = ps.duration_us;
+    out->program_stats.frames = ps.frames;
+    out->program_stats.write_mbps = ps.write_mbps;
+    return LV_OK;
+}
+
+int lv_multicam_pop_slot_audio_pcm16(LvMultiCamHandle* mc, uint32_t slot, int16_t* out_stereo, int num_frames) {
+    if (!mc) return 0;
+    return mc->mgr.pop_slot_audio_pcm16(slot, out_stereo, num_frames);
+}
+
+int lv_multicam_set_slot_audio_config(LvMultiCamHandle* mc, uint32_t slot, double target_ms, float volume) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    mc->mgr.set_slot_audio_config(slot, target_ms, volume);
+    return LV_OK;
+}
+
+int lv_multicam_set_slot_concealment(LvMultiCamHandle* mc, uint32_t slot, int conceal_mode) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    mc->mgr.set_slot_concealment(slot, conceal_mode);
+    return LV_OK;
+}
+
+int lv_multicam_set_slot_assigned_camera(LvMultiCamHandle* mc, uint32_t slot, uint8_t cam_number,
+                                         const char* tag, const uint8_t rgba[4]) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    return mc->mgr.set_slot_assigned_camera(slot, cam_number, tag ? tag : "", rgba) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+int lv_receiver_request_keyframe(LvReceiverHandle* handle) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    if (!handle->receiver) return LV_ERR_NOT_RUNNING;
+    handle->receiver->request_keyframe();
     return LV_OK;
 }
 

@@ -1066,4 +1066,55 @@ void MultiCamManager::set_slot_config_synced(uint32_t slot, bool synced) {
     s->config_synced = synced;
 }
 
+int MultiCamManager::pop_slot_audio_pcm16(uint32_t slot, int16_t* out_stereo, int num_frames) {
+    Slot* s = slot_ptr(slot);
+    if (!s || !out_stereo || num_frames <= 0) return 0;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    if (!s->rx) return 0;
+    auto& ab = s->rx->audio_buffer();
+    if (ab.available_frames() == 0) return 0;
+    ab.pop_pcm16(out_stereo, size_t(num_frames));
+    return num_frames;
+}
+
+void MultiCamManager::set_slot_audio_config(uint32_t slot, double target_ms, float volume) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    if (!s->rx) return;
+    s->rx->set_audio_target_ms(std::clamp(target_ms, 5.0, 60.0));
+    s->rx->audio_buffer().set_volume(std::clamp(volume, 0.0f, 2.0f));
+}
+
+void MultiCamManager::set_slot_concealment(uint32_t slot, int conceal_mode) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    if (!s->rx) return;
+    s->rx->set_conceal_mode(conceal_mode == 0 ? ConcealMode::kGray : ConcealMode::kPrev);
+}
+
+MultiCamManager::SlotRxTelemetry MultiCamManager::slot_rx_telemetry(uint32_t slot) const {
+    SlotRxTelemetry out{};
+    const Slot* s = slot_ptr(slot);
+    if (!s) return out;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    if (!s->rx) return out;
+    const auto as = s->rx->assembler_stats();
+    const auto aus = s->rx->audio_stats();
+    out.packets_total = as.datagrams_total;
+    out.fec_recovered = as.fec_recovered_packets;
+    out.crc_errors = as.crc_errors;
+    out.late_packets = as.late_packets;
+    out.frames_concealed = as.frames_concealed;
+    out.audio_packets = aus.packets_rx;
+    out.audio_buffer_ms = aus.buffered_ms;
+    const auto& tr = s->rx->seq_tracker();
+    const uint64_t rx_tot = tr.received() + tr.lost();
+    out.packet_loss_pct = rx_tot > 0 ? (100.0 * double(tr.lost()) / double(rx_tot)) : 0.0;
+    out.decoder_is_hw = s->rx->decoder_is_hardware();
+    out.decoder_backend = s->rx->decoder_backend_name();
+    return out;
+}
+
 }  // namespace lv

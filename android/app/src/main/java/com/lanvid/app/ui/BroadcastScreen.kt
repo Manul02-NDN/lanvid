@@ -27,6 +27,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -36,11 +40,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -59,6 +64,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.random.Random
@@ -225,6 +231,24 @@ fun BroadcastScreen(
     var battery by remember { mutableIntStateOf(-1) }
     var batteryTempC by remember { mutableIntStateOf(34) }
     var proState by remember { mutableStateOf(ProCameraState()) }
+
+    // Interactive viewfinder touch state (reticle, EV, MF, Zoom, toast)
+    var reticleNorm by remember { mutableStateOf<Offset?>(null) }
+    var touchToast by remember { mutableStateOf<String?>(null) }
+    var toastSeq by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(toastSeq) {
+        if (toastSeq > 0) {
+            delay(1800)
+            touchToast = null
+            if (!proState.aeAfLocked) reticleNorm = null
+        }
+    }
+
+    fun postTouchToast(msg: String) {
+        touchToast = msg
+        toastSeq++
+    }
 
     fun pushLocalConfigSync(nextUi: HudUiState, nextPro: ProCameraState) {
         if (!nextUi.senderActive) return
@@ -994,21 +1018,118 @@ fun BroadcastScreen(
                     )
                 }
 
-                // 4c. Center Viewfinder Zone (banners + slide-out MANUAL / ENC / Tool drawers)
+                // 4c. Center Viewfinder Zone (interactive touch gestures: tap focus, long-press lock, double-tap reset, pinch zoom, ↕ EV, ↔ MF)
                 Box(
                     Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .then(
-                            if (selectedTool != null || showManualDeck || showEncoderDrawer) {
-                                Modifier.clickableNoRipple {
-                                    selectedTool = null
-                                    showManualDeck = false
-                                    showEncoderDrawer = false
+                        .pointerInput(ui.mode, ui.source) {
+                            if (ui.mode != BroadcastMode.SENDER || ui.source == CaptureSource.SCREEN) return@pointerInput
+                            detectTapGestures(
+                                onTap = { offset ->
+                                    if (selectedTool != null || showManualDeck || showEncoderDrawer) {
+                                        selectedTool = null
+                                        showManualDeck = false
+                                        showEncoderDrawer = false
+                                    }
+                                    val nx = (offset.x / size.width.coerceAtLeast(1)).coerceIn(0.05f, 0.95f)
+                                    val ny = (offset.y / size.height.coerceAtLeast(1)).coerceIn(0.05f, 0.95f)
+                                    reticleNorm = Offset(nx, ny)
+                                    proState = proState.copy(aeAfLocked = false, exposureEv = 0f, focusLocked = false)
+                                    cameraStreamer.focusAndMeterAt(nx, ny, lockAfter = false)
+                                    postTouchToast("Фокус і експозиція")
+                                },
+                                onDoubleTap = {
+                                    reticleNorm = Offset(0.5f, 0.5f)
+                                    proState = proState.copy(aeAfLocked = false, exposureEv = 0f, focusLocked = false, isoLocked = false, shutterLocked = false)
+                                    cameraStreamer.resetAutoFocusAndExposure()
+                                    postTouchToast("AF / AE Авто · 0.0 EV")
+                                },
+                                onLongPress = { offset ->
+                                    val nx = (offset.x / size.width.coerceAtLeast(1)).coerceIn(0.05f, 0.95f)
+                                    val ny = (offset.y / size.height.coerceAtLeast(1)).coerceIn(0.05f, 0.95f)
+                                    reticleNorm = Offset(nx, ny)
+                                    proState = proState.copy(aeAfLocked = true)
+                                    cameraStreamer.focusAndMeterAt(nx, ny, lockAfter = true)
+                                    postTouchToast("AE / AF заблоковано")
                                 }
-                            } else Modifier
-                        )
+                            )
+                        }
+                        .pointerInput(ui.mode, ui.source) {
+                            if (ui.mode != BroadcastMode.SENDER || ui.source == CaptureSource.SCREEN) return@pointerInput
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                                var axis = 0 // 0=none, 1=vertical EV, 2=horizontal MF
+                                var accumX = 0f
+                                var accumY = 0f
+                                var startEv = proState.exposureEv
+                                var startFocus = proState.focusDist
+                                do {
+                                    val event = awaitPointerEvent()
+                                    val pressed = event.changes.filter { it.pressed }
+                                    if (pressed.size >= 2) {
+                                        val zoomDelta = event.calculateZoom()
+                                        if (abs(zoomDelta - 1f) > 0.005f) {
+                                            val nextZ = (proState.zoomRatio * zoomDelta).coerceIn(cameraStreamer.minZoomRatio, cameraStreamer.maxZoomRatio)
+                                            proState = proState.copy(zoomRatio = nextZ)
+                                            cameraStreamer.setZoomRatio(nextZ)
+                                            postTouchToast("Зум ${"%.1f".format(nextZ)}×")
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                        axis = 0
+                                    } else if (pressed.size == 1) {
+                                        val ch = pressed.first()
+                                        val dx = ch.position.x - ch.previousPosition.x
+                                        val dy = ch.position.y - ch.previousPosition.y
+                                        accumX += dx
+                                        accumY += dy
+                                        if (axis == 0 && (abs(accumX) > 20f || abs(accumY) > 20f)) {
+                                            axis = if (abs(accumY) >= abs(accumX)) 1 else 2
+                                            startEv = proState.exposureEv
+                                            startFocus = proState.focusDist
+                                        }
+                                        if (axis == 1) {
+                                            val nextEv = (startEv - (accumY / (size.height.coerceAtLeast(300) * 0.45f)) * 3f).coerceIn(-3f, 3f)
+                                            proState = proState.copy(exposureEv = nextEv)
+                                            cameraStreamer.setExposureCompensationEv(nextEv)
+                                            postTouchToast("Експозиція %+.1f EV".format(nextEv))
+                                            ch.consume()
+                                        } else if (axis == 2) {
+                                            val nextF = (startFocus + accumX / (size.width.coerceAtLeast(300) * 0.65f)).coerceIn(0f, 1f)
+                                            proState = proState.copy(focusDist = nextF, focusLocked = true)
+                                            cameraStreamer.setManualFocusNormalized(nextF)
+                                            postTouchToast("Фокус MF ${(nextF * 100).toInt()}%")
+                                            ch.consume()
+                                        }
+                                    }
+                                } while (event.changes.any { it.pressed })
+                            }
+                        }
                 ) {
+                    // Animated Touch Focus & Exposure Reticle
+                    reticleNorm?.let { pt ->
+                        val tint = if (proState.aeAfLocked) Studio.amber else Studio.yellow
+                        Canvas(Modifier.fillMaxSize()) {
+                            val px = pt.x * size.width
+                            val py = pt.y * size.height
+                            val boxSz = 64.dp.toPx()
+                            drawRoundRect(
+                                color = tint,
+                                topLeft = Offset(px - boxSz / 2f, py - boxSz / 2f),
+                                size = Size(boxSz, boxSz),
+                                cornerRadius = CornerRadius(8.dp.toPx(), 8.dp.toPx()),
+                                style = Stroke(width = 2.dp.toPx())
+                            )
+                            // Vertical EV indicator bar beside reticle
+                            val barX = if (pt.x > 0.75f) px - boxSz * 0.8f else px + boxSz * 0.8f
+                            val barH = 72.dp.toPx()
+                            drawLine(Color.White.copy(alpha = 0.35f), Offset(barX, py - barH / 2f), Offset(barX, py + barH / 2f), strokeWidth = 2.5.dp.toPx())
+                            val evNorm = ((proState.exposureEv + 3f) / 6f).coerceIn(0f, 1f)
+                            val dotY = (py + barH / 2f) - evNorm * barH
+                            drawCircle(tint, radius = 5.dp.toPx(), center = Offset(barX, dotY))
+                        }
+                    }
+
                     if (ui.mode == BroadcastMode.SENDER) {
                         CameraNumberBadge(
                             state = proState,
@@ -1019,26 +1140,103 @@ fun BroadcastScreen(
                         )
                     }
 
+                    // AE/AF Lock pill + Touch Gesture Toast
+                    Column(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        if (proState.aeAfLocked) {
+                            StudioPill("🔒 AE / AF LOCK", true) {
+                                proState = proState.copy(aeAfLocked = false)
+                                reticleNorm = null
+                                cameraStreamer.resetAutoFocusAndExposure()
+                                postTouchToast("AF / AE розблоковано")
+                            }
+                        }
+                        touchToast?.let { toast ->
+                            Text(
+                                toast,
+                                style = Bm.sans(11.5.sp, FontWeight.SemiBold),
+                                color = Studio.primaryFg,
+                                modifier = Modifier
+                                    .background(Studio.primaryBg, RoundedCornerShape(999.dp))
+                                    .padding(horizontal = 12.dp, vertical = 5.dp)
+                            )
+                        }
+                    }
+
                     // Dismissible status / error banner
                     ui.statusMessage?.let { msg ->
                         Box(
                             Modifier
-                                .align(Alignment.TopCenter)
+                                .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                                .padding(horizontal = 12.dp, vertical = 44.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 "$msg   ✕",
-                                style = Bm.mono(11.sp),
-                                color = Color.White,
+                                style = Bm.sans(11.sp, FontWeight.Medium),
+                                color = Studio.text,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
-                                    .background(Bm.panelHi.copy(alpha = 0.92f), RoundedCornerShape(14.dp))
+                                    .background(Studio.hudSurface, RoundedCornerShape(12.dp))
+                                    .border(0.75.dp, Studio.borderStrong, RoundedCornerShape(12.dp))
                                     .clickableNoRipple { ui = ui.copy(statusMessage = null) }
                                     .padding(horizontal = 12.dp, vertical = 6.dp)
                             )
+                        }
+                    }
+
+                    // Quick Stabilization & Zoom Strip above bottom dock when no drawer is open
+                    if (ui.mode == BroadcastMode.SENDER && !showManualDeck && !showEncoderDrawer && selectedTool == null) {
+                        Row(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            StudioPill(proState.stabilizationLevel.shortBadge, proState.stabilizationLevel != StabilizationLevel.OFF) {
+                                val entries = StabilizationLevel.entries
+                                val next = entries[(entries.indexOf(proState.stabilizationLevel) + 1) % entries.size]
+                                proState = proState.copy(stabilizationLevel = next)
+                                cameraStreamer.setStabilization(next) { applied ->
+                                    proState = proState.copy(activeStabilization = applied)
+                                }
+                                postTouchToast("Стабілізація: ${next.title}")
+                            }
+
+                            Row(
+                                Modifier
+                                    .background(Studio.hudBar, RoundedCornerShape(999.dp))
+                                    .border(0.75.dp, Studio.borderStrong, RoundedCornerShape(999.dp))
+                                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                listOf(1.0f, 2.0f, 3.0f).forEach { z ->
+                                    val active = abs(proState.zoomRatio - z) < 0.25f
+                                    Text(
+                                        "${z.toInt()}×",
+                                        style = Bm.mono(11.sp, if (active) FontWeight.Bold else FontWeight.Medium),
+                                        color = if (active) Studio.accent else Studio.text2,
+                                        modifier = Modifier
+                                            .background(if (active) Studio.accentSoft else Color.Transparent, RoundedCornerShape(999.dp))
+                                            .clickableNoRipple {
+                                                proState = proState.copy(zoomRatio = z)
+                                                cameraStreamer.setZoomRatio(z)
+                                                postTouchToast("Зум ${"%.1f".format(z)}×")
+                                            }
+                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -1079,6 +1277,19 @@ fun BroadcastScreen(
                                         focusNormalized = nextLocked.focusDist
                                     )
                                 }
+                            },
+                            onStabilizationSelected = { lvl ->
+                                proState = proState.copy(stabilizationLevel = lvl)
+                                cameraStreamer.setStabilization(lvl) { applied ->
+                                    proState = proState.copy(activeStabilization = applied)
+                                }
+                                postTouchToast("Стабілізація: ${lvl.title}")
+                            },
+                            onExposureEvChange = { ev ->
+                                cameraStreamer.setExposureCompensationEv(ev)
+                            },
+                            onZoomRatioChange = { z ->
+                                cameraStreamer.setZoomRatio(z)
                             },
                             modifier = Modifier.align(Alignment.CenterStart)
                         )
@@ -1285,40 +1496,39 @@ private fun TopHudBar(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = 0.82f), Color.Transparent)))
-            .padding(horizontal = 8.dp, vertical = 5.dp),
+            .padding(horizontal = 8.dp, vertical = 5.dp)
+            .background(Studio.hudBar, RoundedCornerShape(13.dp))
+            .border(0.75.dp, Studio.borderStrong, RoundedCornerShape(13.dp))
+            .padding(horizontal = 9.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(
             Modifier
                 .weight(1f)
                 .horizontalScroll(rememberScrollState()),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp)
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            val (statusLabel, statusBg) = when {
-                ui.senderActive -> "LIVE · TX" to Color(0xFF2D5F9A)
-                ui.receiverActive -> "LIVE · RX" to Color(0xFF1F6E3E)
-                else -> "OFFLINE" to Bm.dim
+            val dotColor = when {
+                ui.senderActive -> Studio.green
+                ui.receiverActive -> Studio.accent
+                else -> Studio.text3
             }
-            Text(
-                statusLabel,
-                style = Bm.mono(10.sp, FontWeight.Bold),
-                color = Color.White,
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier
-                    .background(statusBg, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 7.dp, vertical = 3.dp)
+            val statusLabel = when {
+                ui.senderActive -> "Онлайн"
+                ui.receiverActive -> "Прийом"
+                else -> "LanVid"
+            }
+            StudioStatusPill(
+                dotColor = dotColor,
+                title = statusLabel,
+                detail = if (ui.showTimer) traffic.timerText else null
             )
             TallyBadge(tally)
-            if (ui.showTimer) {
-                Chip("⏱ ${traffic.timerText}", if (traffic.live) Bm.accent else Bm.dim)
-            }
             if (ui.showTraffic) {
                 val arrow = if (ui.mode == BroadcastMode.SENDER) "↑" else "↓"
-                Chip("$arrow %.1f Mb/s".format(traffic.instantMbps), if (traffic.live) Bm.good else Bm.dim)
+                Chip("$arrow %.1f Мбіт/с".format(traffic.instantMbps), if (traffic.live) Studio.accent else Studio.text3)
             }
             if (ui.mode == BroadcastMode.SENDER) {
                 val fmtLabel = if (ui.codec == VideoCodecOption.DCT) {
@@ -1326,21 +1536,19 @@ private fun TopHudBar(
                 } else {
                     "${ui.resolution.label} · $fpsLabel · ${ui.codec.shortLabel} ${ui.bitrateMbps.toInt()}M"
                 }
-                Text(fmtLabel, style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
+                Text(fmtLabel, style = Bm.mono(10.sp), color = Studio.text2, maxLines = 1, softWrap = false)
                 if (ui.senderActive) {
-                    Chip("%.1f fps".format(txStats.fps), if (txStats.fps >= 55.0) Bm.good else Bm.warn)
+                    Chip("%.1f fps".format(txStats.fps), if (txStats.fps >= 55.0) Studio.green else Studio.amber)
                 }
                 if (ui.destIp.isNotBlank()) {
-                    val pcLbl = if (ui.destName.isNotBlank()) "● ${ui.destName} :${ui.destPort}" else "● ${ui.destIp}:${ui.destPort}"
-                    Chip(pcLbl, Bm.good)
-                } else {
-                    Chip("Пошук ПК…", Bm.warn)
+                    val pcLbl = if (ui.destName.isNotBlank()) "● ${ui.destName}" else "● ${ui.destIp}:${ui.destPort}"
+                    Chip(pcLbl, Studio.green)
                 }
             } else {
-                Text("UDP :${ui.listenPort} · AoIP ${ui.audioLatencyMs}ms", style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
+                Text("UDP :${ui.listenPort} · ${ui.audioLatencyMs} мс", style = Bm.mono(10.sp), color = Studio.text2, maxLines = 1, softWrap = false)
                 if (ui.receiverActive) {
-                    Chip("%.1f fps".format(rxStats.fps), if (rxStats.fps >= 55.0) Bm.good else Bm.warn)
-                    Chip("E2E %.1f ms".format(rxStats.latP50), Bm.accent)
+                    Chip("%.1f fps".format(rxStats.fps), if (rxStats.fps >= 55.0) Studio.green else Studio.amber)
+                    Chip("E2E %.1f мс".format(rxStats.latP50), Studio.violet)
                 }
             }
         }
@@ -1348,30 +1556,31 @@ private fun TopHudBar(
         Text(
             if (battery >= 0) "$battery%" else "–",
             style = Bm.mono(10.sp),
-            color = if (battery in 0..14) Bm.live else Bm.text,
+            color = if (battery in 0..14) Studio.red else Studio.text2,
             maxLines = 1,
             softWrap = false
         )
         Text(
             "HUD",
-            style = Bm.mono(10.sp),
-            color = Color.White,
+            style = Bm.sans(10.5.sp, FontWeight.Medium),
+            color = Studio.text2,
             maxLines = 1,
             softWrap = false,
             modifier = Modifier
+                .background(Studio.surface2, RoundedCornerShape(7.dp))
                 .clickableNoRipple(onHideHud)
-                .padding(horizontal = 3.dp)
+                .padding(horizontal = 7.dp, vertical = 4.dp)
         )
         Text(
             if (ui.mode == BroadcastMode.SENDER) "RX" else "TX",
             style = Bm.mono(10.sp, FontWeight.Bold),
-            color = Bm.accent,
+            color = Studio.accent,
             maxLines = 1,
             softWrap = false,
             modifier = Modifier
-                .background(Bm.panelHi, RoundedCornerShape(4.dp))
+                .background(Studio.accentSoft, RoundedCornerShape(7.dp))
                 .clickableNoRipple(onSwitchMode)
-                .padding(horizontal = 6.dp, vertical = 3.dp)
+                .padding(horizontal = 7.dp, vertical = 4.dp)
         )
     }
 }
@@ -1386,26 +1595,26 @@ private fun TrafficAndTimerCard(
 ) {
     Row(
         modifier
-            .background(Color.Black.copy(alpha = 0.70f), RoundedCornerShape(8.dp))
-            .border(1.dp, Bm.panelHi, RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp),
+            .background(Studio.hudBar, RoundedCornerShape(12.dp))
+            .border(0.75.dp, Studio.border, RoundedCornerShape(12.dp))
+            .padding(horizontal = 11.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         if (showTimer) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                Box(Modifier.size(7.dp).background(if (traffic.live) Bm.live else Bm.dim, CircleShape))
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(Modifier.size(7.dp).background(if (traffic.live) Studio.green else Studio.text3, CircleShape))
                 Column {
                     Text(
-                        if (traffic.live) "ON AIR" else "STREAM TIME",
-                        style = Bm.mono(8.sp),
-                        color = Bm.dim,
+                        if (traffic.live) "В ефірі" else "Очікування",
+                        style = Bm.sans(9.5.sp, FontWeight.Medium),
+                        color = Studio.text3,
                         maxLines = 1
                     )
                     Text(
                         traffic.timerText,
-                        style = Bm.mono(12.sp, FontWeight.Bold),
-                        color = if (traffic.live) Bm.accent else Bm.text,
+                        style = Bm.mono(12.sp, FontWeight.SemiBold),
+                        color = Studio.text,
                         maxLines = 1
                     )
                 }
@@ -1415,16 +1624,16 @@ private fun TrafficAndTimerCard(
             val arrow = if (isSender) "↑" else "↓"
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "$arrow %.1f Mb/s (%.2f MB/s)".format(traffic.instantMbps, traffic.instantMBps),
-                    style = Bm.mono(11.sp, FontWeight.Bold),
-                    color = if (traffic.live) Bm.good else Bm.dim,
+                    "$arrow %.1f Мбіт/с (%.2f MB/s)".format(traffic.instantMbps, traffic.instantMBps),
+                    style = Bm.mono(11.sp, FontWeight.SemiBold),
+                    color = if (traffic.live) Studio.accent else Studio.text2,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    "PEAK %.1f Mb/s · TOTAL %s".format(traffic.peakMbps, traffic.totalDataText),
-                    style = Bm.mono(9.sp),
-                    color = Bm.dim,
+                    "Пік %.1f Мбіт/с · Всього %s".format(traffic.peakMbps, traffic.totalDataText),
+                    style = Bm.mono(9.5.sp),
+                    color = Studio.text3,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1435,35 +1644,36 @@ private fun TrafficAndTimerCard(
 
 @Composable
 private fun TallyBorder(tally: TallyVisual) {
+    if (tally == TallyVisual.OFF) return
     val (width, color) = when (tally) {
-        TallyVisual.OFF -> 2.dp to Color.White.copy(alpha = 0.20f)
-        TallyVisual.PREVIEW -> 6.dp to Bm.good
-        TallyVisual.PROGRAM -> 6.dp to Bm.live
+        TallyVisual.OFF -> 0.dp to Color.Transparent
+        TallyVisual.PREVIEW -> 4.dp to Studio.green
+        TallyVisual.PROGRAM -> 6.dp to Studio.red
     }
     Box(
         Modifier
             .fillMaxSize()
             .padding(2.dp)
-            .border(width, color, RoundedCornerShape(14.dp))
+            .border(width, color, RoundedCornerShape(18.dp))
     )
 }
 
 @Composable
 private fun TallyBadge(tally: TallyVisual, modifier: Modifier = Modifier) {
     val (fg, bg, border) = when (tally) {
-        TallyVisual.OFF -> Triple(Bm.text.copy(alpha = 0.75f), Bm.panel.copy(alpha = 0.85f), Bm.dim)
-        TallyVisual.PREVIEW -> Triple(Color.Black, Bm.good, Bm.good)
-        TallyVisual.PROGRAM -> Triple(Color.White, Bm.live, Bm.live)
+        TallyVisual.OFF -> Triple(Studio.text2, Studio.surface2, Studio.border)
+        TallyVisual.PREVIEW -> Triple(Studio.green, Studio.greenSoft, Studio.green)
+        TallyVisual.PROGRAM -> Triple(Color.White, Studio.red, Studio.red)
     }
     Row(
         modifier
-            .background(bg, RoundedCornerShape(4.dp))
-            .border(1.dp, border, RoundedCornerShape(4.dp))
-            .padding(horizontal = 7.dp, vertical = 3.dp),
+            .background(bg, RoundedCornerShape(999.dp))
+            .border(0.75.dp, border, RoundedCornerShape(999.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Box(Modifier.size(6.dp).background(if (tally == TallyVisual.OFF) Bm.dim else fg, CircleShape))
+        Box(Modifier.size(6.dp).background(if (tally == TallyVisual.OFF) Studio.text3 else fg, CircleShape))
         Text(tally.badgeLabel, style = Bm.mono(10.sp, FontWeight.Bold), color = fg, maxLines = 1, softWrap = false)
     }
 }

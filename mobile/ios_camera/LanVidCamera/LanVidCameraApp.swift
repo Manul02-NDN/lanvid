@@ -8,10 +8,12 @@ struct LanVidCameraApp: App {
         WindowGroup {
             ProCineHUDView()
                 .environmentObject(engine)
-                .preferredColorScheme(.dark)
+                .environment(\.studio, engine.themeMode == .dark ? .dark : .light)
+                .preferredColorScheme(engine.themeMode == .dark ? .dark : .light)
                 .onAppear {
                     if !CommandLine.arguments.contains("-LVDemo") && !CommandLine.arguments.contains("-LVShot") {
                         engine.startDiscovery()
+                        engine.startLocalPreviewIfAuthorized()
                     }
                 }
         }

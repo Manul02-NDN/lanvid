@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import Foundation
 import LanVidCore
 import SwiftUI
@@ -56,7 +56,6 @@ final class IntercomAudioController {
                 interleaved: false
             ) else { return }
 
-            // Attach IFB playback source node at 48 kHz mono Float32
             let node = AVAudioSourceNode(format: targetFmt) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
                 let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
                 let count = Int(frameCount)
@@ -168,10 +167,17 @@ final class IntercomAudioController {
     }
 }
 
-/// Complete Pro Cine Camera, Hardware VideoToolbox / LanVidCore Sender, Tally + Duplex Intercom,
+/// Complete Pro Cine Camera, Hardware VideoToolbox / LanVidCore Sender, Multi-Level Stabilization,
+/// Intuitive Touch Controls (Zoom, Exposure, Focus, AE/AF Lock), Tally + Duplex Intercom,
 /// AVCaptureMultiCamSession Dual-Cam (PIP / 50-50 Split), iPhone Duo Sync, and Demo Cine Studio engine.
 @MainActor
 final class CameraEngine: NSObject, ObservableObject {
+    // MARK: - Studio Appearance
+    @Published var themeMode: StudioThemeMode {
+        didSet { UserDefaults.standard.set(themeMode.rawValue, forKey: "cam_theme_mode") }
+    }
+    @Published var cleanHUD: Bool = false
+
     // MARK: - Connection & Lifecycle
     @Published var destIp: String {
         didSet { UserDefaults.standard.set(destIp, forKey: "cam_dest_ip") }
@@ -195,13 +201,14 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var syncedDelayMs: Int = 33
     @Published var syncedFixedDelay = true
     @Published var isStreaming = false
+    @Published var isPreviewActive = false
     @Published var isDemoMode = false
     @Published var statusText = ""
 
     var displayBadgeTag: String {
         if !assignedCamTag.isEmpty { return assignedCamTag }
         if assignedCamNumber > 0 { return "CAM \(assignedCamNumber)" }
-        return cameraLabel.isEmpty ? "CAM 1" : cameraLabel
+        return cameraLabel.isEmpty ? "CAM A" : cameraLabel
     }
 
     // MARK: - Tally & Duplex Intercom
@@ -218,23 +225,37 @@ final class CameraEngine: NSObject, ObservableObject {
     }
     @Published var ifbEnabled = true { didSet { syncIntercomState() } }
     @Published var ifbVolume: Float = 0.85 { didSet { syncIntercomState() } }
+    @Published var micGain: Float = 1.0
 
-    // MARK: - Manual Pro Cine Camera Controls (Primary Back / Active Lens)
+    // MARK: - Manual Pro Cine Camera Controls & Touch Gestures
     @Published var lens: CineLens = .wide
+    @Published var zoomFactor: CGFloat = 1.0
+    @Published var minDisplayZoom: CGFloat = 0.5
+    @Published var maxDisplayZoom: CGFloat = 10.0
     @Published var shutterAngle: Int = 180
     @Published var isoValue: Float = 400
     @Published var autoExposure = true
+    @Published var exposureBias: Float = 0.0
     @Published var wbKelvin: Float = 5600
     @Published var wbTint: Float = 0
     @Published var autoWhiteBalance = true
-    @Published var focusPosition: Float = 0.45
+    @Published var focusPosition: Float = 0.48
     @Published var focusPointA: Float = 0.25
     @Published var focusPointB: Float = 0.78
     @Published var autoFocus = true
+    @Published var aeAfLocked = false
     @Published var focusPeaking = false
     @Published var zebra = false
     @Published var showGuides = true
     @Published var showHistogram = true
+    @Published var touchHUD = TouchReticleState()
+
+    // MARK: - Multi-Level Image Stabilization
+    @Published var stabilizationLevel: StabilizationLevel {
+        didSet { UserDefaults.standard.set(stabilizationLevel.rawValue, forKey: "cam_stabilization_level") }
+    }
+    @Published var activeHardwareStabilization: StabilizationLevel = .standard
+    @Published var supportedStabilizationLevels: [StabilizationLevel] = StabilizationLevel.allCases
 
     // MARK: - Secondary Camera Exposure (Dual-Cam PIP / Split)
     @Published var secondaryAutoExposure = true
@@ -246,7 +267,11 @@ final class CameraEngine: NSObject, ObservableObject {
             guard oldValue != resolution else { return }
             if !isApplyingRemoteSync {
                 sendLocalConfigSyncToStudio()
-                if isStreaming && !isDemoMode { reconfigureVideoSenderOnly() }
+                if isStreaming && !isDemoMode {
+                    reconfigureVideoSenderOnly()
+                } else if isPreviewActive && !isDemoMode && duoMode != .duoCompanion {
+                    configureAndStartCapture()
+                }
             }
         }
     }
@@ -255,7 +280,11 @@ final class CameraEngine: NSObject, ObservableObject {
             guard oldValue != fps else { return }
             if !isApplyingRemoteSync {
                 sendLocalConfigSyncToStudio()
-                if isStreaming && !isDemoMode { reconfigureVideoSenderOnly() }
+                if isStreaming && !isDemoMode {
+                    reconfigureVideoSenderOnly()
+                } else if isPreviewActive && !isDemoMode && duoMode != .duoCompanion {
+                    configureAndStartCapture()
+                }
             }
         }
     }
@@ -281,6 +310,8 @@ final class CameraEngine: NSObject, ObservableObject {
             if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
         }
     }
+    @Published var adaptiveQuality: Bool = true
+    @Published var fecEnabled: Bool = true
     @Published var colorProfile = "Rec.709"
     private var isApplyingRemoteSync = false
     private var localConfigSyncRev: UInt64 = 0
@@ -297,13 +328,24 @@ final class CameraEngine: NSObject, ObservableObject {
     // MARK: - Discovery & Duo Sync
     let browser = DuoSyncBrowser()
 
-    // MARK: - AVFoundation Sessions
+    // MARK: - AVFoundation Sessions & Virtual Multi-Lens Zoom Mapping
     nonisolated let singleSession = AVCaptureSession()
     nonisolated let multiCamSession: AVCaptureMultiCamSession? = AVCaptureMultiCamSession.isMultiCamSupported ? AVCaptureMultiCamSession() : nil
     private let captureQueue = DispatchQueue(label: "com.manul02.lanvid.camera.capture", qos: .userInteractive)
     private var primaryDevice: AVCaptureDevice?
     private var secondaryDevice: AVCaptureDevice?
+    private var isUsingVirtualRearDevice = false
+    private var wideBaseZoomFactor: CGFloat = 1.0
     private var sessionObservers: [NSObjectProtocol] = []
+
+    // Haptics & Reticle auto-hide tasks
+    private let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private let mediumImpact = UIImpactFeedbackGenerator(style: .medium)
+    private let selectionFeedback = UISelectionFeedbackGenerator()
+    private var reticleHideTask: Task<Void, Never>?
+    private var toastHideTask: Task<Void, Never>?
+    private var lastEvHapticZeroCross: Bool = true
+    private var lastZoomDetent: Int = 10
 
     // MARK: - LanVidCore C ABI Handles (all cross-thread access guarded by locks)
     private let senderLock = NSLock()
@@ -324,6 +366,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     override init() {
         let ud = UserDefaults.standard
+        self.themeMode = StudioThemeMode(rawValue: ud.string(forKey: "cam_theme_mode") ?? "") ?? .dark
         self.destIp = ud.string(forKey: "cam_dest_ip") ?? "192.168.1.24"
         let vp = ud.integer(forKey: "cam_video_port")
         self.videoPort = vp > 0 ? vp : 5006
@@ -332,6 +375,10 @@ final class CameraEngine: NSObject, ObservableObject {
         self.cameraLabel = ud.string(forKey: "cam_label") ?? "CAM A"
         self.assignedCamNumber = ud.integer(forKey: "cam_assigned_number")
         self.assignedCamTag = ud.string(forKey: "cam_assigned_tag") ?? ""
+        let savedStab = StabilizationLevel(rawValue: ud.string(forKey: "cam_stabilization_level") ?? "") ?? .standard
+        self.stabilizationLevel = savedStab
+        self.activeHardwareStabilization = savedStab
+
         let storedId = ud.integer(forKey: "cam_unique_id")
         if storedId > 0 {
             self.cameraId = UInt32(storedId)
@@ -412,7 +459,6 @@ final class CameraEngine: NSObject, ObservableObject {
         }
         intercomAudio.onPullIfbFloat = { [weak self] dst, count in
             guard let self else { return false }
-            // Non-blocking try() on real-time audio render thread
             guard self.tallyLock.try() else { return false }
             defer { self.tallyLock.unlock() }
             guard let th = self.tallyHandle, self.isIfbListenOpen else { return false }
@@ -422,6 +468,8 @@ final class CameraEngine: NSObject, ObservableObject {
 
     deinit {
         for obs in sessionObservers { NotificationCenter.default.removeObserver(obs) }
+        reticleHideTask?.cancel()
+        toastHideTask?.cancel()
         tickTimer?.invalidate()
         tallyPollTimer?.cancel()
         tallyPollTimer = nil
@@ -445,6 +493,37 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Theme Toggle
+
+    func toggleTheme() {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            themeMode = (themeMode == .dark) ? .light : .dark
+        }
+    }
+
+    // MARK: - Local Camera Preview (immediate live framing before GO LIVE)
+
+    func startLocalPreviewIfAuthorized() {
+        #if targetEnvironment(simulator)
+        return
+        #else
+        guard !isDemoMode, duoMode != .duoCompanion else { return }
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        if status == .authorized {
+            configureAndStartCapture()
+            isPreviewActive = true
+        } else if status == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                Task { @MainActor in
+                    guard let self, granted, !self.isDemoMode else { return }
+                    self.configureAndStartCapture()
+                    self.isPreviewActive = true
+                }
+            }
+        }
+        #endif
+    }
+
     // MARK: - Discovery & Demo Cine Studio
 
     func startDiscovery() {
@@ -456,13 +535,15 @@ final class CameraEngine: NSObject, ObservableObject {
         videoPort = Int(studio.videoPort)
         tallyPort = Int(studio.tallyPort)
         statusText = tr("Обрано студію: ", "Selected studio: ") + studio.name
+        showTouchToast(studio.name, icon: "desktopcomputer")
     }
 
-    /// Launches a rich interactive Demo Cine Studio (no PC or hardware camera required) for App Store Review & exploration.
+    /// Launches a rich interactive Demo Cine Studio (no PC or hardware camera required) for exploration & screenshots.
     func startDemoCineStudio(tally: ProTallyState = .preview, mode: DuoMode = .singleHUD) {
         stopStreaming()
         isDemoMode = true
         isStreaming = true
+        isPreviewActive = true
         UIApplication.shared.isIdleTimerDisabled = true
         streamStartWallTime = CACurrentMediaTime()
         duoMode = mode
@@ -478,13 +559,24 @@ final class CameraEngine: NSObject, ObservableObject {
         shutterAngle = 180
         isoValue = 400
         wbKelvin = 5600
+        exposureBias = 0.0
+        zoomFactor = 1.0
+        minDisplayZoom = 0.5
+        maxDisplayZoom = 10.0
         autoExposure = false
         autoWhiteBalance = false
         autoFocus = false
+        aeAfLocked = false
         focusPosition = 0.48
+        stabilizationLevel = .cinematic
+        activeHardwareStabilization = .cinematic
+        supportedStabilizationLevels = StabilizationLevel.allCases
         telemetry.codecBackend = "VideoToolbox H.265 (HW)"
         telemetry.bitrateMbps = 35.2
         telemetry.latencyMs = 7.8
+        telemetry.jitterMs = 0.31
+        telemetry.lossPct = 0.0
+        telemetry.bufferPct = 98
         telemetry.actualFps = 60.0
         statusText = tr("Demo Cine Studio активна • Без підключення ПК", "Demo Cine Studio active • No PC required")
         browser.start(localRole: duoRole, localLabel: cameraLabel, demoMode: true)
@@ -496,6 +588,7 @@ final class CameraEngine: NSObject, ObservableObject {
         stopStreaming()
         statusText = tr("Демо завершено • Готово до підключення", "Demo ended • Ready to connect")
         browser.start(localRole: duoRole, localLabel: cameraLabel, demoMode: false)
+        startLocalPreviewIfAuthorized()
     }
 
     func cycleDemoTally() {
@@ -514,6 +607,418 @@ final class CameraEngine: NSObject, ObservableObject {
             directorSpeaking = false
         }
         syncDuoStateToPeers()
+    }
+
+    // MARK: - Multi-Level Image Stabilization
+
+    func setStabilizationLevel(_ level: StabilizationLevel) {
+        stabilizationLevel = level
+        selectionFeedback.selectionChanged()
+        if isDemoMode {
+            activeHardwareStabilization = level
+            showTouchToast(tr("Стабілізація: ", "Stabilization: ") + level.title, icon: level.systemIcon)
+            return
+        }
+        applyStabilizationToActiveSessions(level)
+        showTouchToast(tr("Стабілізація: ", "Stabilization: ") + level.title, icon: level.systemIcon)
+    }
+
+    func cycleStabilizationLevel() {
+        let all = StabilizationLevel.allCases
+        if let idx = all.firstIndex(of: stabilizationLevel) {
+            let next = all[(idx + 1) % all.count]
+            setStabilizationLevel(next)
+        }
+    }
+
+    private nonisolated static func resolveAVStabilizationMode(
+        for requested: StabilizationLevel,
+        format: AVCaptureDevice.Format?
+    ) -> (mode: AVCaptureVideoStabilizationMode, resolvedLevel: StabilizationLevel) {
+        let candidates: [(AVCaptureVideoStabilizationMode, StabilizationLevel)]
+        switch requested {
+        case .off:
+            return (.off, .off)
+        case .standard:
+            candidates = [(.standard, .standard), (.off, .off)]
+        case .cinematic:
+            candidates = [(.cinematic, .cinematic), (.standard, .standard), (.off, .off)]
+        case .active:
+            candidates = [(.cinematicExtended, .active), (.cinematic, .cinematic), (.standard, .standard), (.off, .off)]
+        case .ultra:
+            if #available(iOS 18.0, *) {
+                candidates = [
+                    (.cinematicExtendedEnhanced, .ultra),
+                    (.cinematicExtended, .active),
+                    (.cinematic, .cinematic),
+                    (.standard, .standard),
+                    (.off, .off)
+                ]
+            } else {
+                candidates = [
+                    (.cinematicExtended, .active),
+                    (.cinematic, .cinematic),
+                    (.standard, .standard),
+                    (.off, .off)
+                ]
+            }
+        }
+        guard let fmt = format else {
+            return candidates.first ?? (.off, .off)
+        }
+        for (mode, lvl) in candidates {
+            if mode == .off || fmt.isVideoStabilizationModeSupported(mode) {
+                return (mode, lvl)
+            }
+        }
+        return (.off, .off)
+    }
+
+    private nonisolated static func querySupportedStabilizationLevels(format: AVCaptureDevice.Format) -> [StabilizationLevel] {
+        var result: [StabilizationLevel] = [.off]
+        if format.isVideoStabilizationModeSupported(.standard) { result.append(.standard) }
+        if format.isVideoStabilizationModeSupported(.cinematic) { result.append(.cinematic) }
+        if format.isVideoStabilizationModeSupported(.cinematicExtended) { result.append(.active) }
+        if #available(iOS 18.0, *) {
+            if format.isVideoStabilizationModeSupported(.cinematicExtendedEnhanced) {
+                result.append(.ultra)
+            }
+        }
+        return result
+    }
+
+    private func applyStabilizationToActiveSessions(_ level: StabilizationLevel) {
+        let dev = primaryDevice
+        captureQueue.async { [weak self, singleSession, multiCamSession] in
+            guard let self else { return }
+            let resolved = Self.resolveAVStabilizationMode(for: level, format: dev?.activeFormat)
+            var appliedLevel = resolved.resolvedLevel
+
+            for out in singleSession.outputs {
+                if let conn = out.connection(with: .video), conn.isVideoStabilizationSupported {
+                    conn.preferredVideoStabilizationMode = resolved.mode
+                    appliedLevel = Self.level(from: conn.activeVideoStabilizationMode, fallback: resolved.resolvedLevel)
+                }
+            }
+            if let mc = multiCamSession {
+                for out in mc.outputs {
+                    if let conn = out.connection(with: .video), conn.isVideoStabilizationSupported {
+                        conn.preferredVideoStabilizationMode = resolved.mode
+                        appliedLevel = Self.level(from: conn.activeVideoStabilizationMode, fallback: resolved.resolvedLevel)
+                    }
+                }
+            }
+            let supported = dev.map { Self.querySupportedStabilizationLevels(format: $0.activeFormat) } ?? StabilizationLevel.allCases
+            Task { @MainActor in
+                self.activeHardwareStabilization = appliedLevel
+                self.supportedStabilizationLevels = supported
+            }
+        }
+    }
+
+    private nonisolated static func level(from mode: AVCaptureVideoStabilizationMode, fallback: StabilizationLevel) -> StabilizationLevel {
+        switch mode {
+        case .off: return .off
+        case .standard: return .standard
+        case .cinematic: return .cinematic
+        case .cinematicExtended: return .active
+        case .auto: return fallback
+        default:
+            if #available(iOS 18.0, *), mode == .cinematicExtendedEnhanced {
+                return .ultra
+            }
+            return fallback
+        }
+    }
+
+    // MARK: - Intuitive Viewfinder Touch Interactions (Zoom, Focus, Exposure, AE/AF Lock)
+
+    func showTouchToast(_ text: String, icon: String = "viewfinder") {
+        touchHUD.toastText = text
+        touchHUD.toastIcon = icon
+        toastHideTask?.cancel()
+        toastHideTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                self?.touchHUD.toastText = nil
+            }
+        }
+    }
+
+    private func scheduleReticleAutoHide(after seconds: Double = 2.8) {
+        reticleHideTask?.cancel()
+        reticleHideTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            if !self.aeAfLocked && !self.touchHUD.adjustingExposure && !self.touchHUD.adjustingFocus {
+                withAnimation(.easeOut(duration: 0.30)) {
+                    self.touchHUD.visible = false
+                }
+            }
+        }
+    }
+
+    /// Single tap anywhere on viewfinder -> focus & exposure metering at exact point.
+    func focusAndExpose(atDevicePoint devicePoint: CGPoint, viewNormalizedPoint: CGPoint) {
+        lightImpact.impactOccurred()
+        aeAfLocked = false
+        autoFocus = true
+        autoExposure = true
+        exposureBias = 0.0
+
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
+            touchHUD.normalizedPoint = viewNormalizedPoint
+            touchHUD.visible = true
+            touchHUD.locked = false
+            touchHUD.adjustingExposure = false
+            touchHUD.adjustingFocus = false
+        }
+        scheduleReticleAutoHide(after: 3.0)
+
+        if isDemoMode {
+            // Focus smoothly toward crisp demo plane near tap depth
+            let distFromCenter = hypot(viewNormalizedPoint.x - 0.5, viewNormalizedPoint.y - 0.5)
+            focusPosition = Float(max(0.15, min(0.85, 0.48 + (distFromCenter - 0.15) * 0.25)))
+            showTouchToast(tr("Фокус і експозиція", "Focus & Exposure"), icon: "viewfinder")
+            return
+        }
+
+        guard let dev = primaryDevice else { return }
+        do {
+            try dev.lockForConfiguration()
+            if dev.isFocusPointOfInterestSupported {
+                dev.focusPointOfInterest = devicePoint
+                if dev.isFocusModeSupported(.autoFocus) {
+                    dev.focusMode = .autoFocus
+                } else if dev.isFocusModeSupported(.continuousAutoFocus) {
+                    dev.focusMode = .continuousAutoFocus
+                }
+            }
+            if dev.isExposurePointOfInterestSupported {
+                dev.exposurePointOfInterest = devicePoint
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    dev.exposureMode = .continuousAutoExposure
+                } else if dev.isExposureModeSupported(.autoExpose) {
+                    dev.exposureMode = .autoExpose
+                }
+            }
+            dev.setExposureTargetBias(0.0, completionHandler: nil)
+            dev.isSubjectAreaChangeMonitoringEnabled = true
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    /// Long press anywhere on viewfinder -> AE/AF Lock at point.
+    func lockFocusAndExposure(atDevicePoint devicePoint: CGPoint, viewNormalizedPoint: CGPoint) {
+        mediumImpact.impactOccurred()
+        aeAfLocked = true
+        autoFocus = false
+        autoExposure = false
+
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.68)) {
+            touchHUD.normalizedPoint = viewNormalizedPoint
+            touchHUD.visible = true
+            touchHUD.locked = true
+            touchHUD.adjustingExposure = false
+            touchHUD.adjustingFocus = false
+        }
+        reticleHideTask?.cancel()
+        showTouchToast(tr("AE / AF заблоковано", "AE / AF Locked"), icon: "lock.fill")
+
+        if isDemoMode { return }
+
+        guard let dev = primaryDevice else { return }
+        do {
+            try dev.lockForConfiguration()
+            if dev.isFocusPointOfInterestSupported {
+                dev.focusPointOfInterest = devicePoint
+            }
+            if dev.isExposurePointOfInterestSupported {
+                dev.exposurePointOfInterest = devicePoint
+            }
+            if dev.isFocusModeSupported(.locked) {
+                dev.focusMode = .locked
+                focusPosition = dev.lensPosition
+            }
+            if dev.isExposureModeSupported(.locked) {
+                dev.exposureMode = .locked
+            }
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    func unlockAeAf() {
+        guard aeAfLocked else { return }
+        resetTouchFocusAndExposure()
+    }
+
+    /// Vertical drag on viewfinder -> smooth EV exposure compensation (-3.0 ... +3.0 EV).
+    func setExposureBias(_ newBias: Float, activeDrag: Bool = false) {
+        let clamped = max(-3.0, min(3.0, newBias))
+        let nearZero = abs(clamped) < 0.08
+        if nearZero && !lastEvHapticZeroCross {
+            selectionFeedback.selectionChanged()
+        }
+        lastEvHapticZeroCross = nearZero
+
+        let snapped = nearZero ? 0.0 : (round(clamped * 10.0) / 10.0)
+        exposureBias = snapped
+        touchHUD.visible = true
+        touchHUD.adjustingExposure = activeDrag
+
+        if !activeDrag {
+            scheduleReticleAutoHide(after: 2.4)
+        } else {
+            reticleHideTask?.cancel()
+        }
+
+        let sign = snapped >= 0 ? "+" : ""
+        showTouchToast(String(format: "%@ %@%.1f EV", tr("Експозиція", "Exposure"), sign, snapped), icon: "sun.max.fill")
+
+        if isDemoMode { return }
+
+        guard let dev = primaryDevice else { return }
+        do {
+            try dev.lockForConfiguration()
+            if dev.exposureMode == .custom {
+                // In custom manual mode, switch seamlessly to AE with target bias so vertical swipe works immediately
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    dev.exposureMode = .continuousAutoExposure
+                    autoExposure = true
+                }
+            }
+            let hwClamped = max(dev.minExposureTargetBias, min(dev.maxExposureTargetBias, snapped))
+            dev.setExposureTargetBias(hwClamped, completionHandler: nil)
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    /// Horizontal drag on viewfinder -> smooth Manual Focus Pull (0.0 ... 1.0).
+    func setTouchManualFocus(_ position: Float, activeDrag: Bool = false) {
+        let clamped = max(0.0, min(1.0, position))
+        autoFocus = false
+        focusPosition = clamped
+        touchHUD.adjustingFocus = activeDrag
+        if !activeDrag {
+            scheduleReticleAutoHide(after: 2.0)
+        } else {
+            reticleHideTask?.cancel()
+        }
+        showTouchToast(String(format: "%@ %d%%", tr("Фокус MF", "Manual Focus"), Int(clamped * 100)), icon: "scope")
+
+        if isDemoMode { return }
+
+        guard let dev = primaryDevice else { return }
+        do {
+            try dev.lockForConfiguration()
+            if dev.isFocusModeSupported(.locked) {
+                dev.setFocusModeLocked(lensPosition: clamped, completionHandler: nil)
+            }
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    /// Double tap on viewfinder -> instant reset to Auto Focus, Auto Exposure, EV 0.0.
+    func resetTouchFocusAndExposure() {
+        mediumImpact.impactOccurred()
+        aeAfLocked = false
+        autoFocus = true
+        autoExposure = true
+        exposureBias = 0.0
+
+        withAnimation(.easeOut(duration: 0.2)) {
+            touchHUD.locked = false
+            touchHUD.normalizedPoint = CGPoint(x: 0.5, y: 0.5)
+            touchHUD.visible = true
+            touchHUD.adjustingExposure = false
+            touchHUD.adjustingFocus = false
+        }
+        scheduleReticleAutoHide(after: 1.4)
+        showTouchToast(tr("AF / AE Авто · 0.0 EV", "AF / AE Auto · 0.0 EV"), icon: "arrow.counterclockwise")
+
+        if isDemoMode {
+            focusPosition = 0.48
+            return
+        }
+
+        guard let dev = primaryDevice else { return }
+        do {
+            try dev.lockForConfiguration()
+            if dev.isFocusPointOfInterestSupported { dev.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+            if dev.isFocusModeSupported(.continuousAutoFocus) { dev.focusMode = .continuousAutoFocus }
+            if dev.isExposurePointOfInterestSupported { dev.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+            if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
+            dev.setExposureTargetBias(0.0, completionHandler: nil)
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    /// Continuous pinch / wheel zoom (display scale 0.5x ... 10.0x, mapped seamlessly to hardware multi-cam).
+    func setDisplayZoom(_ requestedDisplayZoom: CGFloat, animated: Bool = false, showOverlay: Bool = true) {
+        let clampedDisplay = max(minDisplayZoom, min(maxDisplayZoom, requestedDisplayZoom))
+        zoomFactor = clampedDisplay
+
+        // Subtle haptic detent at optical focal steps (0.5x, 1x, 2x, 3x, 5x)
+        let quantized = Int(round(clampedDisplay * 10))
+        if [5, 10, 20, 30, 50].contains(quantized) && quantized != lastZoomDetent {
+            selectionFeedback.selectionChanged()
+        }
+        lastZoomDetent = quantized
+
+        // Keep lens badge synced with rear display zoom
+        if lens != .front {
+            if clampedDisplay < 0.85 {
+                lens = .ultraWide
+            } else if clampedDisplay < 1.75 {
+                lens = .wide
+            } else if clampedDisplay < 2.65 {
+                lens = .tele
+            } else {
+                lens = .tele3x
+            }
+        }
+
+        if showOverlay {
+            showTouchToast(String(format: "%@ %.1f×", tr("Зум", "Zoom"), clampedDisplay), icon: "magnifyingglass")
+        }
+
+        if isDemoMode { return }
+
+        guard let dev = primaryDevice else { return }
+        let hwTarget: CGFloat
+        if isUsingVirtualRearDevice {
+            hwTarget = clampedDisplay * wideBaseZoomFactor
+        } else {
+            // Discrete lens: map relative to its own optical baseline
+            let base = max(0.5, lens.targetDisplayZoom)
+            hwTarget = max(1.0, clampedDisplay / base)
+        }
+        let maxHw = min(dev.activeFormat.videoMaxZoomFactor, maxDisplayZoom * wideBaseZoomFactor)
+        let finalHw = max(dev.minAvailableVideoZoomFactor, min(maxHw, hwTarget))
+        do {
+            try dev.lockForConfiguration()
+            if animated {
+                dev.ramp(toVideoZoomFactor: finalHw, withRate: 10.0)
+            } else {
+                dev.cancelVideoZoomRamp()
+                dev.videoZoomFactor = finalHw
+            }
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    func stepZoom(up: Bool) {
+        let steps: [CGFloat] = [0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0].filter { $0 >= minDisplayZoom && $0 <= maxDisplayZoom }
+        if up {
+            if let next = steps.first(where: { $0 > zoomFactor + 0.05 }) {
+                setDisplayZoom(next, animated: true)
+            }
+        } else {
+            if let prev = steps.last(where: { $0 < zoomFactor - 0.05 }) {
+                setDisplayZoom(prev, animated: true)
+            }
+        }
     }
 
     // MARK: - Live Streaming (LanVidCore + VideoToolbox + TallyIntercom)
@@ -561,7 +1066,7 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     private func startLiveStreamingAuthorized() {
-        stopStreaming()
+        stopStreaming(keepPreview: true)
         isDemoMode = false
 
         if let s = lv_sender_create() {
@@ -578,8 +1083,8 @@ final class CameraEngine: NSObject, ObservableObject {
             cfg.fps = Double(fps)
             cfg.codec = codec.lvCodecValue
             cfg.bitrate_kbps = UInt32(max(2000, Int(bitrateMbps * 1000.0)))
-            cfg.fec_group_size = 6
-            cfg.adaptive_quality = 1
+            cfg.fec_group_size = fecEnabled ? 6 : 0
+            cfg.adaptive_quality = adaptiveQuality ? 1 : 0
             cfg.keyframe_interval = UInt32(max(24, fps))
 
             let rc = lv_sdk_sender_start(s, &cfg)
@@ -597,7 +1102,6 @@ final class CameraEngine: NSObject, ObservableObject {
             return
         }
 
-        // Start Tally & Duplex Intercom engine on port 5022
         let th = destIp.withCString { ipC in
             cameraLabel.withCString { lblC in
                 lv_tally_intercom_create_camera(ipC, UInt16(clamping: tallyPort), cameraId, lblC)
@@ -639,7 +1143,10 @@ final class CameraEngine: NSObject, ObservableObject {
         }
 
         if duoMode != .duoCompanion {
-            configureAndStartCapture()
+            if !isPreviewActive || !singleSession.isRunning {
+                configureAndStartCapture()
+                isPreviewActive = true
+            }
         }
         intercomAudio.start()
         streamStartWallTime = CACurrentMediaTime()
@@ -649,14 +1156,17 @@ final class CameraEngine: NSObject, ObservableObject {
         startTelemetryTimer()
     }
 
-    func stopStreaming() {
+    func stopStreaming(keepPreview: Bool = true) {
         tickTimer?.invalidate()
         tickTimer = nil
         tallyPollTimer?.cancel()
         tallyPollTimer = nil
-        captureQueue.async { [singleSession, multiCamSession] in
-            if singleSession.isRunning { singleSession.stopRunning() }
-            if let mc = multiCamSession, mc.isRunning { mc.stopRunning() }
+        if !keepPreview {
+            isPreviewActive = false
+            captureQueue.async { [singleSession, multiCamSession] in
+                if singleSession.isRunning { singleSession.stopRunning() }
+                if let mc = multiCamSession, mc.isRunning { mc.stopRunning() }
+            }
         }
         intercomAudio.stop()
 
@@ -720,7 +1230,7 @@ final class CameraEngine: NSObject, ObservableObject {
         } else if duoRole == .companion {
             duoRole = .camA
         }
-        if isStreaming && !isDemoMode {
+        if (isStreaming || isPreviewActive) && !isDemoMode {
             if newMode == .duoCompanion {
                 captureQueue.async { [singleSession, multiCamSession] in
                     if singleSession.isRunning { singleSession.stopRunning() }
@@ -772,12 +1282,31 @@ final class CameraEngine: NSObject, ObservableObject {
         autoFocus = false
         focusPosition = target
         applyManualCameraControls()
+        showTouchToast(String(format: "Rack Focus → %d%%", Int(target * 100)), icon: "scope")
         if duoMode == .duoCompanion { sendCompanionCommandToSelectedPeer() }
     }
 
     func selectLens(_ newLens: CineLens) {
+        let wasFront = (lens == .front)
+        let wantsFront = (newLens == .front)
         lens = newLens
-        if isStreaming && !isDemoMode && !duoMode.isMultiCam {
+        selectionFeedback.selectionChanged()
+
+        if isDemoMode {
+            zoomFactor = newLens.targetDisplayZoom
+            showTouchToast(tr("Об'єктив: ", "Lens: ") + newLens.displayLabel, icon: "camera.aperture")
+            return
+        }
+
+        // Fast seamless zoom ramp if already on a virtual rear multi-camera device
+        if !wantsFront && !wasFront && isUsingVirtualRearDevice && !duoMode.isMultiCam && (isStreaming || isPreviewActive) {
+            setDisplayZoom(newLens.targetDisplayZoom, animated: true, showOverlay: true)
+            if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
+            return
+        }
+
+        zoomFactor = newLens.targetDisplayZoom
+        if (isStreaming || isPreviewActive) && !duoMode.isMultiCam {
             configureAndStartCapture()
         }
         if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
@@ -814,6 +1343,8 @@ final class CameraEngine: NSObject, ObservableObject {
             try dev.lockForConfiguration()
             if autoExp {
                 if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
+                let clampedBias = max(dev.minExposureTargetBias, min(dev.maxExposureTargetBias, exposureBias))
+                dev.setExposureTargetBias(clampedBias, completionHandler: nil)
             } else if dev.isExposureModeSupported(.custom) {
                 let denom = Double(max(1, fps)) * (360.0 / Double(max(1, shutter)))
                 let rawDur = CMTime(value: 1, timescale: CMTimeScale(max(24, Int(denom))))
@@ -841,9 +1372,7 @@ final class CameraEngine: NSObject, ObservableObject {
                 dev.setFocusModeLocked(lensPosition: max(0.0, min(1.0, focusPos)))
             }
             dev.unlockForConfiguration()
-        } catch {
-            // Device configuration locked or unavailable
-        }
+        } catch {}
     }
 
     private func applyRemoteStudioControl(_ ctrl: LV_CameraControl) {
@@ -882,15 +1411,9 @@ final class CameraEngine: NSObject, ObservableObject {
         }
         applyManualCameraControls()
 
-        if ctrl.zoom_x100 >= 100, let dev = primaryDevice {
+        if ctrl.zoom_x100 >= 100 {
             let requestedZoom = CGFloat(ctrl.zoom_x100) / 100.0
-            let maxZoom = min(dev.activeFormat.videoMaxZoomFactor, 10.0)
-            let clampedZoom = max(1.0, min(maxZoom, requestedZoom))
-            do {
-                try dev.lockForConfiguration()
-                dev.videoZoomFactor = clampedZoom
-                dev.unlockForConfiguration()
-            } catch {}
+            setDisplayZoom(requestedZoom, animated: true, showOverlay: true)
         }
     }
 
@@ -986,8 +1509,8 @@ final class CameraEngine: NSObject, ObservableObject {
         cfg.fps = Double(fps)
         cfg.codec = codec.lvCodecValue
         cfg.bitrate_kbps = UInt32(max(2000, Int(bitrateMbps * 1000.0)))
-        cfg.fec_group_size = 6
-        cfg.adaptive_quality = 1
+        cfg.fec_group_size = fecEnabled ? 6 : 0
+        cfg.adaptive_quality = adaptiveQuality ? 1 : 0
         cfg.keyframe_interval = UInt32(max(24, fps))
 
         if lv_sdk_sender_start(s, &cfg) == LV_OK.rawValue {
@@ -1029,12 +1552,12 @@ final class CameraEngine: NSObject, ObservableObject {
         cfg.camera_lens = {
             switch lens {
             case .ultraWide: return 1
-            case .tele: return 2
+            case .tele, .tele3x: return 2
             case .front: return 3
             case .wide: return 0
             }
         }()
-        cfg.flags = 0x02  // kVideoConfigFlagFromCamera
+        cfg.flags = 0x02
         let tagBytes = Array(displayBadgeTag.utf8.prefix(15))
         withUnsafeMutableBytes(of: &cfg.assigned_cam_tag) { raw in
             raw.initializeMemory(as: UInt8.self, repeating: 0)
@@ -1060,7 +1583,7 @@ final class CameraEngine: NSObject, ObservableObject {
         tallyLock.unlock()
     }
 
-    // MARK: - AVFoundation Capture Setup (Single + AVCaptureMultiCamSession)
+    // MARK: - AVFoundation Capture Setup (Single Virtual Multi-Lens + AVCaptureMultiCamSession)
 
     private func currentVideoOrientation() -> AVCaptureVideoOrientation {
         let scene = UIApplication.shared.connectedScenes
@@ -1108,11 +1631,29 @@ final class CameraEngine: NSObject, ObservableObject {
         } catch {}
     }
 
+    private nonisolated static func selectBestRearDevice() -> (device: AVCaptureDevice?, isVirtual: Bool, wideBase: CGFloat, minDisp: CGFloat) {
+        if let triple = AVCaptureDevice.default(.builtInTripleCamera, for: .video, position: .back) {
+            let sw = CGFloat(triple.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2.0)
+            return (triple, true, max(1.0, sw), 1.0 / max(1.0, sw))
+        }
+        if let dualWide = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back) {
+            let sw = CGFloat(dualWide.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2.0)
+            return (dualWide, true, max(1.0, sw), 1.0 / max(1.0, sw))
+        }
+        if let dual = AVCaptureDevice.default(.builtInDualCamera, for: .video, position: .back) {
+            return (dual, true, 1.0, 1.0)
+        }
+        let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+        return (wide, false, 1.0, 1.0)
+    }
+
     private func configureAndStartCapture() {
         let wantMultiCam = duoMode.isMultiCam && multiCamSession != nil
         let targetRes = resolution
         let targetLens = lens
         let targetFps = fps
+        let targetZoom = zoomFactor
+        let targetStab = stabilizationLevel
         let targetOrientation = currentVideoOrientation()
 
         captureQueue.async { [weak self] in
@@ -1125,6 +1666,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
                 let backCam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
                 let frontCam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+                var appliedStab: StabilizationLevel = .off
                 if let backCam, let bIn = try? AVCaptureDeviceInput(device: backCam), mc.canAddInput(bIn) {
                     mc.addInputWithNoConnections(bIn)
                     let out = AVCaptureVideoDataOutput()
@@ -1136,6 +1678,11 @@ final class CameraEngine: NSObject, ObservableObject {
                         if let port = bIn.ports(for: .video, sourceDeviceType: backCam.deviceType, sourceDevicePosition: .back).first {
                             let conn = AVCaptureConnection(inputPorts: [port], output: out)
                             if conn.isVideoOrientationSupported { conn.videoOrientation = targetOrientation }
+                            if conn.isVideoStabilizationSupported {
+                                let res = Self.resolveAVStabilizationMode(for: targetStab, format: backCam.activeFormat)
+                                conn.preferredVideoStabilizationMode = res.mode
+                                appliedStab = Self.level(from: conn.activeVideoStabilizationMode, fallback: res.resolvedLevel)
+                            }
                             if mc.canAddConnection(conn) { mc.addConnection(conn) }
                         }
                     }
@@ -1146,25 +1693,41 @@ final class CameraEngine: NSObject, ObservableObject {
                 mc.commitConfiguration()
                 if let backCam { Self.applyFrameRate(min(targetFps, 30), to: backCam) }
                 mc.startRunning()
+                let supportedStab = backCam.map { Self.querySupportedStabilizationLevels(format: $0.activeFormat) } ?? StabilizationLevel.allCases
                 Task { @MainActor in
                     self.primaryDevice = backCam
                     self.secondaryDevice = frontCam
+                    self.isUsingVirtualRearDevice = false
+                    self.wideBaseZoomFactor = 1.0
+                    self.minDisplayZoom = 1.0
+                    self.maxDisplayZoom = 6.0
+                    self.activeHardwareStabilization = appliedStab
+                    self.supportedStabilizationLevels = supportedStab
                     self.applyManualCameraControls()
                 }
             } else {
                 if let mc = self.multiCamSession, mc.isRunning { mc.stopRunning() }
                 self.singleSession.beginConfiguration()
                 for i in self.singleSession.inputs { self.singleSession.removeInput(i) }
-                let pos: AVCaptureDevice.Position = (targetLens == .front) ? .front : .back
-                let devType: AVCaptureDevice.DeviceType = {
-                    switch targetLens {
-                    case .ultraWide: return .builtInUltraWideCamera
-                    case .tele: return .builtInTelephotoCamera
-                    default: return .builtInWideAngleCamera
-                    }
-                }()
-                let cam = AVCaptureDevice.default(devType, for: .video, position: pos)
-                    ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: pos)
+
+                let cam: AVCaptureDevice?
+                let isVirtual: Bool
+                let wideBase: CGFloat
+                let minDisp: CGFloat
+
+                if targetLens == .front {
+                    cam = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+                    isVirtual = false
+                    wideBase = 1.0
+                    minDisp = 1.0
+                } else {
+                    let pick = Self.selectBestRearDevice()
+                    cam = pick.device
+                    isVirtual = pick.isVirtual
+                    wideBase = pick.wideBase
+                    minDisp = pick.minDisp
+                }
+
                 if let cam, let input = try? AVCaptureDeviceInput(device: cam), self.singleSession.canAddInput(input) {
                     self.singleSession.addInput(input)
                 }
@@ -1189,17 +1752,46 @@ final class CameraEngine: NSObject, ObservableObject {
                     out.setSampleBufferDelegate(self, queue: self.captureQueue)
                     if self.singleSession.canAddOutput(out) { self.singleSession.addOutput(out) }
                 }
+
+                var appliedStab: StabilizationLevel = .off
+                let resolvedStab = Self.resolveAVStabilizationMode(for: targetStab, format: cam?.activeFormat)
                 for out in self.singleSession.outputs {
-                    if let conn = out.connection(with: .video), conn.isVideoOrientationSupported {
-                        conn.videoOrientation = targetOrientation
+                    if let conn = out.connection(with: .video) {
+                        if conn.isVideoOrientationSupported {
+                            conn.videoOrientation = targetOrientation
+                        }
+                        if conn.isVideoStabilizationSupported {
+                            conn.preferredVideoStabilizationMode = resolvedStab.mode
+                            appliedStab = Self.level(from: conn.activeVideoStabilizationMode, fallback: resolvedStab.resolvedLevel)
+                        }
                     }
                 }
                 self.singleSession.commitConfiguration()
-                if let cam { Self.applyFrameRate(targetFps, to: cam) }
-                self.singleSession.startRunning()
+
+                if let cam {
+                    Self.applyFrameRate(targetFps, to: cam)
+                    let desiredHwZoom = isVirtual ? (max(minDisp, targetZoom) * wideBase) : max(1.0, targetZoom)
+                    let clampedHwZoom = max(cam.minAvailableVideoZoomFactor, min(min(cam.activeFormat.videoMaxZoomFactor, wideBase * 10.0), desiredHwZoom))
+                    do {
+                        try cam.lockForConfiguration()
+                        cam.videoZoomFactor = clampedHwZoom
+                        cam.unlockForConfiguration()
+                    } catch {}
+                }
+                if !self.singleSession.isRunning {
+                    self.singleSession.startRunning()
+                }
+                let supportedStab = cam.map { Self.querySupportedStabilizationLevels(format: $0.activeFormat) } ?? StabilizationLevel.allCases
+                let maxDisp = cam.map { min(10.0, max(2.0, $0.activeFormat.videoMaxZoomFactor / wideBase)) } ?? 10.0
                 Task { @MainActor in
                     self.primaryDevice = cam
                     self.secondaryDevice = nil
+                    self.isUsingVirtualRearDevice = isVirtual
+                    self.wideBaseZoomFactor = wideBase
+                    self.minDisplayZoom = minDisp
+                    self.maxDisplayZoom = maxDisp
+                    self.activeHardwareStabilization = appliedStab
+                    self.supportedStabilizationLevels = supportedStab
                     self.applyManualCameraControls()
                 }
             }
@@ -1220,7 +1812,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     private func startTelemetryTimer() {
         tickTimer?.invalidate()
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.onTelemetryTick() }
         }
     }
@@ -1242,17 +1834,23 @@ final class CameraEngine: NSObject, ObservableObject {
         if isDemoMode {
             demoPhaseCounter += 1
             let phase = Double(demoPhaseCounter) * 0.24
-            telemetry.bitrateMbps = bitrateMbps + sin(phase) * 0.8
-            telemetry.latencyMs = 7.4 + cos(phase * 0.7) * 0.6
+            telemetry.bitrateMbps = max(2.0, bitrateMbps + sin(phase) * 0.9)
+            let stabAdded = Double(stabilizationLevel.latencyHintMs) * 0.15
+            telemetry.latencyMs = 7.4 + stabAdded + cos(phase * 0.7) * 0.5
+            telemetry.jitterMs = 0.28 + abs(sin(phase * 0.5)) * 0.12
+            telemetry.lossPct = 0.0
+            telemetry.bufferPct = 98
             telemetry.actualFps = Double(fps)
-            telemetry.micPeakDbfs = (pttActive || latchActive) ? Float(-10.0 + sin(phase * 2.2) * 6.0) : -46.0
-            telemetry.ifbPeakDbfs = (ifbEnabled && directorSpeaking) ? Float(-12.0 + cos(phase * 1.9) * 5.0) : -52.0
+            telemetry.micPeakDbfs = (pttActive || latchActive) ? Float(-10.0 + sin(phase * 2.2) * 7.0) : Float(-44.0 + sin(phase) * 4.0)
+            telemetry.ifbPeakDbfs = (ifbEnabled && directorSpeaking) ? Float(-12.0 + cos(phase * 1.9) * 6.0) : Float(-48.0 + cos(phase) * 3.0)
             telemetry.histogram = (0..<24).map { i in
                 let x = Double(i) / 23.0
-                let bell = exp(-pow((x - 0.48) * 3.1, 2.0)) * 0.82
+                let shift = Double(exposureBias) * 0.09
+                let bell = exp(-pow((x - (0.48 + shift)) * 3.1, 2.0)) * 0.82
                 let ripple = sin(phase + Double(i) * 0.45) * 0.06
                 return Float(max(0.05, min(0.98, bell + ripple)))
             }
+            appendTelemetryHistory(bitrate: telemetry.bitrateMbps, latency: telemetry.latencyMs, dropout: false)
             return
         }
 
@@ -1271,6 +1869,7 @@ final class CameraEngine: NSObject, ObservableObject {
             telemetry.codecBackend = withUnsafePointer(to: st.codec_backend) {
                 $0.withMemoryRebound(to: CChar.self, capacity: 64) { String(cString: $0) }
             }
+            appendTelemetryHistory(bitrate: st.bitrate_mbps, latency: st.encode_ms, dropout: st.fps < Double(fps) * 0.85)
         }
 
         tallyLock.lock()
@@ -1278,6 +1877,13 @@ final class CameraEngine: NSObject, ObservableObject {
             lv_tally_intercom_update_camera_telemetry(th, UInt8(clamping: telemetry.batteryPct), Int8(clamping: telemetry.tempC))
         }
         tallyLock.unlock()
+    }
+
+    private func appendTelemetryHistory(bitrate: Double, latency: Double, dropout: Bool) {
+        telemetry.history.append(TelemetrySample(bitrateMbps: bitrate, latencyMs: latency, dropout: dropout))
+        if telemetry.history.count > 42 {
+            telemetry.history.removeFirst(telemetry.history.count - 42)
+        }
     }
 }
 
@@ -1293,7 +1899,6 @@ extension CameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         defer { senderLock.unlock() }
         guard let s = senderHandle else { return }
 
-        // Prefer true zero-copy IOSurface CVPixelBufferRef path into VideoToolbox (H.264/H.265).
         let nativeRc = lv_sender_push_cvpixelbuffer(s, Unmanaged.passUnretained(pb).toOpaque(), w, h, tsUs)
         if nativeRc == LV_ERR_UNSUPPORTED.rawValue {
             CVPixelBufferLockBaseAddress(pb, .readOnly)

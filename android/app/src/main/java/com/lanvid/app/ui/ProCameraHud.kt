@@ -3,6 +3,7 @@ package com.lanvid.app.ui
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,10 +19,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,18 +40,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lanvid.app.StabilizationLevel
 
 /** Full-screen Pro Cine Tally state received from LanVid Studio (PacketType::kTallyState). */
 enum class TallyStatus { STANDBY, PREVIEW, PROGRAM }
 
 data class ProCameraState(
     val tally: TallyStatus = TallyStatus.STANDBY,
-    val cameraLabel: String = "CAM 1 • Wide",
+    val cameraLabel: String = "CAM 1",
     val remoteRec: Boolean = false,
     val directorSpeaking: Boolean = false,
     val duckingGain: Float = 1.0f,
-    // Manual Camera Deck
+    // Manual Camera Deck & Touch Controls
     val lens: String = "1x",
+    val zoomRatio: Float = 1.0f,
+    val exposureEv: Float = 0.0f,
+    val aeAfLocked: Boolean = false,
     val shutterAngleMode: Boolean = true,
     val shutterAngleDeg: Int = 180,
     val shutterSpeedDenom: Int = 50,
@@ -63,10 +70,11 @@ data class ProCameraState(
     val focusPointA: Float = 0.25f,
     val focusPointB: Float = 0.78f,
     val rackFocusSec: Float = 1.5f,
-    val stabilization: String = "Standard",
+    val stabilizationLevel: StabilizationLevel = StabilizationLevel.STANDARD,
+    val activeStabilization: StabilizationLevel = StabilizationLevel.STANDARD,
     // Viewfinder Assist
     val focusPeaking: Boolean = false,
-    val zebraPct: Int = 0,  // 0=Off, 70, 95
+    val zebraPct: Int = 0,
     val showHistogram: Boolean = true,
     val guideOverlay: String = "16:9",
     // Encoder & Stream Drawer
@@ -75,7 +83,7 @@ data class ProCameraState(
     val codec: String = "H.265",
     val tenBit: Boolean = false,
     val cbrMode: Boolean = true,
-    val bitrateMbps: Float = 25f,
+    val bitrateMbps: Float = 35f,
     val gopMode: String = "1.0s",
     val colorProfile: String = "Rec.709",
     val lutEnabled: Boolean = false,
@@ -98,15 +106,8 @@ data class ProCameraState(
         }
 }
 
-private val CineGlass = Color(0xCC18122B)
-private val CineLavender = Color(0xFFDDD6FE)
-private val CineAccent = Color(0xFF8B5CF6)
-private val CineGreen = Color(0xFF10B981)
-private val CineRed = Color(0xFFEF4444)
-private val CineMuted = Color(0xFFA79ECC)
-
 /**
- * Sub-Top Bar placed cleanly below TopHudBar inside the unified HUD Column (never overlaps status bar or cutout).
+ * Clean neutral LanVid Studio sub-bar (Tally pill + quick Camera / Quality drawer toggles).
  */
 @Composable
 fun ProSubTopBar(
@@ -124,37 +125,21 @@ fun ProSubTopBar(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val tallyBg = when (state.tally) {
-            TallyStatus.PROGRAM -> CineRed
-            TallyStatus.PREVIEW -> CineGreen
-            TallyStatus.STANDBY -> CineGlass
+        val dotColor = when (state.tally) {
+            TallyStatus.PROGRAM -> Studio.red
+            TallyStatus.PREVIEW -> Studio.green
+            TallyStatus.STANDBY -> Studio.text3
         }
         val tallyText = when (state.tally) {
             TallyStatus.PROGRAM -> "PGM"
             TallyStatus.PREVIEW -> "PVW"
             TallyStatus.STANDBY -> "STBY"
         }
-        Surface(
-            color = tallyBg,
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.weight(1f, fill = false),
-        ) {
-            Row(
-                Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(Color.White))
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "${state.cameraLabel} · $tallyText",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
+        StudioStatusPill(
+            dotColor = dotColor,
+            title = "${state.badgeDisplayText} · $tallyText",
+            detail = "${state.stabilizationLevel.title} · ${"%.1f".format(state.zoomRatio)}×"
+        )
 
         Spacer(Modifier.weight(1f))
 
@@ -163,19 +148,19 @@ fun ProSubTopBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (state.directorSpeaking) {
-                Surface(color = CineAccent, shape = RoundedCornerShape(14.dp)) {
+                Surface(color = Studio.accentSoft, shape = RoundedCornerShape(8.dp), border = BorderStroke(0.75.dp, Studio.accent)) {
                     Text(
-                        "DIR IFB",
+                        "Режисер",
                         Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp,
+                        color = Studio.accent,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 10.5.sp,
                         maxLines = 1,
                     )
                 }
             }
             if (state.remoteRec) {
-                Surface(color = CineRed, shape = RoundedCornerShape(14.dp)) {
+                Surface(color = Studio.red, shape = RoundedCornerShape(8.dp)) {
                     Text(
                         "● REC",
                         Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -186,98 +171,156 @@ fun ProSubTopBar(
                     )
                 }
             }
-            CinePill("MANUAL", showManualDeck, onToggleManual)
-            CinePill("ENC", showEncoderDrawer, onToggleEncoder)
+            StudioPill("Камера", showManualDeck, onToggleManual)
+            StudioPill("Якість", showEncoderDrawer, onToggleEncoder)
         }
     }
 }
 
 /**
- * Slide-out Manual Camera Deck rendered inside the center viewfinder Box (never overlaps top/bottom HUD).
+ * LanVid Studio Camera & Multi-Level Stabilization Drawer.
  */
 @Composable
 fun ProManualDeckDrawer(
     state: ProCameraState,
     onStateChange: (ProCameraState) -> Unit,
+    onStabilizationSelected: (StabilizationLevel) -> Unit,
+    onExposureEvChange: (Float) -> Unit,
+    onZoomRatioChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        color = CineGlass,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, CineLavender.copy(alpha = 0.35f)),
+        color = Studio.hudSurface,
+        shape = RoundedCornerShape(17.dp),
+        border = BorderStroke(0.85.dp, Studio.borderStrong),
         modifier = modifier
             .padding(horizontal = 10.dp, vertical = 6.dp)
-            .widthIn(max = 300.dp)
-            .heightIn(max = 360.dp),
+            .widthIn(max = 350.dp)
+            .heightIn(max = 390.dp),
     ) {
         Column(
-            Modifier.padding(12.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.padding(14.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("MANUAL CAMERA DECK", color = CineLavender, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("Камера і стабілізація", color = Studio.text, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
+                Chip("HW: ${state.activeStabilization.title}", if (state.activeStabilization == StabilizationLevel.OFF) Studio.text3 else Studio.green)
+            }
+
+            // 5-Level Image Stabilization Selector
+            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Стабілізація зображення", color = Studio.text2, fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    StabilizationLevel.entries.forEach { lvl ->
+                        StudioPill(lvl.title, state.stabilizationLevel == lvl) {
+                            onStabilizationSelected(lvl)
+                        }
+                    }
+                }
+                Text(state.stabilizationLevel.subtitle, color = Studio.text3, fontSize = 10.5.sp)
+            }
+
+            HorizontalDivider(color = Studio.border)
+
+            // Lens + Continuous Zoom
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Об'єктив і зум", color = Studio.text2, fontSize = 11.5.sp)
+                Text("${"%.1f".format(state.zoomRatio)}×", style = Bm.mono(11.5.sp), color = Studio.accent)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("0.5x", "1x", "2x", "Front").forEach { l ->
-                    CinePill(l, state.lens == l) { onStateChange(state.copy(lens = l)) }
+                listOf("0.5x" to 0.6f, "1x" to 1.0f, "2x" to 2.0f, "3x" to 3.0f).forEach { (lbl, z) ->
+                    StudioPill(lbl, state.lens == lbl) {
+                        onStateChange(state.copy(lens = lbl, zoomRatio = z))
+                        onZoomRatioChange(z)
+                    }
+                }
+                StudioPill("Фронт", state.lens == "Front") {
+                    onStateChange(state.copy(lens = "Front", zoomRatio = 1.0f))
                 }
             }
+            Slider(
+                value = state.zoomRatio.coerceIn(1f, 8f),
+                onValueChange = {
+                    onStateChange(state.copy(zoomRatio = it))
+                    onZoomRatioChange(it)
+                },
+                valueRange = 1f..8f,
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.accent, inactiveTrackColor = Studio.surface3),
+            )
+
+            HorizontalDivider(color = Studio.border)
+
+            // EV Exposure Compensation
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Експозиція (EV)", color = Studio.text2, fontSize = 11.5.sp)
+                Text("%+.1f EV".format(state.exposureEv), style = Bm.mono(11.5.sp), color = Studio.yellow)
+            }
+            Slider(
+                value = state.exposureEv,
+                onValueChange = {
+                    onStateChange(state.copy(exposureEv = it))
+                    onExposureEvChange(it)
+                },
+                valueRange = -3f..3f,
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.accent, inactiveTrackColor = Studio.surface3),
+            )
+
+            // Shutter & ISO
             Text(
-                if (state.shutterAngleMode) "Shutter Angle: ${state.shutterAngleDeg}°"
-                else "Shutter: 1/${state.shutterSpeedDenom}s",
-                color = Color.White, fontSize = 12.sp,
+                if (state.shutterAngleMode) "Затвор: ${state.shutterAngleDeg}°"
+                else "Затвор: 1/${state.shutterSpeedDenom}s",
+                color = Studio.text2, fontSize = 11.5.sp,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(45, 90, 180, 360).forEach { ang ->
-                    CinePill("${ang}°", state.shutterAngleDeg == ang) {
-                        onStateChange(state.copy(shutterAngleMode = true, shutterAngleDeg = ang))
+                    StudioPill("${ang}°", state.shutterAngleDeg == ang && state.shutterLocked) {
+                        onStateChange(state.copy(shutterAngleMode = true, shutterAngleDeg = ang, shutterLocked = true))
                     }
                 }
             }
-            Text("ISO: ${state.iso}", color = Color.White, fontSize = 12.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("ISO ${state.iso}", style = Bm.mono(11.5.sp), color = Studio.text)
+                Text("WB ${state.wbKelvin}K", style = Bm.mono(11.5.sp), color = Studio.text2)
+            }
             Slider(
                 value = state.iso.toFloat(),
                 onValueChange = { onStateChange(state.copy(iso = it.toInt())) },
                 valueRange = 50f..6400f,
-                colors = SliderDefaults.colors(thumbColor = CineLavender, activeTrackColor = CineAccent),
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.accent, inactiveTrackColor = Studio.surface3),
             )
-            Text("WB: ${state.wbKelvin}K · Tint ${state.wbTint}", color = Color.White, fontSize = 12.sp)
             Slider(
                 value = state.wbKelvin.toFloat(),
                 onValueChange = { onStateChange(state.copy(wbKelvin = it.toInt())) },
                 valueRange = 2500f..10000f,
-                colors = SliderDefaults.colors(thumbColor = CineLavender, activeTrackColor = CineAccent),
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.amber, inactiveTrackColor = Studio.surface3),
             )
-            Text("Focus: ${(state.focusDist * 100).toInt()}% (Rack A↔B ${state.rackFocusSec}s)", color = Color.White, fontSize = 12.sp)
+
+            // Manual Focus + Rack A <-> B
+            Text("Фокус: ${(state.focusDist * 100).toInt()}% (Rack A↔B)", color = Studio.text2, fontSize = 11.5.sp)
             Slider(
                 value = state.focusDist,
                 onValueChange = { onStateChange(state.copy(focusDist = it)) },
                 valueRange = 0f..1f,
-                colors = SliderDefaults.colors(thumbColor = CineLavender, activeTrackColor = CineGreen),
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.accent, inactiveTrackColor = Studio.surface3),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CinePill("Set A", false) { onStateChange(state.copy(focusPointA = state.focusDist)) }
-                CinePill("Set B", false) { onStateChange(state.copy(focusPointB = state.focusDist)) }
-                CinePill("Go A↔B", false) {
+                StudioPill("Set A", false) { onStateChange(state.copy(focusPointA = state.focusDist)) }
+                StudioPill("Set B", false) { onStateChange(state.copy(focusPointB = state.focusDist)) }
+                StudioPill("A ↔ B", false) {
                     val target = if (kotlin.math.abs(state.focusDist - state.focusPointA) < 0.05f) state.focusPointB else state.focusPointA
                     onStateChange(state.copy(focusDist = target))
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CinePill("Peaking", state.focusPeaking) { onStateChange(state.copy(focusPeaking = !state.focusPeaking)) }
-                CinePill("Zebra ${if (state.zebraPct == 0) "Off" else "${state.zebraPct}%"}", state.zebraPct > 0) {
-                    val nxt = when (state.zebraPct) { 0 -> 70; 70 -> 95; else -> 0 }
-                    onStateChange(state.copy(zebraPct = nxt))
-                }
-                CinePill("OIS: ${state.stabilization}", state.stabilization != "Off") {
-                    val nxt = when (state.stabilization) { "Off" -> "Standard"; "Standard" -> "Active"; else -> "Off" }
-                    onStateChange(state.copy(stabilization = nxt))
-                }
+                StudioPill("Пікінг", state.focusPeaking) { onStateChange(state.copy(focusPeaking = !state.focusPeaking)) }
             }
         }
     }
 }
 
 /**
- * Slide-out Encoder & Stream Drawer rendered inside the center viewfinder Box.
+ * LanVid Studio Quality & Transmission Drawer (matches ref4 styling).
  */
 @Composable
 fun ProEncoderDrawer(
@@ -286,61 +329,69 @@ fun ProEncoderDrawer(
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        color = CineGlass,
-        shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, CineLavender.copy(alpha = 0.35f)),
+        color = Studio.hudSurface,
+        shape = RoundedCornerShape(17.dp),
+        border = BorderStroke(0.85.dp, Studio.borderStrong),
         modifier = modifier
             .padding(horizontal = 10.dp, vertical = 6.dp)
-            .widthIn(max = 300.dp)
-            .heightIn(max = 360.dp),
+            .widthIn(max = 340.dp)
+            .heightIn(max = 370.dp),
     ) {
         Column(
-            Modifier.padding(12.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.padding(14.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(9.dp),
         ) {
-            Text("ENCODER & STREAM DRAWER", color = CineLavender, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text("Якість і передача", color = Studio.text, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("4K UHD", "1080p", "720p").forEach { r ->
-                    CinePill(r, state.resolution == r) { onStateChange(state.copy(resolution = r)) }
+                listOf("720p", "1080p", "4K UHD").forEach { r ->
+                    StudioPill(r, state.resolution == r) { onStateChange(state.copy(resolution = r)) }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("24", "25", "30", "50", "60").forEach { f ->
-                    CinePill("${f}p", state.fps == f) { onStateChange(state.copy(fps = f)) }
+                listOf("24", "30", "60").forEach { f ->
+                    StudioPill("${f}p", state.fps == f) { onStateChange(state.copy(fps = f)) }
                 }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Spacer(Modifier.width(4.dp))
                 listOf("H.265", "H.264", "DCT").forEach { c ->
-                    CinePill(c, state.codec == c) { onStateChange(state.copy(codec = c)) }
+                    StudioPill(c, state.codec == c) { onStateChange(state.copy(codec = c)) }
                 }
             }
-            Text("Bitrate: ${state.bitrateMbps.toInt()} Mbps (${if (state.cbrMode) "CBR" else "VBR"} · Zero B-Frames)", color = Color.White, fontSize = 12.sp)
+            HorizontalDivider(color = Studio.border)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Бітрейт потоку", color = Studio.text2, fontSize = 12.sp)
+                Text("${state.bitrateMbps.toInt()} Мбіт/с", style = Bm.mono(12.sp), color = Studio.text)
+            }
             Slider(
                 value = state.bitrateMbps,
                 onValueChange = { onStateChange(state.copy(bitrateMbps = it)) },
                 valueRange = 5f..150f,
-                colors = SliderDefaults.colors(thumbColor = CineLavender, activeTrackColor = CineAccent),
+                colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Studio.accent, inactiveTrackColor = Studio.surface3),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CinePill("Wi-Fi 15M", state.bitrateMbps.toInt() == 15) { onStateChange(state.copy(bitrateMbps = 15f)) }
-                CinePill("Studio 50M", state.bitrateMbps.toInt() == 50) { onStateChange(state.copy(bitrateMbps = 50f)) }
-                CinePill("Master 120M", state.bitrateMbps.toInt() == 120) { onStateChange(state.copy(bitrateMbps = 120f)) }
+                StudioPill("Wi-Fi 15M", state.bitrateMbps.toInt() == 15) { onStateChange(state.copy(bitrateMbps = 15f)) }
+                StudioPill("Студія 35M", state.bitrateMbps.toInt() == 35) { onStateChange(state.copy(bitrateMbps = 35f)) }
+                StudioPill("Майстер 80M", state.bitrateMbps.toInt() == 80) { onStateChange(state.copy(bitrateMbps = 80f)) }
             }
+            HorizontalDivider(color = Studio.border)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf("Rec.709", "Flat", "Log").forEach { p ->
-                    CinePill(p, state.colorProfile == p) { onStateChange(state.copy(colorProfile = p)) }
+                    StudioPill(p, state.colorProfile == p) { onStateChange(state.copy(colorProfile = p)) }
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text("10-bit Color / .cube LUT", color = CineMuted, fontSize = 12.sp)
-                Switch(checked = state.lutEnabled, onCheckedChange = { onStateChange(state.copy(lutEnabled = it)) })
+                Text("10-bit Color / LUT", color = Studio.text2, fontSize = 12.sp)
+                Switch(
+                    checked = state.lutEnabled,
+                    onCheckedChange = { onStateChange(state.copy(lutEnabled = it)) },
+                    colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = Studio.accent)
+                )
             }
         }
     }
 }
 
 /**
- * Compact Duplex Intercom Strip (TALK PTT / LATCH / IFB ON) placed sequentially above telemetry in the HUD Column.
+ * Compact LanVid Studio Duplex Intercom Strip (PTT / LATCH / IFB).
  */
 @Composable
 fun ProIntercomStrip(
@@ -351,20 +402,20 @@ fun ProIntercomStrip(
 ) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Surface(
-            color = CineGlass,
-            shape = RoundedCornerShape(20.dp),
-            border = BorderStroke(1.dp, CineLavender.copy(alpha = 0.3f)),
+            color = Studio.hudBar,
+            shape = RoundedCornerShape(999.dp),
+            border = BorderStroke(0.75.dp, Studio.borderStrong),
         ) {
             Row(
-                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 val talking = state.pttHeld || state.latchTalk
                 Box(
                     Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (talking) CineRed else CineAccent)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (talking) Studio.red else Studio.surface2)
                         .pointerInput(state.latchTalk, state.ifbMuted, state.ifbGain) {
                             detectTapGestures(
                                 onPress = {
@@ -376,24 +427,24 @@ fun ProIntercomStrip(
                                 }
                             )
                         }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .padding(horizontal = 12.dp, vertical = 5.dp)
                 ) {
                     Text(
-                        if (talking) "TALKING ●" else "TALK (PTT)",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
+                        if (talking) "Мікрофон ●" else "PTT",
+                        color = if (talking) Color.White else Studio.text,
+                        fontWeight = FontWeight.SemiBold,
                         fontSize = 11.sp,
                         maxLines = 1,
                     )
                 }
 
-                CinePill("LATCH", state.latchTalk) {
+                StudioPill("Latch", state.latchTalk) {
                     val nxt = !state.latchTalk
                     onStateChange(state.copy(latchTalk = nxt))
                     onIntercomChanged(nxt || state.pttHeld, state.ifbMuted, state.ifbGain)
                 }
 
-                CinePill(if (state.ifbMuted) "IFB MUTE" else "IFB ON", !state.ifbMuted) {
+                StudioPill(if (state.ifbMuted) "IFB Вимк" else "IFB Увімк", !state.ifbMuted) {
                     val nxtMuted = !state.ifbMuted
                     onStateChange(state.copy(ifbMuted = nxtMuted))
                     onIntercomChanged(state.latchTalk || state.pttHeld, nxtMuted, state.ifbGain)
@@ -404,8 +455,7 @@ fun ProIntercomStrip(
 }
 
 /**
- * Compact glass badge showing the studio-assigned camera number ("CAM 1", "CAM 2", "A"...)
- * with dynamic Tally border glow (Lavender STBY / Emerald PVW / Red PGM) and tap tooltip.
+ * Compact neutral LanVid Studio camera badge with Tally dot and Studio sync tooltip.
  */
 @Composable
 fun CameraNumberBadge(
@@ -414,54 +464,53 @@ fun CameraNumberBadge(
     modifier: Modifier = Modifier,
 ) {
     var showTooltip by remember { mutableStateOf(false) }
-    val borderColor = when (state.tally) {
-        TallyStatus.PROGRAM -> CineRed
-        TallyStatus.PREVIEW -> CineGreen
-        TallyStatus.STANDBY -> CineAccent
+    val dotColor = when (state.tally) {
+        TallyStatus.PROGRAM -> Studio.red
+        TallyStatus.PREVIEW -> Studio.green
+        TallyStatus.STANDBY -> Studio.accent
     }
     Column(modifier = modifier, horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Surface(
             onClick = { showTooltip = !showTooltip },
-            color = CineGlass,
-            shape = RoundedCornerShape(12.dp),
-            border = BorderStroke(2.dp, borderColor),
-            shadowElevation = 4.dp,
-            modifier = Modifier.heightIn(min = 36.dp),
+            color = Studio.hudBar,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, if (state.tally == TallyStatus.STANDBY) Studio.borderStrong else dotColor),
+            modifier = Modifier.heightIn(min = 32.dp),
         ) {
             Row(
-                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(borderColor))
+                Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
                 Text(
                     state.badgeDisplayText,
-                    color = Color.White,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontSize = 12.sp,
+                    color = Studio.text,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 11.5.sp,
                     maxLines = 1,
                 )
             }
         }
         if (showTooltip) {
             Surface(
-                color = CineGlass,
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, borderColor.copy(alpha = 0.7f)),
+                color = Studio.hudSurface,
+                shape = RoundedCornerShape(11.dp),
+                border = BorderStroke(0.85.dp, Studio.borderStrong),
             ) {
                 Row(
                     Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    val modeTxt = if (state.syncedFixedDelay) "${state.syncedDelayMs} ms" else "Adaptive"
+                    val modeTxt = if (state.syncedFixedDelay) "${state.syncedDelayMs} мс" else "Авто"
                     val msg = if (state.configSynced) {
-                        "Призначено студією: ${state.badgeDisplayText} • Synced $modeTxt"
+                        "Студія: ${state.badgeDisplayText} · $modeTxt"
                     } else {
-                        "Камера: ${state.badgeDisplayText} • Очікування синхронізації"
+                        "Камера: ${state.badgeDisplayText} · Очікування"
                     }
-                    Text(msg, color = CineLavender, fontSize = 10.sp, fontWeight = FontWeight.Medium)
-                    CinePill("Мережа", false) {
+                    Text(msg, color = Studio.text2, fontSize = 10.5.sp, fontWeight = FontWeight.Medium)
+                    StudioPill("Мережа", false) {
                         showTooltip = false
                         onOpenNetwork()
                     }
@@ -472,19 +521,19 @@ fun CameraNumberBadge(
 }
 
 @Composable
-private fun CinePill(label: String, active: Boolean, onClick: () -> Unit) {
+fun StudioPill(label: String, active: Boolean, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        color = if (active) CineAccent else Color(0x99241B44),
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, if (active) CineLavender else Color(0x44DDD6FE)),
+        color = if (active) Studio.accentSoft else Studio.surface2,
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(0.9.dp, if (active) Studio.accent else Studio.borderStrong),
     ) {
         Text(
             label,
-            Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
-            color = Color.White,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-            fontSize = 10.sp,
+            Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            color = if (active) Studio.accent else Studio.text2,
+            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+            fontSize = 11.sp,
             maxLines = 1,
         )
     }

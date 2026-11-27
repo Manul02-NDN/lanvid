@@ -164,6 +164,24 @@ public:
                                   const uint8_t rgba[4] = nullptr);
     void set_slot_config_synced(uint32_t slot, bool synced);
 
+    // ---- Per-slot stereo audio & decoder controls/stats (for OBS / studio clients) ----
+    int pop_slot_audio_pcm16(uint32_t slot, int16_t* out_stereo, int num_frames);
+    void set_slot_audio_config(uint32_t slot, double target_ms, float volume);
+    void set_slot_concealment(uint32_t slot, int conceal_mode);
+    struct SlotRxTelemetry {
+        uint64_t packets_total = 0;
+        uint64_t fec_recovered = 0;
+        uint64_t crc_errors = 0;
+        uint64_t late_packets = 0;
+        uint64_t frames_concealed = 0;
+        uint64_t audio_packets = 0;
+        double audio_buffer_ms = 0.0;
+        double packet_loss_pct = 0.0;
+        bool decoder_is_hw = false;
+        std::string decoder_backend;
+    };
+    SlotRxTelemetry slot_rx_telemetry(uint32_t slot) const;
+
     // Feeds one datagram as if it arrived on the base port from `src_ip:src_port` (tests / relays).
     void inject_datagram(const uint8_t* data, size_t len, uint32_t src_ip_be, uint16_t src_port);
 
