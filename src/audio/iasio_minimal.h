@@ -23,7 +23,12 @@ enum {
 
 typedef double ASIOSampleRate;
 typedef long ASIOSampleType;
-enum { ASIOSTInt32LSB = 18, ASIOSTFloat32LSB = 19 };
+enum {
+    ASIOSTInt16LSB = 16,
+    ASIOSTInt24LSB = 17,
+    ASIOSTInt32LSB = 18,
+    ASIOSTFloat32LSB = 19
+};
 
 struct ASIOSamples { unsigned long hi; unsigned long lo; };
 struct ASIOTimeStamp { unsigned long hi; unsigned long lo; };
