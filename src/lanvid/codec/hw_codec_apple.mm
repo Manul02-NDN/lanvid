@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -534,8 +535,27 @@ private:
         if (!self->current_out_) return;
 
         CVPixelBufferLockBaseAddress(img_buf, kCVPixelBufferLock_ReadOnly);
-        const int w = int(CVPixelBufferGetWidth(img_buf));
-        const int h = int(CVPixelBufferGetHeight(img_buf));
+        const int buf_w = int(CVPixelBufferGetWidth(img_buf));
+        const int buf_h = int(CVPixelBufferGetHeight(img_buf));
+        int crop_x = 0, crop_y = 0, w = buf_w, h = buf_h;
+        const CGRect clean = CVImageBufferGetCleanRect(img_buf);
+        if (clean.size.width > 0 && clean.size.height > 0) {
+            const int cx = std::max(0, int(std::lround(clean.origin.x)));
+            const int cy = std::max(0, int(std::lround(clean.origin.y)));
+            const int cw = int(std::lround(clean.size.width));
+            const int ch = int(std::lround(clean.size.height));
+            if (cw > 0 && ch > 0 && cx + cw <= buf_w && cy + ch <= buf_h) {
+                crop_x = cx;
+                crop_y = cy;
+                w = cw;
+                h = ch;
+            }
+        }
+        if (self->fmt_desc_) {
+            const CMVideoDimensions dims = CMVideoFormatDescriptionGetDimensions(self->fmt_desc_);
+            if (dims.width > 0 && dims.width < w && crop_x + dims.width <= buf_w) w = int(dims.width);
+            if (dims.height > 0 && dims.height < h && crop_y + dims.height <= buf_h) h = int(dims.height);
+        }
         const size_t stride = CVPixelBufferGetBytesPerRow(img_buf);
         const auto* src = static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(img_buf));
         if (src && w > 0 && h > 0) {
@@ -544,11 +564,11 @@ private:
                 dst.allocate(w, h, self->output_order_);
             }
             const bool swap_rb = (self->output_order_ == PixelOrder::kRGBA);
-            if (!swap_rb && stride == size_t(w) * 4) {
+            if (!swap_rb && crop_x == 0 && crop_y == 0 && stride == size_t(w) * 4) {
                 std::memcpy(dst.data.data(), src, size_t(w) * size_t(h) * 4);
             } else {
                 for (int y = 0; y < h; ++y) {
-                    const uint8_t* srow = src + size_t(y) * stride;
+                    const uint8_t* srow = src + size_t(crop_y + y) * stride + size_t(crop_x) * 4;
                     uint8_t* drow = dst.row(y);
                     if (!swap_rb) {
                         std::memcpy(drow, srow, size_t(w) * 4);

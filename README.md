@@ -1,4 +1,4 @@
-# LanVid Video SDK (`v3.0.0`) & CrossLink Audio SDK (`v1.0.0`)
+# LanVid Video SDK (`v3.1.0`) & CrossLink Audio SDK (`v1.0.0`)
 
 [![CI Build & Test](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/actions/workflows/ci.yml)
 [![Release Artifacts](https://github.com/Manul02-NDN/lanvid/actions/workflows/release.yml/badge.svg)](https://github.com/Manul02-NDN/lanvid/releases)
@@ -9,7 +9,7 @@
 
 | Protocol / SDK | Version | Target Library / CMake Package | Capabilities |
 |---|---:|---|---|
-| **LanVid** *(Video Protocol)* | `v3.0.0` | `liblanvid_core` / `LanVidSDK::Video` | Ultra-low-latency LAN Video (`LVC DCT` AVX2/NEON, HW `H.264`/`H.265`, XOR FEC, AIMD/PLI), **2-channel stereo audio** (48 kHz PCM16/F32), Multi-Cam (16 slots), `VideoPlayoutBuffer`, ISO Recorder, Virtual Camera `VideoBus`, Tally & Duplex Intercom (`lv_*` C ABI, `lanvid::`, `LanVidKit`, `lanvid_sdk.py`, `com.lanvid.sdk`) |
+| **LanVid** *(Video Protocol)* | `v3.1.0` | `liblanvid_core` / `LanVidSDK::Video` | Ultra-low-latency LAN Video (`LVC DCT` AVX2/NEON, HW `H.264`/`H.265`, XOR FEC, AIMD/PLI), **2-channel stereo audio** (48 kHz PCM16/F32), Multi-Cam (16 slots), `VideoPlayoutBuffer`, ISO Recorder, Virtual Camera `VideoBus`, Tally & Duplex Intercom (`lv_*` C ABI, `lanvid::`, `LanVidKit`, `lanvid_sdk.py`, `com.lanvid.sdk`) |
 | **CrossLink** *(Audio Protocol)* | `v1.0.0` | `libcrosslink_core` / `CrossLinkSDK::Audio` | 64-channel phase-coherent studio AoIP (48/96 kHz, `MasterClock`, XOR FEC + NACK, 1+1 Wi-Fi redundancy, Dual-NIC failover), Full-Duplex 64×64 DAW SHM Bus (`CrossLinkAudioBus_v1`), `ChannelPatchbay`, `MultiDeviceAudioMatrix`, MIDI 2.0 over IP, `ControlSync`, Personal Monitor Bus, Layer-2 Grid DSP (`cl_*` C ABI, `crosslink::`, `CrossLinkKit`, `crosslink_sdk.py`, `com.crosslink.sdk`) |
 
 Both libraries use isolated internal namespaces (`lv_sys` vs `cl_sys`), hidden symbol visibility (only `lv_*` or `cl_*` exported), and separate OS frameworks (zero CoreAudio/CoreMIDI in `LanVid`; zero VideoToolbox/D3D11/FFmpeg in `CrossLink`), so you can install and link **either protocol standalone or both together in the same process** with zero symbol collisions.
@@ -61,7 +61,7 @@ python3 sdk/build_sdk.py --protocol audio --verify-client
 ### macOS Selectable Universal `.pkg` / `.dmg` Installer
 ```bash
 ./sdk/apple/build_macos_pkg.sh
-# Produces dist/apple/LanVidCrossLinkSDK-v3.0.0-macOS.pkg & .dmg
+# Produces dist/apple/LanVidCrossLinkSDK-v3.1.0-macOS.pkg & .dmg
 # macOS Installer Customize screen lets users check LanVid Video, CrossLink Audio, or both!
 ```
 
@@ -71,14 +71,14 @@ python3 sdk/build_sdk.py --protocol audio --verify-client
 
 ```text
 lanvid/
-├── CMakeLists.txt           # Selectable build: ALL / VIDEO (LanVid v3.0.0) / AUDIO (CrossLink v1.0.0)
+├── CMakeLists.txt           # Selectable build: ALL / VIDEO (LanVid v3.1.0) / AUDIO (CrossLink v1.0.0)
 ├── scripts/                 # Selectable interactive installers (install_sdk.sh, install_sdk.ps1)
 ├── src/
 │   ├── common/              # Protocol-neutral primitives (clock, CRC32C, CPU SIMD, RT threads, UDP sockets, NICs)
 │   ├── lanvid/              # Pure Video + 2ch Stereo Audio core (codec, net, audio, video, platform, sources, core)
 │   └── crosslink/           # Pure 64ch AoIP + MIDI 2.0 + Monitor + Grid core (net, audio, midi, grid, core)
 ├── sdk/
-│   ├── include/lanvid/      # LanVid Video C ABI headers (v3.0.0)
+│   ├── include/lanvid/      # LanVid Video C ABI headers (v3.1.0)
 │   ├── include/crosslink/   # CrossLink Audio C ABI headers (v1.0.0)
 │   ├── cpp/                 # Header-only C++17/20 RAII wrappers (lanvid.hpp, crosslink.hpp)
 │   ├── python/              # Zero-dependency ctypes/NumPy wrappers (lanvid_sdk.py, crosslink_sdk.py)

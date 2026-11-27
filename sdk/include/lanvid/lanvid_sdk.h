@@ -1,6 +1,6 @@
 #pragma once
 /*
- * LanVid Video SDK — Main Umbrella Header (v3.0.0)
+ * LanVid Video SDK — Main Umbrella Header (v3.1.0)
  *
  * Self-contained C ABI for ultra-low-latency LAN video + 2-channel stereo audio streaming,
  * Multi-Cam reception, ISO recording, virtual camera VideoBus, and camera Tally/Intercom.

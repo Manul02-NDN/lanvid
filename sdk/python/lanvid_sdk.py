@@ -1,5 +1,5 @@
 """
-LanVid Video SDK v3.0.0 — Python ctypes + optional NumPy Bindings (Windows / Linux / macOS)
+LanVid Video SDK v3.1.0 — Python ctypes + optional NumPy Bindings (Windows / Linux / macOS)
 
 Pure ultra-low-latency LAN Video + 2-channel Stereo Audio protocol.
 For 64-channel AoIP, MIDI 2.0, Personal Monitor Bus, and Layer-2 Grid, see `crosslink_sdk.py`.
@@ -24,7 +24,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 # ---- Constants matching sdk/include/lanvid/lanvid_export.h & lanvid_types.h ----
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 LV_SDK_VERSION_MAJOR = 3
 LV_SDK_VERSION_MINOR = 0
 LV_SDK_VERSION_PATCH = 0

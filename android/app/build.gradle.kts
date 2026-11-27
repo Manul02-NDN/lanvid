@@ -18,8 +18,8 @@ android {
         applicationId = "com.lanvid.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 270
-        versionName = "2.7.0"
+        versionCode = 310
+        versionName = "3.1.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

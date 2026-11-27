@@ -1,5 +1,5 @@
 """
-LanVid Video (v3.0.0) & CrossLink Audio (v1.0.0) Unified Cross-Platform SDK Packager
+LanVid Video (v3.1.0) & CrossLink Audio (v1.0.0) Unified Cross-Platform SDK Packager
 
 Supports selectable protocol installation / packaging:
   --protocol all     Both LanVid Video SDK + CrossLink Audio SDK (default)
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-LANVID_VERSION = "3.0.0"
+LANVID_VERSION = "3.1.0"
 CROSSLINK_VERSION = "1.0.0"
 
 

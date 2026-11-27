@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Interactive & CLI Selectable SDK Installer (macOS / Linux)
 # Lets the user install:
-#   1) All together       — LanVid Video SDK (v3.0.0) + CrossLink Audio SDK (v1.0.0)
+#   1) All together       — LanVid Video SDK (v3.1.0) + CrossLink Audio SDK (v1.0.0)
 #   2) Video protocol     — LanVid Video + 2ch Stereo Audio SDK only
 #   3) Audio protocol     — CrossLink 64ch AoIP + MIDI 2.0 + Monitor + Grid SDK only
 #
@@ -32,7 +32,7 @@ if [ -z "$MODE" ]; then
   echo "================================================================"
   echo "  LanVid Video & CrossLink Audio SDK — Вибір протоколів"
   echo "================================================================"
-  echo "  1) Встановити ВСЕ разом (LanVid Video v3.0.0 + CrossLink Audio v1.0.0)"
+  echo "  1) Встановити ВСЕ разом (LanVid Video v3.1.0 + CrossLink Audio v1.0.0)"
   echo "  2) Тільки відеопротокол LanVid (Video + 2ch Stereo Audio)"
   echo "  3) Тільки аудіопротокол CrossLink (64ch AoIP + MIDI 2.0 + Grid)"
   echo "----------------------------------------------------------------"

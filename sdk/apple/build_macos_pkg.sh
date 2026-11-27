@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LanVid Video SDK (v3.0.0) & CrossLink Audio SDK (v1.0.0) macOS Universal Installer Builder
+# LanVid Video SDK (v3.1.0) & CrossLink Audio SDK (v1.0.0) macOS Universal Installer Builder
 # Produces a single macOS .pkg & .dmg where the user can interactively choose:
 #   - Install Both (LanVid Video + CrossLink Audio) [default]
 #   - Install LanVid Video SDK only (Video + 2-ch Stereo Audio)
@@ -10,9 +10,9 @@
 
 set -euo pipefail
 
-LANVID_VERSION="3.0.0"
+LANVID_VERSION="3.1.0"
 CROSSLINK_VERSION="1.0.0"
-BUNDLE_VERSION="3.0.0"
+BUNDLE_VERSION="3.1.0"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLE_DIR="$ROOT/sdk/apple"
@@ -255,7 +255,7 @@ if command -v crosslink-sdk-info >/dev/null 2>&1; then
 fi
 if [ "$FOUND" -eq 0 ]; then
   echo "Neither LanVid Video SDK nor CrossLink Audio SDK is installed yet."
-  echo "Double-click LanVidCrossLinkSDK-v3.0.0-macOS.pkg first."
+  echo "Double-click LanVidCrossLinkSDK-v3.1.0-macOS.pkg first."
 fi
 read -r -p "Press Enter to close..."
 VEOF

@@ -1,6 +1,6 @@
 name: Release Artifacts
 
-# Tag push `v*` (or manual run) builds LanVid Video SDK (v3.0.0), CrossLink Audio SDK (v1.0.0),
+# Tag push `v*` (or manual run) builds LanVid Video SDK (v3.1.0), CrossLink Audio SDK (v1.0.0),
 # Combined SDK (Windows / Linux / Apple / Android), and LanVid Camera Android APK.
 
 on:

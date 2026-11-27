@@ -3,11 +3,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PKG_NAME="LanVidCrossLinkSDK-v3.0.0-macOS.pkg"
+PKG_NAME="LanVidCrossLinkSDK-v3.1.0-macOS.pkg"
 PKG_NEARBY="$HERE/$PKG_NAME"
 
 echo "============================================================"
-echo "  LanVid Video (v3.0.0) & CrossLink Audio (v1.0.0) Installer"
+echo "  LanVid Video (v3.1.0) & CrossLink Audio (v1.0.0) Installer"
 echo "============================================================"
 
 if [ -f "$PKG_NEARBY" ]; then

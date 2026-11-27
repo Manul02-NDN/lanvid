@@ -162,11 +162,11 @@ build_protocol_xcframework() {
 
 case "$PROTOCOL" in
   all)
-    build_protocol_xcframework "VIDEO" "lanvid_core"    "LanVidCore"    "com.lanvid.LanVidCore"       "3.0.0" "lanvid"    "module.modulemap"
+    build_protocol_xcframework "VIDEO" "lanvid_core"    "LanVidCore"    "com.lanvid.LanVidCore"       "3.1.0" "lanvid"    "module.modulemap"
     build_protocol_xcframework "AUDIO" "crosslink_core" "CrossLinkCore" "com.crosslink.CrossLinkCore" "1.0.0" "crosslink" "crosslink_module.modulemap"
     ;;
   video)
-    build_protocol_xcframework "VIDEO" "lanvid_core"    "LanVidCore"    "com.lanvid.LanVidCore"       "3.0.0" "lanvid"    "module.modulemap"
+    build_protocol_xcframework "VIDEO" "lanvid_core"    "LanVidCore"    "com.lanvid.LanVidCore"       "3.1.0" "lanvid"    "module.modulemap"
     ;;
   audio)
     build_protocol_xcframework "AUDIO" "crosslink_core" "CrossLinkCore" "com.crosslink.CrossLinkCore" "1.0.0" "crosslink" "crosslink_module.modulemap"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LanVid Video SDK v3.0.0 — macOS component preinstall
+# LanVid Video SDK v3.1.0 — macOS component preinstall
 # Strictly manages ONLY LanVid files (never touches /usr/local/CrossLinkSDK!).
 set -euo pipefail
 

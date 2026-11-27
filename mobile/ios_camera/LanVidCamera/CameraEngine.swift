@@ -102,7 +102,7 @@ final class IntercomAudioController {
             self.shouldRun = false
             self.routeDebounceWork?.cancel()
             self.routeDebounceWork = nil
-            self.cleanupOnQueue()
+            self.cleanupOnQueue(deactivateSession: true)
         }
     }
 
@@ -322,7 +322,7 @@ final class IntercomAudioController {
         }
     }
 
-    private func cleanupOnQueue() {
+    private func cleanupOnQueue(deactivateSession: Bool = false) {
         if hasInstalledTap {
             audioEngine.inputNode.removeTap(onBus: 0)
             hasInstalledTap = false
@@ -340,6 +340,9 @@ final class IntercomAudioController {
         _micPeakDbfs = -60.0
         _ifbPeakDbfs = -60.0
         levelLock.unlock()
+        if deactivateSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     private func handleRouteChangeOnQueue(rawReason: UInt?) {
@@ -410,7 +413,8 @@ final class CameraEngine: NSObject, ObservableObject {
         return cameraLabel.isEmpty ? "CAM A" : cameraLabel
     }
 
-    // MARK: - Tally & Duplex Intercom
+    // MARK: - Tally & Duplex Intercom (independent of video streaming!)
+    @Published var isIntercomActive = false
     @Published var tallyState: ProTallyState = .standby
     @Published var remoteRec = false
     @Published var directorSpeaking = false
@@ -551,6 +555,7 @@ final class CameraEngine: NSObject, ObservableObject {
     private var initialRegisterTask: Task<Void, Never>?
     private var activeStreamIp: String = ""
     private var activeVideoPort: Int = 0
+    private var activeTallyIp: String = ""
     private var activeTallyPort: Int = 0
     private var senderGeneration: UInt64 = 0
     private let senderLifecycleQueue = DispatchQueue(label: "com.manul02.lanvid.camera.sender.lifecycle", qos: .userInitiated)
@@ -801,21 +806,28 @@ final class CameraEngine: NSObject, ObservableObject {
 
     func selectStudio(_ studio: DiscoveredStudio) {
         let wasStreaming = isStreaming && !isDemoMode
-        let changed = (destIp != studio.host || videoPort != Int(studio.videoPort) || tallyPort != Int(studio.tallyPort))
+        let wasIntercom = isIntercomActive && !isDemoMode
+        let videoChanged = (destIp != studio.host || videoPort != Int(studio.videoPort))
+        let tallyChanged = (destIp != studio.host || tallyPort != Int(studio.tallyPort))
         destIp = studio.host
         videoPort = Int(studio.videoPort)
         tallyPort = Int(studio.tallyPort)
         statusText = tr("Обрано студію: ", "Selected studio: ") + studio.name
         showTouchToast(studio.name, icon: "desktopcomputer")
-        if wasStreaming && changed {
+        if wasStreaming && (videoChanged || tallyChanged) {
             startLiveStreamingAuthorized()
+        } else if wasIntercom && tallyChanged {
+            _ = ensureStudioControlLink(ip: studio.host, port: tallyPort, forceReconnect: true)
+            statusText = tr("Інтерком → ", "Intercom → ") + "\(studio.host):\(tallyPort)"
         }
     }
 
     func startDemoCineStudio(tally: ProTallyState = .preview, mode: DuoMode = .singleHUD) {
+        stopIntercom(silent: true)
         stopStreaming(keepPreview: false)
         isDemoMode = true
         isStreaming = true
+        isIntercomActive = true
         isPreviewActive = true
         UIApplication.shared.isIdleTimerDisabled = true
         streamStartWallTime = CACurrentMediaTime()
@@ -862,6 +874,7 @@ final class CameraEngine: NSObject, ObservableObject {
 
     func exitDemoMode() {
         isDemoMode = false
+        stopIntercom(silent: true)
         stopStreaming(keepPreview: false)
         statusText = tr("Демо завершено • Готово до підключення", "Demo ended • Ready to connect")
         browser.start(localRole: duoRole, localLabel: cameraLabel, demoMode: false)
@@ -1403,6 +1416,292 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Shared Studio Control Link (:5022 Tally / ConfigSync / Intercom)
+
+    @discardableResult
+    private func ensureStudioControlLink(ip: String, port: Int, forceReconnect: Bool = false) -> Bool {
+        let cleanIp = ip.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanIp.isEmpty else { return false }
+
+        tallyLock.lock()
+        let existing = tallyHandle
+        tallyLock.unlock()
+
+        if existing != nil && !forceReconnect && activeTallyIp == cleanIp && activeTallyPort == port {
+            syncIntercomState()
+            if tallyPollTimer == nil {
+                startTallyPollTimer()
+            }
+            sendLocalConfigSyncToStudio()
+            return true
+        }
+
+        // Tear down stale handle before reconnecting to a new IP/port
+        tallyPollTimer?.cancel()
+        tallyPollTimer = nil
+        tallyLock.lock()
+        let oldTally = tallyHandle
+        tallyHandle = nil
+        tallyLock.unlock()
+        if let old = oldTally {
+            lv_tally_intercom_destroy(old)
+        }
+
+        let th = cleanIp.withCString { ipC in
+            cameraLabel.withCString { lblC in
+                lv_tally_intercom_create_camera(ipC, UInt16(clamping: port), cameraId, lblC)
+            }
+        }
+        guard let th else {
+            activeTallyIp = ""
+            activeTallyPort = 0
+            return false
+        }
+
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        lv_camera_set_tally_callback(th, { statePtr, userData in
+            guard let statePtr, let userData else { return }
+            let st = statePtr.pointee
+            let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
+            let nextTally = ProTallyState(rawValue: Int(st.tally_state)) ?? .standby
+            let nextRec = (st.flags & 0x01) != 0
+            Task { @MainActor in
+                if engine.tallyState != nextTally { engine.tallyState = nextTally }
+                if engine.remoteRec != nextRec { engine.remoteRec = nextRec }
+            }
+        }, ctx)
+        lv_camera_set_control_callback(th, { ctrlPtr, userData in
+            guard let ctrlPtr, let userData else { return }
+            let ctrl = ctrlPtr.pointee
+            let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
+            Task { @MainActor in
+                engine.applyRemoteStudioControl(ctrl)
+            }
+        }, ctx)
+        lv_tally_intercom_set_video_config_sync_callback(th, { cfgPtr, userData in
+            guard let cfgPtr, let userData else { return }
+            let cfg = cfgPtr.pointee
+            let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
+            Task { @MainActor in
+                engine.applyRemoteVideoConfigSync(cfg)
+            }
+        }, ctx)
+
+        tallyLock.lock()
+        tallyHandle = th
+        tallyLock.unlock()
+        activeTallyIp = cleanIp
+        activeTallyPort = port
+
+        syncIntercomState()
+        startTallyPollTimer()
+
+        // Immediately register camera_id & video profile with Studio / LanVid Monitor so Tally & Intercom bind instantly!
+        sendLocalConfigSyncToStudio()
+        initialRegisterTask?.cancel()
+        initialRegisterTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled, let self, (self.isStreaming || self.isIntercomActive), !self.isDemoMode else { return }
+            self.sendLocalConfigSyncToStudio()
+        }
+        return true
+    }
+
+    private func teardownStudioControlLinkIfUnused() {
+        guard !isStreaming && !isIntercomActive else { return }
+        configSyncDebounceTask?.cancel()
+        configSyncDebounceTask = nil
+        initialRegisterTask?.cancel()
+        initialRegisterTask = nil
+        lastRemoteConfigSyncRev = 0
+        tallyPollTimer?.cancel()
+        tallyPollTimer = nil
+
+        tallyLock.lock()
+        let oldTally = tallyHandle
+        tallyHandle = nil
+        isMicTalkOpen = false
+        isIfbListenOpen = false
+        tallyLock.unlock()
+        if let t = oldTally {
+            lv_tally_intercom_destroy(t)
+        }
+        activeTallyIp = ""
+        activeTallyPort = 0
+
+        if !isDemoMode {
+            tallyState = .standby
+            remoteRec = false
+            directorSpeaking = false
+            duckingGain = 1.0
+        }
+    }
+
+    private func updateIdleTimerAndTelemetry() {
+        let keepAlive = isStreaming || isIntercomActive || isDemoMode
+        UIApplication.shared.isIdleTimerDisabled = keepAlive
+        if keepAlive {
+            if tickTimer == nil {
+                startTelemetryTimer()
+            }
+        } else {
+            tickTimer?.invalidate()
+            tickTimer = nil
+        }
+    }
+
+    private func resolveCleanStudioIp() -> String {
+        var cleanIp = destIp.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanIp.isEmpty, let discovered = browser.studios.first {
+            cleanIp = discovered.host
+            destIp = discovered.host
+            videoPort = Int(discovered.videoPort)
+            tallyPort = Int(discovered.tallyPort)
+        } else if cleanIp != destIp {
+            destIp = cleanIp
+        }
+        return cleanIp
+    }
+
+    // MARK: - Independent Duplex Intercom Lifecycle (works WITH or WITHOUT video stream!)
+
+    func toggleIntercom() {
+        selectionFeedback.selectionChanged()
+        if isDemoMode {
+            if isIntercomActive {
+                isIntercomActive = false
+                if latchActive { latchActive = false }
+                if pttActive { pttActive = false }
+                showTouchToast(tr("Інтерком вимкнено", "Intercom OFF"), icon: "speaker.slash")
+            } else {
+                isIntercomActive = true
+                showTouchToast(tr("Інтерком увімкнено", "Intercom ON"), icon: "headphones")
+            }
+            return
+        }
+        if isIntercomActive {
+            stopIntercom()
+        } else {
+            startIntercom()
+        }
+    }
+
+    func startIntercom(activatePtt: Bool = false, activateLatch: Bool = false, forceIfbOn: Bool = false) {
+        if isDemoMode {
+            isIntercomActive = true
+            if forceIfbOn { ifbEnabled = true }
+            if activateLatch { latchActive = true }
+            else if activatePtt { pttActive = true }
+            showTouchToast(tr("Інтерком увімкнено", "Intercom ON"), icon: "headphones")
+            return
+        }
+
+        let aStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if aStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                Task { @MainActor in
+                    self?.startIntercomAuthorized(activatePtt: activatePtt, activateLatch: activateLatch, forceIfbOn: forceIfbOn)
+                }
+            }
+            return
+        }
+        startIntercomAuthorized(activatePtt: activatePtt, activateLatch: activateLatch, forceIfbOn: forceIfbOn)
+    }
+
+    private func startIntercomAuthorized(activatePtt: Bool = false, activateLatch: Bool = false, forceIfbOn: Bool = false) {
+        let cleanIp = resolveCleanStudioIp()
+        guard !cleanIp.isEmpty else {
+            statusText = tr("Вкажіть IP-адресу LanVid Studio", "Enter LanVid Studio IP address")
+            showTouchToast(tr("Вкажіть IP студії", "Enter Studio IP"), icon: "network")
+            return
+        }
+
+        isIntercomActive = true
+        if forceIfbOn { ifbEnabled = true }
+        if activateLatch {
+            latchActive = true
+        } else if activatePtt {
+            pttActive = true
+        }
+
+        let ok = ensureStudioControlLink(ip: cleanIp, port: tallyPort)
+        if !ok {
+            isIntercomActive = false
+            if latchActive { latchActive = false }
+            if pttActive { pttActive = false }
+            statusText = tr("Помилка запуску інтеркому", "Failed to start intercom")
+            return
+        }
+
+        intercomAudio.start()
+        syncIntercomState()
+        updateIdleTimerAndTelemetry()
+
+        if !isStreaming {
+            streamStartWallTime = CACurrentMediaTime()
+            statusText = tr("Інтерком → ", "Intercom → ") + "\(cleanIp):\(tallyPort)"
+        }
+        let micDenied = AVCaptureDevice.authorizationStatus(for: .audio) == .denied
+            || AVCaptureDevice.authorizationStatus(for: .audio) == .restricted
+        showTouchToast(
+            micDenied
+                ? tr("Інтерком: лише прослуховування", "Intercom: Listen Only (No Mic)")
+                : tr("Інтерком увімкнено", "Intercom ON"),
+            icon: "headphones"
+        )
+    }
+
+    func stopIntercom(silent: Bool = false) {
+        let wasActive = isIntercomActive
+        isIntercomActive = false
+        if latchActive { latchActive = false }
+        if pttActive { pttActive = false }
+        intercomAudio.stop()
+        syncIntercomState()
+        teardownStudioControlLinkIfUnused()
+        updateIdleTimerAndTelemetry()
+
+        if !isStreaming && !isDemoMode {
+            statusText = tr("Готово • Інтерком вимкнено", "Ready • Intercom off")
+        }
+        if wasActive && !silent {
+            showTouchToast(tr("Інтерком вимкнено", "Intercom OFF"), icon: "speaker.slash")
+        }
+    }
+
+    func togglePtt() {
+        lightImpact.impactOccurred()
+        if !isIntercomActive {
+            startIntercom(activatePtt: true)
+            return
+        }
+        if latchActive {
+            latchActive = false
+        } else {
+            pttActive.toggle()
+        }
+    }
+
+    func toggleLatch() {
+        lightImpact.impactOccurred()
+        if !isIntercomActive {
+            startIntercom(activateLatch: true)
+            return
+        }
+        latchActive.toggle()
+    }
+
+    func toggleIfb() {
+        lightImpact.impactOccurred()
+        if !isIntercomActive {
+            startIntercom(forceIfbOn: true)
+            return
+        }
+        ifbEnabled.toggle()
+    }
+
+    // MARK: - Live Video Streaming (independent of Intercom!)
+
     func startLiveStreaming() {
         if duoMode != .duoCompanion {
             let vStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -1423,25 +1722,34 @@ final class CameraEngine: NSObject, ObservableObject {
                 return
             }
         }
-        let aStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        if aStatus == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
-                Task { @MainActor in self?.startLiveStreamingAuthorized() }
-            }
-            return
-        }
         startLiveStreamingAuthorized()
     }
 
+    private func stopVideoSenderOnly() {
+        senderGeneration &+= 1
+        senderLock.lock()
+        let oldSender = senderHandle
+        senderHandle = nil
+        senderLock.unlock()
+        if let s = oldSender {
+            senderLifecycleQueue.async {
+                lv_sender_stop(s)
+                lv_sender_destroy(s)
+            }
+        }
+    }
+
     private func startLiveStreamingAuthorized() {
-        stopStreaming(keepPreview: true)
+        stopVideoSenderOnly()
         isDemoMode = false
         lastRemoteConfigSyncRev = 0
-        senderGeneration &+= 1
         browser.pauseActiveSweep()
 
-        let cleanIp = destIp.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleanIp != destIp { destIp = cleanIp }
+        let cleanIp = resolveCleanStudioIp()
+        guard !cleanIp.isEmpty else {
+            statusText = tr("Вкажіть IP-адресу LanVid Studio", "Enter LanVid Studio IP address")
+            return
+        }
 
         if let s = lv_sender_create() {
             var cfg = LV_SenderConfig()
@@ -1476,92 +1784,38 @@ final class CameraEngine: NSObject, ObservableObject {
             return
         }
 
-        let th = cleanIp.withCString { ipC in
-            cameraLabel.withCString { lblC in
-                lv_tally_intercom_create_camera(ipC, UInt16(clamping: tallyPort), cameraId, lblC)
-            }
-        }
-        if let th {
-            let ctx = Unmanaged.passUnretained(self).toOpaque()
-            lv_camera_set_tally_callback(th, { statePtr, userData in
-                guard let statePtr, let userData else { return }
-                let st = statePtr.pointee
-                let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
-                let nextTally = ProTallyState(rawValue: Int(st.tally_state)) ?? .standby
-                let nextRec = (st.flags & 0x01) != 0
-                Task { @MainActor in
-                    if engine.tallyState != nextTally { engine.tallyState = nextTally }
-                    if engine.remoteRec != nextRec { engine.remoteRec = nextRec }
-                }
-            }, ctx)
-            lv_camera_set_control_callback(th, { ctrlPtr, userData in
-                guard let ctrlPtr, let userData else { return }
-                let ctrl = ctrlPtr.pointee
-                let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in
-                    engine.applyRemoteStudioControl(ctrl)
-                }
-            }, ctx)
-            lv_tally_intercom_set_video_config_sync_callback(th, { cfgPtr, userData in
-                guard let cfgPtr, let userData else { return }
-                let cfg = cfgPtr.pointee
-                let engine = Unmanaged<CameraEngine>.fromOpaque(userData).takeUnretainedValue()
-                Task { @MainActor in
-                    engine.applyRemoteVideoConfigSync(cfg)
-                }
-            }, ctx)
-
-            tallyLock.lock()
-            tallyHandle = th
-            tallyLock.unlock()
-            syncIntercomState()
-            startTallyPollTimer()
-
-            // Immediately register camera_id & video profile with Studio / LanVid Monitor so Tally binds instantly!
-            sendLocalConfigSyncToStudio()
-            initialRegisterTask?.cancel()
-            initialRegisterTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 450_000_000)
-                guard !Task.isCancelled, let self, self.isStreaming, !self.isDemoMode else { return }
-                self.sendLocalConfigSyncToStudio()
-            }
-        }
-
         if duoMode != .duoCompanion {
             configureAndStartCapture(reuseIfMatching: true)
         }
-        intercomAudio.start()
         activeStreamIp = cleanIp
         activeVideoPort = videoPort
-        activeTallyPort = tallyPort
         streamStartWallTime = CACurrentMediaTime()
         isStreaming = true
-        UIApplication.shared.isIdleTimerDisabled = true
+        // Reuse existing :5022 control socket if Intercom already opened it to the same host, or open for Tally/Sync!
+        _ = ensureStudioControlLink(ip: cleanIp, port: tallyPort)
         statusText = "\(resolution.rawValue) \(fps)p \(codec.shortName) → \(cleanIp):\(videoPort)"
-        startTelemetryTimer()
+        updateIdleTimerAndTelemetry()
     }
 
     func reconnectIfEndpointChanged() {
-        guard isStreaming && !isDemoMode else { return }
+        guard !isDemoMode else { return }
         let cleanIp = destIp.trimmingCharacters(in: .whitespacesAndNewlines)
         if cleanIp != destIp { destIp = cleanIp }
         guard !cleanIp.isEmpty else { return }
-        if cleanIp != activeStreamIp || videoPort != activeVideoPort || tallyPort != activeTallyPort {
+
+        let videoChanged = (cleanIp != activeStreamIp || videoPort != activeVideoPort)
+        let tallyChanged = (cleanIp != activeTallyIp || tallyPort != activeTallyPort)
+
+        if isStreaming && (videoChanged || tallyChanged) {
             startLiveStreamingAuthorized()
+        } else if isIntercomActive && tallyChanged {
+            _ = ensureStudioControlLink(ip: cleanIp, port: tallyPort, forceReconnect: true)
+            statusText = tr("Інтерком → ", "Intercom → ") + "\(cleanIp):\(tallyPort)"
         }
     }
 
     func stopStreaming(keepPreview: Bool = true) {
-        configSyncDebounceTask?.cancel()
-        configSyncDebounceTask = nil
-        initialRegisterTask?.cancel()
-        initialRegisterTask = nil
-        lastRemoteConfigSyncRev = 0
-        senderGeneration &+= 1
-        tickTimer?.invalidate()
-        tickTimer = nil
-        tallyPollTimer?.cancel()
-        tallyPollTimer = nil
+        stopVideoSenderOnly()
         if !keepPreview {
             isPreviewActive = false
             sessionQueue.async { [weak self] in
@@ -1570,34 +1824,17 @@ final class CameraEngine: NSObject, ObservableObject {
                 if let mc = self.multiCamSession, mc.isRunning { mc.stopRunning() }
             }
         }
-        intercomAudio.stop()
-
-        senderLock.lock()
-        let oldSender = senderHandle
-        senderHandle = nil
-        senderLock.unlock()
-        if let s = oldSender {
-            senderLifecycleQueue.async {
-                lv_sender_stop(s)
-                lv_sender_destroy(s)
-            }
-        }
-
-        tallyLock.lock()
-        let oldTally = tallyHandle
-        tallyHandle = nil
-        isMicTalkOpen = false
-        tallyLock.unlock()
-        if let t = oldTally {
-            lv_tally_intercom_destroy(t)
-        }
 
         isStreaming = false
-        UIApplication.shared.isIdleTimerDisabled = false
+        teardownStudioControlLinkIfUnused()
+        updateIdleTimerAndTelemetry()
+
         if !isDemoMode {
-            tallyState = .standby
-            remoteRec = false
-            directorSpeaking = false
+            if isIntercomActive {
+                statusText = tr("Інтерком → ", "Intercom → ") + "\(activeTallyIp):\(activeTallyPort)"
+            } else {
+                statusText = tr("Ефір зупинено", "Stream stopped")
+            }
         }
     }
 
@@ -2041,9 +2278,9 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     private func syncIntercomState() {
-        let talkOpen = pttActive || latchActive
-        let listenOpen = ifbEnabled
-        let vol = ifbVolume
+        let talkOpen = isIntercomActive && (pttActive || latchActive)
+        let listenOpen = isIntercomActive && ifbEnabled
+        let vol: Float = listenOpen ? ifbVolume : 0.0
         tallyLock.lock()
         isMicTalkOpen = talkOpen
         isIfbListenOpen = listenOpen
@@ -2051,7 +2288,7 @@ final class CameraEngine: NSObject, ObservableObject {
             lv_intercom_set_state(th, talkOpen ? 1 : 0, listenOpen ? 0 : 1, vol, 0.0)
         }
         tallyLock.unlock()
-        if (talkOpen || listenOpen) && isStreaming && !isDemoMode {
+        if isIntercomActive && !isDemoMode {
             intercomAudio.ensureStarted()
         }
     }
@@ -2539,8 +2776,8 @@ final class CameraEngine: NSObject, ObservableObject {
             next.lossPct = 0.0
             next.bufferPct = 98
             next.actualFps = Double(fps)
-            next.micPeakDbfs = (pttActive || latchActive) ? Float(-10.0 + sin(phase * 2.2) * 7.0) : Float(-44.0 + sin(phase) * 4.0)
-            next.ifbPeakDbfs = (ifbEnabled && directorSpeaking) ? Float(-12.0 + cos(phase * 1.9) * 6.0) : Float(-48.0 + cos(phase) * 3.0)
+            next.micPeakDbfs = (isIntercomActive && (pttActive || latchActive)) ? Float(-10.0 + sin(phase * 2.2) * 7.0) : (isIntercomActive ? Float(-44.0 + sin(phase) * 4.0) : -60.0)
+            next.ifbPeakDbfs = (isIntercomActive && ifbEnabled && directorSpeaking) ? Float(-12.0 + cos(phase * 1.9) * 6.0) : (isIntercomActive ? Float(-48.0 + cos(phase) * 3.0) : -60.0)
             next.histogram = (0..<24).map { i in
                 let x = Double(i) / 23.0
                 let shift = Double(exposureBias) * 0.09
@@ -2580,6 +2817,10 @@ final class CameraEngine: NSObject, ObservableObject {
             }
             next.history.append(TelemetrySample(bitrateMbps: st.bitrate_mbps, latencyMs: totalLocalMs, dropout: st.fps < Double(fps) * 0.85))
             if next.history.count > 42 { next.history.removeFirst(next.history.count - 42) }
+        } else if !isStreaming {
+            next.bitrateMbps = 0.0
+            next.latencyMs = 0.0
+            next.actualFps = 0.0
         }
 
         // Single atomic SwiftUI @Published update per tick!

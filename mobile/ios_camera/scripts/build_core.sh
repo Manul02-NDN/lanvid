@@ -50,8 +50,8 @@ make_ios_fw() {
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>LanVidCore</string>
   <key>CFBundlePackageType</key><string>FMWK</string>
-  <key>CFBundleShortVersionString</key><string>3.0.0</string>
-  <key>CFBundleVersion</key><string>3.0.0</string>
+  <key>CFBundleShortVersionString</key><string>3.1.0</string>
+  <key>CFBundleVersion</key><string>3.1.0</string>
 </dict>
 </plist>
 PLIST

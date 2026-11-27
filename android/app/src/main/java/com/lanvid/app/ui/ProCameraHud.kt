@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,7 +88,8 @@ data class ProCameraState(
     val gopMode: String = "1.0s",
     val colorProfile: String = "Rec.709",
     val lutEnabled: Boolean = false,
-    // Duplex Intercom
+    // Duplex Intercom (independent of video streaming!)
+    val intercomActive: Boolean = false,
     val pttHeld: Boolean = false,
     val latchTalk: Boolean = false,
     val ifbMuted: Boolean = false,
@@ -155,6 +157,17 @@ fun ProSubTopBar(
                         color = Studio.accent,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 10.5.sp,
+                        maxLines = 1,
+                    )
+                }
+            } else if (state.intercomActive) {
+                Surface(color = Studio.greenSoft, shape = RoundedCornerShape(8.dp), border = BorderStroke(0.75.dp, Studio.green)) {
+                    Text(
+                        "IFB",
+                        Modifier.padding(horizontal = 7.dp, vertical = 4.dp),
+                        color = Studio.green,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 10.sp,
                         maxLines = 1,
                     )
                 }
@@ -391,39 +404,83 @@ fun ProEncoderDrawer(
 }
 
 /**
- * Compact LanVid Studio Duplex Intercom Strip (PTT / LATCH / IFB).
+ * Compact LanVid Studio Duplex Intercom Strip (Independent ON/OFF / PTT / LATCH / IFB).
  */
 @Composable
 fun ProIntercomStrip(
     state: ProCameraState,
+    onToggleIntercom: () -> Unit,
+    onEnsureIntercomActive: () -> Boolean,
     onStateChange: (ProCameraState) -> Unit,
     onIntercomChanged: (talk: Boolean, listenMuted: Boolean, rxGain: Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val currentState by rememberUpdatedState(state)
+    val currentEnsureActive by rememberUpdatedState(onEnsureIntercomActive)
+    val currentOnStateChange by rememberUpdatedState(onStateChange)
+    val currentOnIntercomChanged by rememberUpdatedState(onIntercomChanged)
+
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Surface(
             color = Studio.hudBar,
             shape = RoundedCornerShape(999.dp),
-            border = BorderStroke(0.75.dp, Studio.borderStrong),
+            border = BorderStroke(0.75.dp, if (state.intercomActive) Studio.green.copy(alpha = 0.65f) else Studio.borderStrong),
         ) {
             Row(
-                Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val talking = state.pttHeld || state.latchTalk
+                // Dedicated independent Intercom power toggle
+                Surface(
+                    onClick = onToggleIntercom,
+                    color = if (state.intercomActive) Studio.greenSoft else Studio.surface2,
+                    shape = RoundedCornerShape(999.dp),
+                    border = BorderStroke(0.75.dp, if (state.intercomActive) Studio.green else Studio.border),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(if (state.intercomActive) Studio.green else Studio.text3)
+                        )
+                        Text(
+                            if (state.intercomActive) "Інтерком" else "Інтерком Вимк",
+                            color = if (state.intercomActive) Studio.green else Studio.text2,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
+                val talking = state.intercomActive && (state.pttHeld || state.latchTalk)
                 Box(
                     Modifier
                         .clip(RoundedCornerShape(999.dp))
                         .background(if (talking) Studio.red else Studio.surface2)
-                        .pointerInput(state.latchTalk, state.ifbMuted, state.ifbGain) {
+                        .pointerInput(Unit) {
                             detectTapGestures(
                                 onPress = {
-                                    onStateChange(state.copy(pttHeld = true))
-                                    onIntercomChanged(true, state.ifbMuted, state.ifbGain)
-                                    tryAwaitRelease()
-                                    onStateChange(state.copy(pttHeld = false))
-                                    onIntercomChanged(state.latchTalk, state.ifbMuted, state.ifbGain)
+                                    val st = currentState
+                                    if (st.intercomActive || currentEnsureActive()) {
+                                        val active = currentState
+                                        currentOnStateChange(active.copy(intercomActive = true, pttHeld = true))
+                                        currentOnIntercomChanged(true, active.ifbMuted, active.ifbGain)
+                                        tryAwaitRelease()
+                                        val after = currentState
+                                        currentOnStateChange(after.copy(pttHeld = false))
+                                        if (after.intercomActive) {
+                                            currentOnIntercomChanged(after.latchTalk, after.ifbMuted, after.ifbGain)
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -431,23 +488,38 @@ fun ProIntercomStrip(
                 ) {
                     Text(
                         if (talking) "Мікрофон ●" else "PTT",
-                        color = if (talking) Color.White else Studio.text,
+                        color = if (talking) Color.White else if (state.intercomActive) Studio.text else Studio.text2,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 11.sp,
                         maxLines = 1,
                     )
                 }
 
-                StudioPill("Latch", state.latchTalk) {
-                    val nxt = !state.latchTalk
-                    onStateChange(state.copy(latchTalk = nxt))
-                    onIntercomChanged(nxt || state.pttHeld, state.ifbMuted, state.ifbGain)
+                StudioPill("Latch", state.intercomActive && state.latchTalk) {
+                    if (!state.intercomActive) {
+                        if (onEnsureIntercomActive()) {
+                            onStateChange(state.copy(intercomActive = true, latchTalk = true))
+                            onIntercomChanged(true, state.ifbMuted, state.ifbGain)
+                        }
+                    } else {
+                        val nxt = !state.latchTalk
+                        onStateChange(state.copy(latchTalk = nxt))
+                        onIntercomChanged(nxt || state.pttHeld, state.ifbMuted, state.ifbGain)
+                    }
                 }
 
-                StudioPill(if (state.ifbMuted) "IFB Вимк" else "IFB Увімк", !state.ifbMuted) {
-                    val nxtMuted = !state.ifbMuted
-                    onStateChange(state.copy(ifbMuted = nxtMuted))
-                    onIntercomChanged(state.latchTalk || state.pttHeld, nxtMuted, state.ifbGain)
+                val ifbListening = state.intercomActive && !state.ifbMuted
+                StudioPill(if (ifbListening) "IFB Увімк" else "IFB Вимк", ifbListening) {
+                    if (!state.intercomActive) {
+                        if (onEnsureIntercomActive()) {
+                            onStateChange(state.copy(intercomActive = true, ifbMuted = false))
+                            onIntercomChanged(state.latchTalk || state.pttHeld, false, state.ifbGain)
+                        }
+                    } else {
+                        val nxtMuted = !state.ifbMuted
+                        onStateChange(state.copy(ifbMuted = nxtMuted))
+                        onIntercomChanged(state.latchTalk || state.pttHeld, nxtMuted, state.ifbGain)
+                    }
                 }
             }
         }

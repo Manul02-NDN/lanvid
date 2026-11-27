@@ -8,9 +8,9 @@
 #include <stdint.h>
 
 #define LV_SDK_VERSION_MAJOR 3
-#define LV_SDK_VERSION_MINOR 0
+#define LV_SDK_VERSION_MINOR 1
 #define LV_SDK_VERSION_PATCH 0
-#define LV_SDK_VERSION_STRING "3.0.0"
+#define LV_SDK_VERSION_STRING "3.1.0"
 #define LV_SDK_ABI_VERSION   3
 
 #if defined(_WIN32)

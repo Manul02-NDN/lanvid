@@ -231,6 +231,7 @@ fun BroadcastScreen(
     var battery by remember { mutableIntStateOf(-1) }
     var batteryTempC by remember { mutableIntStateOf(34) }
     var proState by remember { mutableStateOf(ProCameraState()) }
+    var tallyControlConnected by remember { mutableStateOf(false) }
 
     // Interactive viewfinder touch state (reticle, EV, MF, Zoom, toast)
     var reticleNorm by remember { mutableStateOf<Offset?>(null) }
@@ -251,7 +252,7 @@ fun BroadcastScreen(
     }
 
     fun pushLocalConfigSync(nextUi: HudUiState, nextPro: ProCameraState) {
-        if (!nextUi.senderActive) return
+        if (!nextUi.senderActive && !nextPro.intercomActive) return
         val resIdx = when (nextUi.resolution) {
             ResolutionPreset.HD_720 -> 1
             ResolutionPreset.FHD_1080 -> 2
@@ -281,9 +282,9 @@ fun BroadcastScreen(
             .apply()
     }
 
-    // Auto-select the best discovered [VIDEO] or [STUDIO] PC automatically so the user just taps GO LIVE!
-    LaunchedEffect(lanPeers.size, ui.senderActive) {
-        if (ui.senderActive || lanPeers.isEmpty()) return@LaunchedEffect
+    // Auto-select the best discovered [VIDEO] or [STUDIO] PC automatically so the user just taps GO LIVE or Intercom!
+    LaunchedEffect(lanPeers.size, ui.senderActive, proState.intercomActive) {
+        if (ui.senderActive || proState.intercomActive || lanPeers.isEmpty()) return@LaunchedEffect
         val preferred = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
             ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
             ?: return@LaunchedEffect
@@ -336,113 +337,44 @@ fun BroadcastScreen(
         )
     }
 
-    // Studio Tally & Duplex Intercom connection + 50 Hz poll + full-duplex voice I/O (ALL off Main UI thread!)
-    LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
-        if (ui.mode == BroadcastMode.SENDER && ui.senderActive && ui.destIp.isNotBlank()) {
+    // 1) Shared Studio Control Link (:5022 Tally / ConfigSync / Intercom transport)
+    // Active whenever EITHER video stream OR independent intercom is ON!
+    val studioControlNeeded = ui.mode == BroadcastMode.SENDER && (ui.senderActive || proState.intercomActive)
+    LaunchedEffect(studioControlNeeded, ui.destIp) {
+        if (studioControlNeeded && ui.destIp.isNotBlank()) {
             val destIp = ui.destIp
             val label = proState.cameraLabel
             val connected = withContext(Dispatchers.IO) {
                 val ok = LanVidNative.nativeTallyConnect(destIp, 5022, cameraId, label)
                 if (ok) {
-                    LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+                    if (proState.intercomActive) {
+                        LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+                    } else {
+                        LanVidNative.nativeIntercomSetState(false, true, 0f, 0f)
+                    }
                 }
                 ok
             }
-            if (!connected) return@LaunchedEffect
-
-            // Full-duplex Intercom audio job: IFB playback (AudioTrack) + PTT mic capture (AudioRecord) @ 48 kHz mono Float32
-            val intercomAudioJob = launch(Dispatchers.IO) {
-                val sr = 48000
-                val framesPerChunk = 240 // 5 ms
-                val trackBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-                    .coerceAtLeast(framesPerChunk * 4 * 4)
-                val track = runCatching {
-                    AudioTrack.Builder()
-                        .setAudioAttributes(
-                            AudioAttributes.Builder()
-                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                                .build()
-                        )
-                        .setAudioFormat(
-                            AudioFormat.Builder()
-                                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                                .setSampleRate(sr)
-                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                                .build()
-                        )
-                        .setBufferSizeInBytes(trackBuf)
-                        .setTransferMode(AudioTrack.MODE_STREAM)
-                        .build()
-                }.getOrNull()?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
-                runCatching { track?.play() }
-
-                val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                val recBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
-                    .coerceAtLeast(framesPerChunk * 4 * 4)
-                val recorder = if (hasMicPerm) {
-                    runCatching {
-                        AudioRecord.Builder()
-                            .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-                            .setAudioFormat(
-                                AudioFormat.Builder()
-                                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                                    .setSampleRate(sr)
-                                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                                    .build()
-                            )
-                            .setBufferSizeInBytes(recBuf)
-                            .build()
-                    }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
-                } else null
-                runCatching { recorder?.startRecording() }
-
-                val rxJob = launch(Dispatchers.IO) {
-                    val rxPcm = FloatArray(framesPerChunk)
-                    while (isActive) {
-                        val got = LanVidNative.nativeIntercomPullRx(rxPcm, framesPerChunk)
-                        if (got > 0 && track != null) {
-                            track.write(rxPcm, 0, got, AudioTrack.WRITE_BLOCKING)
-                        } else {
-                            delay(5)
-                        }
-                    }
-                }
-                val txJob = launch(Dispatchers.IO) {
-                    if (recorder == null) return@launch
-                    val txPcm = FloatArray(framesPerChunk)
-                    while (isActive) {
-                        val read = recorder.read(txPcm, 0, framesPerChunk, AudioRecord.READ_BLOCKING)
-                        if (read < 0) break
-                        if (read > 0 && (proState.pttHeld || proState.latchTalk)) {
-                            LanVidNative.nativeIntercomPushMic(txPcm, read)
-                        }
-                    }
-                }
-                try {
-                    rxJob.join()
-                    txJob.join()
-                } finally {
-                    rxJob.cancel()
-                    txJob.cancel()
-                    runCatching { recorder?.stop() }
-                    runCatching { recorder?.release() }
-                    runCatching { track?.stop() }
-                    runCatching { track?.release() }
-                }
+            if (!connected) {
+                tallyControlConnected = false
+                return@LaunchedEffect
             }
+            tallyControlConnected = true
 
             try {
                 var tickCount = 0
                 while (true) {
-                    delay(20)
+                    // 100 Hz poll when Intercom audio is ON (matches 10 ms Opus frames), 50 Hz otherwise
+                    val pollMs = if (proState.intercomActive) 10L else 20L
+                    delay(pollMs)
                     tickCount++
                     val bat = battery.coerceIn(0, 100)
                     val temp = batteryTempC
                     val raw = withContext(Dispatchers.IO) {
                         LanVidNative.nativeTallyPollJson(bat, temp)
                     }
-                    if (tickCount % 5 != 0) continue // UI state refresh at 10 Hz; network poll at 50 Hz
+                    val uiRefreshMod = if (proState.intercomActive) 10 else 5
+                    if (tickCount % uiRefreshMod != 0) continue // UI state refresh at ~10 Hz
                     if (raw.isNotEmpty()) {
                         runCatching {
                             val obj = JSONObject(raw)
@@ -534,7 +466,7 @@ fun BroadcastScreen(
                                     fps = targetFps.toString(),
                                     lens = if (syncLens == 3) "Front" else if (syncLens == 1) "0.5x" else if (syncLens == 2) "2x" else "1x"
                                 )
-                                if (onlyBitrateChanged) {
+                                if (onlyBitrateChanged && ui.senderActive) {
                                     withContext(Dispatchers.IO) {
                                         LanVidNative.nativeSetSenderBitrateKbps((targetBitrateMbps * 1000).toInt())
                                     }
@@ -554,12 +486,110 @@ fun BroadcastScreen(
                     }
                 }
             } finally {
-                intercomAudioJob.cancel()
+                tallyControlConnected = false
                 withContext(NonCancellable + Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
             }
         } else {
+            tallyControlConnected = false
             withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
             proState = proState.copy(tally = TallyStatus.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
+        }
+    }
+
+    // 2) Independent Full-Duplex Intercom Audio Hardware (runs ONLY while proState.intercomActive == true!)
+    LaunchedEffect(ui.mode, proState.intercomActive, tallyControlConnected) {
+        if (ui.mode != BroadcastMode.SENDER || !proState.intercomActive || !tallyControlConnected) {
+            return@LaunchedEffect
+        }
+        withContext(Dispatchers.IO) {
+            LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+        }
+        val sr = 48000
+        val framesPerChunk = 240 // 5 ms
+        val trackBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+            .coerceAtLeast(framesPerChunk * 4 * 4)
+        val track = withContext(Dispatchers.IO) {
+            runCatching {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                            .setSampleRate(sr)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(trackBuf)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            }.getOrNull()?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }?.also {
+                runCatching { it.play() }
+            }
+        }
+
+        val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val recBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+            .coerceAtLeast(framesPerChunk * 4 * 4)
+        val recorder = if (hasMicPerm) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    AudioRecord.Builder()
+                        .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                                .setSampleRate(sr)
+                                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(recBuf)
+                        .build()
+                }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED }?.also {
+                    runCatching { it.startRecording() }
+                }
+            }
+        } else null
+
+        val rxJob = launch(Dispatchers.IO) {
+            val rxPcm = FloatArray(framesPerChunk)
+            while (isActive) {
+                val got = LanVidNative.nativeIntercomPullRx(rxPcm, framesPerChunk)
+                if (got > 0 && track != null && !proState.ifbMuted) {
+                    track.write(rxPcm, 0, got, AudioTrack.WRITE_BLOCKING)
+                } else {
+                    delay(5)
+                }
+            }
+        }
+        val txJob = launch(Dispatchers.IO) {
+            if (recorder == null) return@launch
+            val txPcm = FloatArray(framesPerChunk)
+            while (isActive) {
+                val read = recorder.read(txPcm, 0, framesPerChunk, AudioRecord.READ_BLOCKING)
+                if (read < 0) break
+                if (read > 0 && (proState.pttHeld || proState.latchTalk)) {
+                    LanVidNative.nativeIntercomPushMic(txPcm, read)
+                }
+            }
+        }
+        try {
+            rxJob.join()
+            txJob.join()
+        } finally {
+            rxJob.cancel()
+            txJob.cancel()
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { recorder?.stop() }
+                runCatching { recorder?.release() }
+                runCatching { track?.stop() }
+                runCatching { track?.release() }
+                LanVidNative.nativeIntercomSetState(false, true, 0f, 0f)
+            }
         }
     }
 
@@ -717,9 +747,63 @@ fun BroadcastScreen(
         }
     }
 
+    fun ensureIntercomActive(): Boolean {
+        if (proState.intercomActive) return true
+        var targetIp = ui.destIp
+        var targetPort = ui.destPort
+        var targetName = ui.destName
+        if (targetIp.isBlank()) {
+            val auto = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
+                ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+            if (auto != null) {
+                targetIp = auto.ip
+                targetPort = auto.port
+                targetName = auto.name
+            } else {
+                selectedTool = HudTool.NETWORK
+                discovery.refreshNow()
+                ui = ui.copy(statusMessage = "ПК не знайдено — вкажіть IP або відкрийте LanVid на ПК")
+                return false
+            }
+        }
+        if (targetIp != ui.destIp || targetPort != ui.destPort || targetName != ui.destName) {
+            ui = ui.copy(destIp = targetIp, destPort = targetPort, destName = targetName)
+            saveTargetPc(targetIp, targetPort, targetName)
+        }
+        proState = proState.copy(intercomActive = true)
+        val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        postTouchToast(if (hasMicPerm) "Інтерком увімкнено" else "Інтерком: лише прослуховування")
+        return true
+    }
+
+    fun toggleIntercom() {
+        if (proState.intercomActive) {
+            proState = proState.copy(intercomActive = false, pttHeld = false, latchTalk = false)
+            scope.launch(Dispatchers.IO) {
+                LanVidNative.nativeIntercomSetState(false, true, 0f, 0f)
+            }
+            postTouchToast("Інтерком вимкнено")
+        } else {
+            ensureIntercomActive()
+        }
+    }
+
+    fun stopVideoStream() {
+        cameraStreamer.setStreamingEnabled(false)
+        ui = ui.copy(senderActive = false)
+        scope.launch(Dispatchers.IO) {
+            micStreamer.stop()
+            if (ScreenCaptureService.isRunning) {
+                context.stopService(Intent(context, ScreenCaptureService::class.java))
+            }
+            LanVidNative.nativeStopSender()
+        }
+    }
+
     fun stopAll() {
         cameraStreamer.setStreamingEnabled(false)
         ui = ui.copy(senderActive = false, receiverActive = false)
+        proState = proState.copy(intercomActive = false, pttHeld = false, latchTalk = false)
         scope.launch(Dispatchers.IO) {
             micStreamer.stop()
             if (ScreenCaptureService.isRunning) {
@@ -798,8 +882,8 @@ fun BroadcastScreen(
                     }
                 }
             } else {
-                stopAll()
-                ui = ui.copy(statusMessage = "Stream stopped")
+                stopVideoStream()
+                ui = ui.copy(statusMessage = if (proState.intercomActive) "Відео зупинено • Інтерком активний" else "Stream stopped")
             }
         } else {
             if (!ui.receiverActive) {
@@ -832,7 +916,7 @@ fun BroadcastScreen(
     }
 
     val tally = when {
-        ui.mode == BroadcastMode.SENDER && ui.senderActive -> when (proState.tally) {
+        ui.mode == BroadcastMode.SENDER && (ui.senderActive || proState.intercomActive) -> when (proState.tally) {
             TallyStatus.PROGRAM -> TallyVisual.PROGRAM
             TallyStatus.PREVIEW -> TallyVisual.PREVIEW
             TallyStatus.STANDBY -> TallyVisual.OFF
@@ -1427,6 +1511,8 @@ fun BroadcastScreen(
                     if (ui.mode == BroadcastMode.SENDER) {
                         ProIntercomStrip(
                             state = proState,
+                            onToggleIntercom = { toggleIntercom() },
+                            onEnsureIntercomActive = { ensureIntercomActive() },
                             onStateChange = { proState = it },
                             onIntercomChanged = { talk, listenMuted, rxGain ->
                                 scope.launch(Dispatchers.IO) {

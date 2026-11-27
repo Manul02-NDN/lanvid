@@ -20,7 +20,7 @@ if (-not $Mode) {
   Write-Host "================================================================"
   Write-Host "  LanVid Video & CrossLink Audio SDK - Selectable Installer"
   Write-Host "================================================================"
-  Write-Host "  1) Install ALL together (LanVid Video v3.0.0 + CrossLink Audio v1.0.0)"
+  Write-Host "  1) Install ALL together (LanVid Video v3.1.0 + CrossLink Audio v1.0.0)"
   Write-Host "  2) Install ONLY LanVid Video SDK (Video + 2ch Stereo Audio)"
   Write-Host "  3) Install ONLY CrossLink Audio SDK (64ch AoIP + MIDI 2.0 + Grid)"
   Write-Host "----------------------------------------------------------------"

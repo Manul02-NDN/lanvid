@@ -1,6 +1,6 @@
 name: CI Build & Test
 
-# LanVid Video SDK (v3.0.0) & CrossLink Audio SDK (v1.0.0)
+# LanVid Video SDK (v3.1.0) & CrossLink Audio SDK (v1.0.0)
 # Verifies ALL 3 selectable component modes (VIDEO, AUDIO, ALL) on Windows / Linux / macOS,
 # Apple XCFrameworks & SwiftPM (LanVidKit + CrossLinkKit), LanVid Camera iOS, and Android AARs + APK.
 

@@ -102,7 +102,7 @@ struct ProCineHUDView: View {
         switch engine.tallyState {
         case .program: return s.red
         case .preview: return s.green
-        case .standby: return engine.isStreaming ? s.green : s.text3
+        case .standby: return engine.isStreaming ? s.green : (engine.isIntercomActive ? s.accent : s.text3)
         }
     }
 
@@ -163,9 +163,13 @@ struct ProCineHUDView: View {
                         if engine.tallyState != .standby {
                             return "\(engine.displayBadgeTag) · \(engine.tallyState.shortCode)"
                         }
-                        return engine.isStreaming
-                            ? "\(engine.displayBadgeTag) · \(tr("Онлайн", "Online"))"
-                            : engine.displayBadgeTag
+                        if engine.isStreaming {
+                            return "\(engine.displayBadgeTag) · \(tr("Онлайн", "Online"))"
+                        }
+                        if engine.isIntercomActive {
+                            return "\(engine.displayBadgeTag) · \(tr("Інтерком", "Intercom"))"
+                        }
+                        return engine.displayBadgeTag
                     }()
                     let detailText: String? = isLandscape
                         ? String(format: "%@ %dp · %.1f Мбіт/с · %.0f мс", engine.resolution.rawValue, engine.fps, engine.telemetry.bitrateMbps, engine.telemetry.latencyMs)
@@ -176,6 +180,9 @@ struct ProCineHUDView: View {
 
                 if engine.remoteRec {
                     StudioBadge(text: "● REC", tone: .red)
+                }
+                if engine.isIntercomActive && !engine.directorSpeaking && (isLandscape || !isCompact) {
+                    StudioBadge(text: "IFB", tone: .green)
                 }
                 if engine.directorSpeaking && isLandscape {
                     StudioBadge(text: tr("Режисер", "Director"), tone: .accent)
@@ -243,6 +250,18 @@ struct ProCineHUDView: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(s.accentSoft))
+                        .fixedSize()
+                    } else if engine.isIntercomActive {
+                        HStack(spacing: 3) {
+                            Image(systemName: "headphones")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("IFB")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .foregroundColor(s.green)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(s.greenSoft))
                         .fixedSize()
                     }
 
@@ -1071,29 +1090,82 @@ struct ProCineHUDView: View {
             .background(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).fill(s.surface))
             .overlay(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).stroke(s.border, lineWidth: 0.75))
 
+            // Independent Intercom Master Control Card (works WITH or WITHOUT live video!)
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(engine.isIntercomActive ? s.green : s.text3)
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(tr("Інтерком (незалежно від відео)", "Intercom (Independent)"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(s.text)
+                            .lineLimit(1)
+                        if engine.directorSpeaking {
+                            StudioBadge(text: tr("Режисер", "Director"), tone: .accent)
+                        }
+                    }
+                    Text(engine.isIntercomActive
+                         ? "\(engine.destIp):\(engine.tallyPort) · \(engine.isStreaming ? tr("з відеопотоком", "with video") : tr("лише інтерком", "intercom only"))"
+                         : tr("Вимкнено · можна увімкнути без стріму відео", "Off · can run without video stream"))
+                        .font(.system(size: 10.5, design: engine.isIntercomActive ? .monospaced : .default))
+                        .foregroundColor(s.text3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    engine.toggleIntercom()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: engine.isIntercomActive ? "headphones" : "power")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(engine.isIntercomActive ? tr("Вимк", "Off") : tr("Увімк", "On"))
+                            .font(.system(size: 11.5, weight: .semibold))
+                    }
+                    .foregroundColor(engine.isIntercomActive ? s.green : s.primaryFg)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: StudioPalette.rSm, style: .continuous)
+                            .fill(engine.isIntercomActive ? s.greenSoft : s.primaryBg)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: StudioPalette.rSm, style: .continuous)
+                            .stroke(engine.isIntercomActive ? s.green.opacity(0.55) : Color.clear, lineWidth: 0.75)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).fill(s.surface))
+            .overlay(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).stroke(engine.isIntercomActive ? s.green.opacity(0.45) : s.border, lineWidth: 0.75))
+
             // Vertical Intercom Mixer Strips (exact .mixer strips from ref3!)
             HStack(spacing: 12) {
+                let micOpen = engine.isIntercomActive && (engine.pttActive || engine.latchActive)
+                let ifbOpen = engine.isIntercomActive && engine.ifbEnabled
                 mixerStrip(
                     title: tr("Мікрофон", "Mic PTT"),
                     dbfs: engine.telemetry.micPeakDbfs,
                     level: $engine.micGain,
-                    muted: !engine.pttActive && !engine.latchActive,
+                    muted: !micOpen,
                     muteLabel: "PTT",
                     activeTint: s.red,
-                    onToggleMute: { engine.pttActive.toggle() },
+                    onToggleMute: { engine.togglePtt() },
                     extraLabel: "L",
-                    extraActive: engine.latchActive,
-                    onToggleExtra: { engine.latchActive.toggle() }
+                    extraActive: engine.isIntercomActive && engine.latchActive,
+                    onToggleExtra: { engine.toggleLatch() }
                 )
 
                 mixerStrip(
                     title: tr("Режисер IFB", "Director IFB"),
                     dbfs: engine.telemetry.ifbPeakDbfs,
                     level: $engine.ifbVolume,
-                    muted: !engine.ifbEnabled,
+                    muted: !ifbOpen,
                     muteLabel: "M",
                     activeTint: s.accent,
-                    onToggleMute: { engine.ifbEnabled.toggle() },
+                    onToggleMute: { engine.toggleIfb() },
                     extraLabel: nil,
                     extraActive: false,
                     onToggleExtra: {}
@@ -1453,32 +1525,49 @@ struct ProCineHUDView: View {
             .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(s.surface2))
             .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(s.border, lineWidth: 0.75))
 
-            // Quick PTT & IFB pills
+            // Independent Intercom ON/OFF + Quick Mic PTT pills (always visible, even in compact portrait!)
+            let quickBtnW: CGFloat = (isCompact && !isLandscape) ? 32 : 34
+            let micLive = engine.isIntercomActive && (engine.pttActive || engine.latchActive)
+
             Button {
-                engine.pttActive.toggle()
+                engine.toggleIntercom()
             } label: {
-                Image(systemName: engine.pttActive ? "mic.fill" : "mic")
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .foregroundColor(engine.pttActive ? .white : s.text2)
-                    .frame(width: 34, height: isLandscape ? 40 : 46)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(engine.pttActive ? s.red : s.surface2))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(engine.pttActive ? s.red : s.border, lineWidth: 0.75))
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "headphones")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundColor(engine.isIntercomActive ? s.green : s.text3)
+                        .frame(width: quickBtnW, height: isLandscape ? 40 : 46)
+                    if engine.isIntercomActive {
+                        Circle()
+                            .fill(engine.directorSpeaking ? s.accent : s.green)
+                            .frame(width: 6.5, height: 6.5)
+                            .padding(5)
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(engine.isIntercomActive ? s.greenSoft : s.surface2)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(engine.isIntercomActive ? (engine.directorSpeaking ? s.accent : s.green.opacity(0.65)) : s.border, lineWidth: 0.75)
+                )
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(engine.isIntercomActive ? tr("Вимкнути інтерком", "Turn Intercom Off") : tr("Увімкнути інтерком", "Turn Intercom On"))
 
-            if !isCompact || isLandscape {
-                Button {
-                    engine.ifbEnabled.toggle()
-                } label: {
-                    Image(systemName: engine.ifbEnabled ? "headphones" : "speaker.slash")
-                        .font(.system(size: 13.5, weight: .semibold))
-                        .foregroundColor(engine.ifbEnabled ? s.green : s.text3)
-                        .frame(width: 34, height: isLandscape ? 40 : 46)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(engine.ifbEnabled ? s.greenSoft : s.surface2))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(engine.ifbEnabled ? s.green.opacity(0.45) : s.border, lineWidth: 0.75))
-                }
-                .buttonStyle(.plain)
+            Button {
+                engine.togglePtt()
+            } label: {
+                Image(systemName: micLive ? "mic.fill" : "mic")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundColor(micLive ? .white : (engine.isIntercomActive ? s.text : s.text3))
+                    .frame(width: quickBtnW, height: isLandscape ? 40 : 46)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(micLive ? s.red : s.surface2))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(micLive ? s.red : s.border, lineWidth: 0.75))
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel(micLive ? tr("Вимкнути мікрофон", "Mute Intercom Mic") : tr("Говорити в інтерком", "Intercom Mic PTT"))
 
             // Primary Action Button (.btn-primary white / .btn-danger.solid red when live)
             Button {

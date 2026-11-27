@@ -20,7 +20,7 @@
     </choices-outline>
 
     <choice id="choice_lanvid"
-            title="LanVid Video SDK v3.0.0 (Відеопротокол + 2ch Stereo)"
+            title="LanVid Video SDK v3.1.0 (Відеопротокол + 2ch Stereo)"
             description="Ультранизька затримка відео (AVX2/NEON DCT, HW H.264/H.265, XOR FEC, AIMD), 2-канальне стерео аудіо, Multi-Cam, ISO Recorder, Tally/Intercom. Включає C/C++20, CMake (LanVidSDK), LanVidCore.xcframework, Swift LanVidKit та Python lanvid_sdk."
             start_selected="true"
             enabled="true">
@@ -35,6 +35,6 @@
         <pkg-ref id="com.crosslink.sdk.audio" />
     </choice>
 
-    <pkg-ref id="com.lanvid.sdk.video" version="3.0.0" onConclusion="none">lanvid-video.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.video" version="3.1.0" onConclusion="none">lanvid-video.pkg</pkg-ref>
     <pkg-ref id="com.crosslink.sdk.audio" version="1.0.0" onConclusion="none">crosslink-audio.pkg</pkg-ref>
 </installer-gui-script>

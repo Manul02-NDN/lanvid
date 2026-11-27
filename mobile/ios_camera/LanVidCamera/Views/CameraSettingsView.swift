@@ -138,6 +138,27 @@ struct CameraSettingsView: View {
                                         .foregroundColor(s.text2)
                                 }
                             }
+                            Divider().overlay(s.border)
+                            Toggle(isOn: Binding(
+                                get: { engine.isIntercomActive },
+                                set: { wantOn in
+                                    if wantOn {
+                                        engine.startIntercom()
+                                    } else {
+                                        engine.stopIntercom()
+                                    }
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("Інтерком (окремо від відео)", "Intercom (Independent of Video)"))
+                                        .font(.system(size: 13))
+                                        .foregroundColor(s.text)
+                                    Text(tr("Двосторонній зв'язок без запуску відеопотоку", "Two-way voice link without streaming video"))
+                                        .font(.system(size: 11))
+                                        .foregroundColor(s.text3)
+                                }
+                            }
+                            .tint(s.green)
                         }
                     }
 
@@ -180,7 +201,7 @@ struct CameraSettingsView: View {
                             HStack {
                                 Text(tr("Версія", "Version")).font(.system(size: 13)).foregroundColor(s.text)
                                 Spacer()
-                                Text("2.7.0 · Local LAN Only")
+                                Text("3.1.0 · Local LAN Only")
                                     .font(.system(size: 11.5, design: .monospaced))
                                     .foregroundColor(s.text3)
                             }
