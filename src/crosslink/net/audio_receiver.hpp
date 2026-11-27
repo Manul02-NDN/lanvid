@@ -1,0 +1,169 @@
+#pragma once
+// CrossLink Audio UDP Receiver:
+// Pure 64-channel phase-coherent AoIP receiver with MasterClock sync, Adaptive/Fixed/Deterministic
+// jitter buffering, XOR FEC + selective NACK recovery, sample-accurate MIDI2 + De-Jitter Queue,
+// ControlSync, and seamless stream-epoch restart handling. Zero video code.
+
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <string>
+
+#include "audio/audio_rx.hpp"
+#include "audio/audio_sync_matrix.hpp"
+#include "audio/master_clock.hpp"
+#include "common/clock.hpp"
+#include "common/udp_socket.hpp"
+#include "midi/midi_dejitter_queue.hpp"
+#include "midi/midi_sync_engine.hpp"
+#include "net/packet.hpp"
+
+namespace cl {
+
+struct AudioReceiverConfig {
+    std::string bind_ip = "0.0.0.0";
+    uint16_t bind_port = 5004;
+    int socket_buf_bytes = 16 * 1024 * 1024;
+    int recv_timeout_ms = 2;
+    bool enable_clock_sync = true;
+    uint64_t ping_interval_us = 500000;  // 500 ms (100 ms during initial MasterClock lock)
+    uint32_t sample_rate = 48000;        // 48000 / 96000
+    uint32_t latency_ms = 20;            // 2..2000 ms playout latency
+    bool adaptive_jitter = true;         // true = Adaptive Wi-Fi, false = Fixed Ethernet
+};
+
+class AudioReceiver {
+public:
+    explicit AudioReceiver(const AudioReceiverConfig& cfg);
+    ~AudioReceiver() = default;
+
+    bool init();
+    uint16_t local_port() const { return sock_.local_port(); }
+
+    void step_once();
+    void run(std::atomic<bool>& stop_flag);
+    void service(uint64_t now);
+
+    bool sender_endpoint(Endpoint& out) const {
+        std::lock_guard<std::mutex> lk(sender_ep_mu_);
+        if (!has_sender_) return false;
+        out = sender_ep_;
+        return true;
+    }
+
+    // ---- 64-channel phase-coherent audio bus ----
+    void set_latency_ms(uint32_t ms) {
+        arx_.set_latency_ms(ms);
+        midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
+    }
+    uint32_t latency_ms() const { return arx_.latency_ms(); }
+
+    void set_adaptive_jitter(bool enabled) {
+        arx_.set_adaptive_jitter_enabled(enabled);
+        midi_dejitter_.set_latency(double(arx_.latency_ms()), arx_.adaptive_jitter_enabled());
+    }
+    bool adaptive_jitter() const { return arx_.adaptive_jitter_enabled(); }
+
+    void set_deterministic_playout(bool enabled, double max_trim_ppm = 1000.0) {
+        matrix_.set_deterministic_playout(enabled, max_trim_ppm);
+    }
+    bool deterministic_playout() const { return matrix_.deterministic_playout(); }
+
+    double effective_latency_ms() const { return arx_.current_effective_latency_ms(); }
+    uint32_t effective_target_ms() const { return matrix_.effective_latency_ms(); }
+
+    void pop_audio_multichannel_interleaved(float* out, uint32_t num_channels, uint32_t frames);
+    void pop_audio_multichannel_planar(float* const* out, uint32_t num_channels, uint32_t frames);
+
+    // ---- MIDI2 (same UDP stream) ----
+    using MidiCallback = std::function<void(const TimedMidiEvent& ev, int32_t block_offset_frames)>;
+    void set_midi_callback(MidiCallback cb);
+    void set_midi_only(bool enabled) {
+        midi_only_.store(enabled, std::memory_order_relaxed);
+        midi_dejitter_.set_midi_only_mode(enabled, 1.5);
+    }
+    bool midi_only() const { return midi_only_.load(std::memory_order_relaxed); }
+    MidiRxStats midi_stats() const { return midi_rx_.stats(); }
+    MidiDejitterStats midi_dejitter_stats() const { return midi_dejitter_.stats(); }
+    uint32_t active_midi_notes() const;
+
+    // ---- Real-Time Control Sync (kControlSync, bidirectional, 3x redundant) ----
+    using ControlSyncCallback = std::function<void(const ControlSyncPayload&)>;
+    void set_control_sync_callback(ControlSyncCallback cb) {
+        std::lock_guard<std::mutex> lk(cs_mu_);
+        cs_cb_ = std::move(cb);
+    }
+    bool send_control_sync(const ControlSyncPayload& cs);
+    uint64_t control_sync_tx_count() const { return cs_tx_count_.load(std::memory_order_relaxed); }
+    uint64_t control_sync_rx_count() const { return cs_rx_count_.load(std::memory_order_relaxed); }
+
+    // ---- Stream epoch & telemetry ----
+    uint16_t stream_epoch() const { return cur_epoch_.load(std::memory_order_relaxed); }
+    uint64_t stream_epoch_resets() const { return epoch_resets_.load(std::memory_order_relaxed); }
+    const UdpSocket& socket() const { return sock_; }
+    AudioSyncMatrix& audio_matrix() { return matrix_; }
+    const MasterClock& master_clock() const { return mclock_; }
+    AudioChannelRxStats audio_channel_rx_stats(uint16_t ch) const { return arx_.channel_stats(ch); }
+    uint64_t audio_bytes_rx() const { return audio_bytes_rx_.load(std::memory_order_relaxed); }
+    uint64_t audio_packets_rx() const { return audio_packets_rx_.load(std::memory_order_relaxed); }
+    uint64_t bad_packets() const { return bad_packets_.load(std::memory_order_relaxed); }
+
+private:
+    static constexpr int kRecvBatchSize = 16;
+    static constexpr size_t kRecvSlotCap = 2048;
+
+    void handle_datagram(const uint8_t* dgram, size_t n, const Endpoint& src, uint64_t now);
+    void maybe_send_ping(uint64_t now);
+    void handle_pong(const uint8_t* payload, size_t len);
+    bool accept_epoch(uint16_t epoch);
+    void reset_stream_epoch();
+    void dispatch_midi(uint64_t playout_us, double block_start_samples, uint32_t frames);
+    void dispatch_midi_local(uint64_t local_now_us);
+    void track_note(const TimedMidiEvent& ev);
+    void release_all_notes();
+
+    AudioReceiverConfig cfg_;
+    UdpSocket sock_;
+    AudioSyncMatrix matrix_;
+    MasterClock mclock_;
+    AudioRxEngine arx_;
+
+    mutable std::mutex sender_ep_mu_;
+    Endpoint sender_ep_{};
+    bool has_sender_ = false;
+    void remember_sender(const Endpoint& src) {
+        std::lock_guard<std::mutex> lk(sender_ep_mu_);
+        if (!has_sender_ || !(sender_ep_ == src)) {
+            sender_ep_ = src;
+            has_sender_ = true;
+        }
+    }
+
+    uint64_t last_ping_us_ = 0;
+    uint32_t ping_seq_ = 0;
+    std::atomic<uint64_t> audio_bytes_rx_{0};
+    std::atomic<uint64_t> audio_packets_rx_{0};
+    std::atomic<uint64_t> bad_packets_{0};
+
+    MidiRxEngine midi_rx_;
+    MidiDejitterQueue midi_dejitter_;
+    std::atomic<bool> midi_only_{false};
+    mutable std::mutex midi_mu_;
+    MidiCallback midi_cb_;
+    uint8_t active_notes_[kMaxMidiPorts][16][128] = {};
+    std::atomic<uint64_t> last_pop_us_{0};
+    std::atomic<uint16_t> cur_epoch_{0};
+    uint16_t prev_epoch_ = 0;
+    std::atomic<uint64_t> epoch_resets_{0};
+
+    mutable std::mutex cs_mu_;
+    ControlSyncCallback cs_cb_;
+    uint64_t cs_last_rx_rev_ = 0;
+    std::atomic<uint64_t> cs_tx_count_{0};
+    std::atomic<uint64_t> cs_rx_count_{0};
+
+    uint8_t recv_batch_buf_[kRecvBatchSize][kRecvSlotCap];
+};
+
+}  // namespace cl

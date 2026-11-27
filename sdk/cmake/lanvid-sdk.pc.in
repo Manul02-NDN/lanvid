@@ -4,7 +4,7 @@ libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
 includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
 Name: LanVidSDK
-Description: Ultra-Low Latency LAN Video & Audio Streaming SDK (AVX2/NEON, UDP + XOR FEC + AIMD)
+Description: LanVid Ultra-Low Latency LAN Video + Stereo Audio Streaming SDK (LVC AVX2/NEON, HW H.264/H.265, XOR FEC, AIMD)
 Version: @LANVID_SDK_VERSION@
 Cflags: -I${includedir} -DLANVID_USE_SHARED=1
 Libs: -L${libdir} -llanvid_core

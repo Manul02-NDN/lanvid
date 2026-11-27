@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="uk">
 <head>
 <meta charset="utf-8" />
 <style>
@@ -9,6 +9,7 @@
   ul { margin: 4px 0 10px 18px; padding: 0; }
   li { margin-bottom: 4px; }
   code { font-family: "SF Mono", Menlo, monospace; font-size: 12px; background: rgba(128,128,128,0.14); padding: 1px 4px; border-radius: 4px; }
+  .sep { border-top: 1px solid rgba(128,128,128,0.28); margin: 14px 0; }
   @media (prefers-color-scheme: dark) {
     body { color: #f5f5f7; }
     h1 { color: #38bdf8; }
@@ -16,14 +17,13 @@
 </style>
 </head>
 <body>
-  <h1>Welcome to LanVidSDK v2.7.0 for macOS &amp; iOS</h1>
-  <p>Ultra-low-latency LAN video &amp; audio streaming SDK (<b>&lt; 4–6 ms E2E</b>) accelerated with <b>Apple Silicon NEON</b> (M1–M4) and <b>Intel AVX2</b>.</p>
-  <h2>What this installer configures automatically:</h2>
+  <h1>LanVid Video (v3.0.0) &amp; CrossLink Audio (v1.0.0) SDK</h1>
+  <p>Ви можете встановити <b>обидва протоколи разом</b>, лише <b>відеопротокол LanVid</b> або лише <b>аудіопротокол CrossLink</b> на кроці вибору компонентів:</p>
   <ul>
-    <li><b>Core C/C++17 &amp; XCFramework:</b> Universal <code>liblanvid_core.dylib</code> (<code>arm64</code> + <code>x86_64</code>), <code>LanVidCore.xcframework</code> (iOS, Simulator, macOS), headers in <code>/usr/local/include/lanvid</code>.</li>
-    <li><b>CMake &amp; pkg-config:</b> Out-of-the-box integration via <code>find_package(LanVidSDK REQUIRED)</code> and Homebrew prefix links.</li>
-    <li><b>Swift Package LanVidKit:</b> Modern <code>async/await</code> wrapper for <code>CVPixelBuffer</code>, <code>Metal</code>, and <code>AVAudioEngine</code>.</li>
-    <li><b>Python SDK &amp; Diagnostics:</b> Global <code>import lanvid_sdk</code>, macOS Firewall rules, and <code>lanvid-sdk-info</code> CLI self-test.</li>
+    <li><b>LanVid Video SDK v3.0.0</b> (<code>/usr/local/LanVidSDK</code>): ультранизька затримка відео (AVX2/NEON DCT, HW H.264/H.265, XOR FEC, AIMD), <b>2-канальне стерео аудіо</b>, Multi-Cam, ISO Recorder, Tally/Intercom.</li>
+    <li><b>CrossLink Audio SDK v1.0.0</b> (<code>/usr/local/CrossLinkSDK</code>): професійний <b>64-канальний студійний AoIP</b> (48/96 kHz, MasterClock, FEC/NACK, 1+1 Wi-Fi redundancy), Full-Duplex DAW SHM Bus, MIDI 2.0, Personal Monitor Bus та Layer-2 Grid.</li>
   </ul>
+  <div class="sep"></div>
+  <p><b>English:</b> Choose to install <b>both protocols together</b>, <b>LanVid Video SDK only</b> (video + 2ch stereo audio), or <b>CrossLink Audio SDK only</b> (64ch AoIP + MIDI 2.0 + Monitor + Grid). Each component installs cleanly with zero cross-protocol dependencies.</p>
 </body>
 </html>

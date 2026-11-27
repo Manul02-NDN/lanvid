@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+if(NOT TARGET Opus::opus)
+  find_library(_CROSSLINK_BUNDLED_OPUS NAMES opus libopus
+    PATHS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@"
+    NO_DEFAULT_PATH)
+  if(_CROSSLINK_BUNDLED_OPUS)
+    add_library(Opus::opus UNKNOWN IMPORTED)
+    set_target_properties(Opus::opus PROPERTIES IMPORTED_LOCATION "${_CROSSLINK_BUNDLED_OPUS}")
+  else()
+    find_dependency(Opus)
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/CrossLinkSDKTargets.cmake")
+
+if(TARGET CrossLinkSDK::AudioStatic AND TARGET Opus::opus)
+  target_link_libraries(CrossLinkSDK::AudioStatic INTERFACE Opus::opus)
+endif()
+
+check_required_components(CrossLinkSDK)

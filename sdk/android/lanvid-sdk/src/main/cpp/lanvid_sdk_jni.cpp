@@ -437,115 +437,11 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverStat
     return env->NewStringUTF(buf);
 }
 
-/* ---- 64-channel AoIP bus ---- */
-static uint64_t lv_jni_ts(jlong ts) { return ts < 0 ? LV_MEDIA_TS_AUTO : uint64_t(ts); }
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderConfigureAudioBus(
-    JNIEnv*, jclass, jlong ptr, jint rate, jint latency) {
-    if (!ptr || latency <= 0) return LV_ERR_INVALID_ARG;
-    LV_AudioBusConfig bus;
-    lv_audio_bus_config_default(&bus);
-    bus.sample_rate = rate;
-    bus.latency_ms = uint32_t(latency);
-    return lv_sender_configure_audio_bus(reinterpret_cast<LvSenderHandle*>(ptr), &bus);
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudioChannelF32(
-    JNIEnv* env, jclass, jlong ptr, jint ch, jfloatArray samples, jint count, jlong ts) {
-    if (!ptr || !samples || ch < 0 || ch >= LV_AUDIO_MAX_CHANNELS ||
-        count <= 0 || count > env->GetArrayLength(samples))
-        return LV_ERR_INVALID_ARG;
-    jfloat* p = env->GetFloatArrayElements(samples, nullptr);
-    if (!p) return LV_ERR_INTERNAL;
-    const int rc = lv_sender_push_audio_channel(reinterpret_cast<LvSenderHandle*>(ptr), uint16_t(ch), p,
-                                                uint32_t(count), LV_AUDIO_FORMAT_F32, lv_jni_ts(ts));
-    env->ReleaseFloatArrayElements(samples, p, JNI_ABORT);
-    return rc;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudioMultichannelF32(
-    JNIEnv* env, jclass, jlong ptr, jfloatArray data, jint channels, jint frames, jlong ts) {
-    if (!ptr || !data || channels <= 0 || frames <= 0 ||
-        jlong(channels) * frames > env->GetArrayLength(data))
-        return LV_ERR_INVALID_ARG;
-    jfloat* p = env->GetFloatArrayElements(data, nullptr);
-    if (!p) return LV_ERR_INTERNAL;
-    const int rc = lv_sender_push_audio_multichannel(reinterpret_cast<LvSenderHandle*>(ptr), p, uint16_t(channels),
-                                                     uint32_t(frames), LV_AUDIO_FORMAT_F32,
-                                                     LV_AUDIO_LAYOUT_INTERLEAVED, lv_jni_ts(ts));
-    env->ReleaseFloatArrayElements(data, p, JNI_ABORT);
-    return rc;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetAudioLatency(
-    JNIEnv*, jclass, jlong ptr, jint ms) {
-    return (ptr && ms > 0) ? lv_sender_set_audio_latency_ms(reinterpret_cast<LvSenderHandle*>(ptr), uint32_t(ms))
-                           : LV_ERR_INVALID_ARG;
-}
-
-JNIEXPORT jlong JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderMasterClockSamples(
-    JNIEnv*, jclass, jlong ptr) {
-    return ptr ? jlong(lv_sender_get_master_clock_samples(reinterpret_cast<LvSenderHandle*>(ptr))) : 0;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverConfigureAudioBus(
-    JNIEnv*, jclass, jlong ptr, jint rate, jint latency, jint channels, jint block) {
-    if (!ptr || latency <= 0 || channels <= 0 || block <= 0) return LV_ERR_INVALID_ARG;
-    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
-    LV_AudioBusConfig bus{rate, uint32_t(latency), channels, uint32_t(block)};
-    return lv_receiver_configure_audio_bus(ctx->rx, &bus);
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAudioLatency(
-    JNIEnv*, jclass, jlong ptr, jint ms) {
-    if (!ptr || ms <= 0) return LV_ERR_INVALID_ARG;
-    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    return ctx->rx ? lv_receiver_set_audio_latency_ms(ctx->rx, uint32_t(ms)) : LV_ERR_NOT_INITIALIZED;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAdaptiveJitter(
-    JNIEnv*, jclass, jlong ptr, jboolean enabled) {
+JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAudioTargetMs(
+    JNIEnv*, jclass, jlong ptr, jdouble target_ms) {
     if (!ptr) return LV_ERR_INVALID_ARG;
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    return ctx->rx ? lv_receiver_set_adaptive_jitter(ctx->rx, enabled ? 1 : 0) : LV_ERR_NOT_INITIALIZED;
-}
-
-JNIEXPORT jdouble JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverGetEffectiveLatencyMs(
-    JNIEnv*, jclass, jlong ptr) {
-    if (!ptr) return 0.0;
-    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    return ctx->rx ? lv_receiver_get_effective_latency_ms(ctx->rx) : 0.0;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverPopAudioMultichannel(
-    JNIEnv* env, jclass, jlong ptr, jfloatArray out, jint channels, jint frames) {
-    if (!ptr || !out || channels <= 0 || frames <= 0 || jlong(channels) * frames > env->GetArrayLength(out))
-        return LV_ERR_INVALID_ARG;
-    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
-    jfloat* p = env->GetFloatArrayElements(out, nullptr);
-    if (!p) return LV_ERR_INTERNAL;
-    const int rc = lv_receiver_pop_audio_multichannel(ctx->rx, p, uint16_t(channels), uint32_t(frames),
-                                                      LV_AUDIO_LAYOUT_INTERLEAVED);
-    env->ReleaseFloatArrayElements(out, p, 0);
-    return rc;
-}
-
-JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverChannelStats(
-    JNIEnv* env, jclass, jlong ptr, jint ch, jlongArray out) {
-    if (!ptr || !out || ch < 0 || ch >= LV_AUDIO_MAX_CHANNELS || env->GetArrayLength(out) < 10)
-        return LV_ERR_INVALID_ARG;
-    auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
-    if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
-    LV_AudioChannelStats st{};
-    const int rc = lv_receiver_get_channel_stats(ctx->rx, uint16_t(ch), &st);
-    const jlong v[10] = {jlong(st.packets_rx), jlong(st.packets_lost), jlong(st.fec_recovered),
-                         jlong(st.nack_recovered), jlong(st.nacks_sent), jlong(st.underruns),
-                         jlong(st.late_packets), jlong(st.jitter_us), jlong(st.active),
-                         jlong(st.level_dbfs * 100.0f)};
-    env->SetLongArrayRegion(out, 0, 10, v);
-    return rc;
+    return ctx->rx ? lv_receiver_set_audio_target_ms(ctx->rx, target_ms) : LV_ERR_NOT_INITIALIZED;
 }
 
 }  // extern "C"

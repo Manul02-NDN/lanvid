@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# CrossLink Audio SDK v1.0.0 — macOS component preinstall
+# Strictly manages ONLY CrossLink files (never touches /usr/local/LanVidSDK!).
+set -euo pipefail
+
+LOG_FILE="/var/log/crosslink_sdk_install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== [CrossLink Audio SDK preinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+ARCH="$(uname -m)"
+MACOS_VER="$(sw_vers -productVersion 2>/dev/null || echo "0.0")"
+MACOS_MAJOR="${MACOS_VER%%.*}"
+echo "[INFO] Arch: $ARCH | macOS: $MACOS_VER"
+
+if [ "${MACOS_MAJOR:-0}" -lt 12 ] 2>/dev/null; then
+  echo "[ERROR] CrossLink Audio SDK requires macOS 12.0 or newer (detected $MACOS_VER)."
+  exit 1
+fi
+
+if [ -d "/usr/local/CrossLinkSDK" ]; then
+  echo "[INFO] Cleaning previous /usr/local/CrossLinkSDK before upgrade..."
+  rm -rf "/usr/local/CrossLinkSDK"
+fi
+echo "=== [CrossLink Audio SDK preinstall] Complete ==="
+exit 0

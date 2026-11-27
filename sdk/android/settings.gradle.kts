@@ -14,5 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "LanVidAndroidSDK"
+rootProject.name = "LanVidCrossLinkAndroidSDK"
 include(":lanvid-sdk")
+include(":crosslink-sdk")

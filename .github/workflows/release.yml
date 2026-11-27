@@ -1,9 +1,7 @@
 name: Release Artifacts
 
-# Tag push `v*` (or manual run) builds the LanVid Core SDK (Windows / Linux / Apple / Android) and the LanVid Camera
-# Android APK, then - for tags - publishes a GitHub Release (using docs/RELEASE_NOTES_v<version>.md if present).
-# (LanVid Camera iOS ships through App Store Connect: .github/workflows/ios_camera_appstore.yml.) The version is read from CMakeLists.txt
-# (project(lanvid VERSION x.y.z)) and must match the tag.
+# Tag push `v*` (or manual run) builds LanVid Video SDK (v3.0.0), CrossLink Audio SDK (v1.0.0),
+# Combined SDK (Windows / Linux / Apple / Android), and LanVid Camera Android APK.
 
 on:
   push:
@@ -24,21 +22,24 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       v: ${{ steps.ver.outputs.v }}
+      cl_v: ${{ steps.ver.outputs.cl_v }}
     steps:
       - uses: actions/checkout@v4
       - id: ver
         run: |
           V="$(sed -n 's/^project(lanvid VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -n 1)"
-          [ -n "$V" ] || { echo "Cannot read the project version from CMakeLists.txt" >&2; exit 1; }
+          CL_V="$(sed -n 's/^set(CROSSLINK_SDK_VERSION[[:space:]]*"\([0-9.]*\)").*/\1/p' CMakeLists.txt | head -n 1)"
+          [ -n "$V" ] && [ -n "$CL_V" ] || { echo "Cannot read SDK versions from CMakeLists.txt" >&2; exit 1; }
           echo "v=$V" >> "$GITHUB_OUTPUT"
-          echo "Project version: $V (ref: $GITHUB_REF)"
+          echo "cl_v=$CL_V" >> "$GITHUB_OUTPUT"
+          echo "LanVid version: $V | CrossLink version: $CL_V (ref: $GITHUB_REF)"
           if [[ "$GITHUB_REF" == refs/tags/v* && "$GITHUB_REF_NAME" != "v$V" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match the project version v$V" >&2
+            echo "Tag $GITHUB_REF_NAME does not match LanVid version v$V" >&2
             exit 1
           fi
 
   release-sdk-desktop:
-    name: Release Core SDK (${{ matrix.os_name }})
+    name: Release Desktop SDKs (${{ matrix.os_name }})
     needs: version
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -51,6 +52,7 @@ jobs:
             os_name: Linux
     env:
       V: ${{ needs.version.outputs.v }}
+      CL_V: ${{ needs.version.outputs.cl_v }}
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -65,45 +67,60 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build pkg-config libavcodec-dev libavutil-dev
-      - name: Build, test & package Core SDK
+      - name: Build, test & package all 3 SDK modes (ALL, VIDEO, AUDIO)
         shell: bash
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLANVID_SDK_COMPONENTS=ALL
           cmake --build build --parallel 4
           ./build/lanvid_tests
-          python sdk/build_sdk.py --verify-client
-          cd dist && 7z a -tzip "LanVidSDK-v$V-${{ matrix.os_name }}.zip" "LanVidSDK-v$V" >/dev/null
+          ./build/crosslink_tests
+          python sdk/build_sdk.py --protocol all --verify-client
+          python sdk/build_sdk.py --protocol video --verify-client
+          python sdk/build_sdk.py --protocol audio --verify-client
+          cd dist
+          7z a -tzip "LanVidCrossLinkSDK-v$V-${{ matrix.os_name }}.zip" "LanVidCrossLinkSDK-v$V" >/dev/null
+          7z a -tzip "LanVidSDK-v$V-${{ matrix.os_name }}.zip" "LanVidSDK-v$V" >/dev/null
+          7z a -tzip "CrossLinkSDK-v$CL_V-${{ matrix.os_name }}.zip" "CrossLinkSDK-v$CL_V" >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: rel-sdk-${{ matrix.os_name }}
-          path: dist/LanVidSDK-v${{ needs.version.outputs.v }}-${{ matrix.os_name }}.zip
+          path: |
+            dist/LanVidCrossLinkSDK-v${{ needs.version.outputs.v }}-${{ matrix.os_name }}.zip
+            dist/LanVidSDK-v${{ needs.version.outputs.v }}-${{ matrix.os_name }}.zip
+            dist/CrossLinkSDK-v${{ needs.version.outputs.cl_v }}-${{ matrix.os_name }}.zip
           if-no-files-found: error
 
   release-apple:
-    name: Release Apple SDK (LanVidCore.xcframework)
+    name: Release Apple SDKs (XCFrameworks + Selectable macOS PKG/DMG)
     needs: version
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
         run: brew install cmake ninja
-      - name: Build LanVidCore.xcframework.zip
+      - name: Build Both XCFrameworks & Selectable macOS Installer
         run: |
-          chmod +x sdk/apple/build_xcframework.sh
-          ./sdk/apple/build_xcframework.sh
+          chmod +x sdk/apple/build_xcframework.sh sdk/apple/build_macos_pkg.sh
+          ./sdk/apple/build_macos_pkg.sh
           (cd dist/apple && ditto -c -k --sequesterRsrc --keepParent LanVidCore.xcframework LanVidCore.xcframework.zip)
+          (cd dist/apple && ditto -c -k --sequesterRsrc --keepParent CrossLinkCore.xcframework CrossLinkCore.xcframework.zip)
       - uses: actions/upload-artifact@v4
         with:
           name: rel-apple
-          path: dist/apple/LanVidCore.xcframework.zip
+          path: |
+            dist/apple/LanVidCore.xcframework.zip
+            dist/apple/CrossLinkCore.xcframework.zip
+            dist/apple/LanVidCrossLinkSDK-v${{ needs.version.outputs.v }}-macOS.pkg
+            dist/apple/LanVidCrossLinkSDK-v${{ needs.version.outputs.v }}-macOS.dmg
           if-no-files-found: error
 
   release-android:
-    name: Release Android (LanVid Camera APK + SDK AAR)
+    name: Release Android (LanVid Camera APK + Split SDK AARs)
     needs: version
     runs-on: ubuntu-24.04
     env:
       V: ${{ needs.version.outputs.v }}
+      CL_V: ${{ needs.version.outputs.cl_v }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -114,14 +131,12 @@ jobs:
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -V | tail -n 1)"
-          echo "Using sdkmanager: $SDKMANAGER (ANDROID_HOME=$SDK_ROOT)"
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.2.13676358" "cmake;3.31.6" "build-tools;35.0.1" "platforms;android-35"
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.9.1'
-
-      - name: Configure Signing Keystore (Secret or Ephemeral Release Key)
+      - name: Configure Signing Keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
@@ -134,26 +149,25 @@ jobs:
               -alias lanvid -storepass lanvid2026 -keypass lanvid2026 \
               -dname "CN=LanVid Camera, OU=Release, O=LanVid, L=Kyiv, C=UA"
           fi
-
-      - name: Build Android SDK AAR & LanVid Camera APK
+      - name: Build Both Android SDK AARs & LanVid Camera APK
         env:
           LANVID_KS_PASS: ${{ secrets.LANVID_KS_PASS }}
           LANVID_KEY_ALIAS: ${{ secrets.LANVID_KEY_ALIAS }}
           LANVID_KEY_PASS: ${{ secrets.LANVID_KEY_PASS }}
         run: |
-          (cd sdk/android && gradle --no-daemon exportAar)
+          (cd sdk/android && gradle --no-daemon :lanvid-sdk:exportAar :crosslink-sdk:exportAar)
           (cd android && gradle --no-daemon exportUniversalApk)
           mkdir -p dist/android
           cp android/LanVid-Android-universal.apk "dist/android/LanVid-Camera-v$V-android.apk"
           APKSIGNER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" -name apksigner | sort -V | tail -n 1)"
           "$APKSIGNER" verify --print-certs "dist/android/LanVid-Camera-v$V-android.apk"
-
       - uses: actions/upload-artifact@v4
         with:
           name: rel-android
           path: |
             dist/android/LanVid-Camera-v${{ needs.version.outputs.v }}-android.apk
-            dist/android/lanvid-sdk-${{ needs.version.outputs.v }}.aar
+            dist/android/lanvid-video-sdk-${{ needs.version.outputs.v }}.aar
+            dist/android/crosslink-audio-sdk-${{ needs.version.outputs.cl_v }}.aar
           if-no-files-found: error
 
   publish-release:
@@ -168,46 +182,33 @@ jobs:
       V: ${{ needs.version.outputs.v }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download All Platform Artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: release-staging
           merge-multiple: true
-
       - name: Assemble release assets & checksums
         run: |
           mkdir -p release-assets
           cp release-staging/* release-assets/
           (cd release-assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
           ls -lh release-assets/
-
       - name: Prepare release notes
         run: |
           if [ -f "docs/RELEASE_NOTES_v$V.md" ]; then
             cp "docs/RELEASE_NOTES_v$V.md" release-notes.md
           else
-            echo "LanVid v$V" > release-notes.md
+            echo "LanVid Video v$V & CrossLink Audio v${{ needs.version.outputs.cl_v }}" > release-notes.md
           fi
-
-      - name: Upload Final Release Bundle Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: lanvid-release-bundle
           path: release-assets/
           if-no-files-found: error
-
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: LanVid v${{ needs.version.outputs.v }}
+          name: LanVid Video v${{ needs.version.outputs.v }} & CrossLink Audio v${{ needs.version.outputs.cl_v }}
           body_path: release-notes.md
           fail_on_unmatched_files: true
-          files: |
-            release-assets/LanVidSDK-v${{ needs.version.outputs.v }}-Windows.zip
-            release-assets/LanVidSDK-v${{ needs.version.outputs.v }}-Linux.zip
-            release-assets/LanVidCore.xcframework.zip
-            release-assets/lanvid-sdk-${{ needs.version.outputs.v }}.aar
-            release-assets/LanVid-Camera-v${{ needs.version.outputs.v }}-android.apk
-            release-assets/SHA256SUMS.txt
+          files: release-assets/*

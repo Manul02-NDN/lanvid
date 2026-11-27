@@ -1,33 +1,41 @@
 #!/usr/bin/env bash
-# LanVid Core SDK macOS Single-File Installer Builder (Universal arm64 NEON + x86_64 AVX2)
-# Produces:
-#   - dist/apple/LanVidSDK-v2.7.0-macOS.pkg
-#   - dist/apple/LanVidSDK-v2.7.0-macOS.dmg
+# LanVid Video SDK (v3.0.0) & CrossLink Audio SDK (v1.0.0) macOS Universal Installer Builder
+# Produces a single macOS .pkg & .dmg where the user can interactively choose:
+#   - Install Both (LanVid Video + CrossLink Audio) [default]
+#   - Install LanVid Video SDK only (Video + 2-ch Stereo Audio)
+#   - Install CrossLink Audio SDK only (64-ch AoIP + MIDI 2.0 + Personal Monitor + L2 Grid)
 #
-# Packages:
-#   - com.lanvid.sdk.core   (mandatory): liblanvid_core.{dylib,a}, headers, CMake/pkg-config, LanVidCore.xcframework
-#   - com.lanvid.sdk.swift  (optional):  Swift Package LanVidKit
-#   - com.lanvid.sdk.extras (optional):  Python ctypes bindings + C++/Swift examples
+# Usage:
+#   ./sdk/apple/build_macos_pkg.sh [--skip-xcframework]
 
 set -euo pipefail
 
-SDK_VERSION="2.7.0"
+LANVID_VERSION="3.0.0"
+CROSSLINK_VERSION="1.0.0"
+BUNDLE_VERSION="3.0.0"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APPLE_DIR="$ROOT/sdk/apple"
 INST_DIR="$APPLE_DIR/installer"
 BUILD_DIR="$ROOT/build-macos-pkg"
 DIST_APPLE="$ROOT/dist/apple"
-PKG_OUT="$DIST_APPLE/LanVidSDK-v${SDK_VERSION}-macOS.pkg"
-DMG_OUT="$DIST_APPLE/LanVidSDK-v${SDK_VERSION}-macOS.dmg"
+PKG_OUT="$DIST_APPLE/LanVidCrossLinkSDK-v${BUNDLE_VERSION}-macOS.pkg"
+DMG_OUT="$DIST_APPLE/LanVidCrossLinkSDK-v${BUNDLE_VERSION}-macOS.dmg"
+
+for arg in "$@"; do
+  case "$arg" in
+    --skip-xcframework) LANVID_SKIP_XCFRAMEWORK=1 ;;
+  esac
+done
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  echo "[ERROR] build_macos_pkg.sh must be executed on macOS (uses lipo, pkgbuild, productbuild, hdiutil)." >&2
+  echo "[ERROR] build_macos_pkg.sh must be executed on macOS." >&2
   exit 1
 fi
 
 for req in cmake lipo install_name_tool pkgbuild productbuild hdiutil; do
   if ! command -v "$req" >/dev/null 2>&1; then
-    echo "[ERROR] Required macOS tool '$req' not found. Install Xcode Command Line Tools & CMake." >&2
+    echo "[ERROR] Required macOS tool '$req' not found." >&2
     exit 1
   fi
 done
@@ -47,25 +55,19 @@ build_macos_arch() {
   local bdir="$BUILD_DIR/macos-$arch"
   local idir="$BUILD_DIR/install-$arch"
 
-  echo "=== Building macOS $arch (NEON=$neon, AVX2=$avx2) ==="
+  echo "=== Building Universal slice $arch (LanVid + CrossLink, NEON=$neon, AVX2=$avx2) ==="
   cmake -S "$ROOT" -B "$bdir" -G "$GENERATOR" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_OSX_ARCHITECTURES="$arch" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+    -DLANVID_SDK_COMPONENTS=ALL \
     -DLANVID_SDK_CORE_ONLY=ON \
     -DLANVID_BUILD_SHARED=ON \
     -DLANVID_BUILD_TESTS=OFF \
     -DLANVID_ENABLE_NEON="$neon" \
     -DLANVID_ENABLE_AVX2="$avx2"
-  cmake --build "$bdir" --target lanvid_core lanvid_core_shared --parallel "$NCPU"
+  cmake --build "$bdir" --target lanvid_core lanvid_core_shared crosslink_core crosslink_core_shared --parallel "$NCPU"
   cmake --install "$bdir" --prefix "$idir"
-  # Merge static libopus.a into liblanvid_core.a so static SDK consumers link self-contained archives
-  local opus_a
-  opus_a="$(find "$bdir" -name 'libopus.a' | head -n 1)"
-  if [ -n "$opus_a" ]; then
-    libtool -static -o "$idir/lib/liblanvid_core_merged.a" "$idir/lib/liblanvid_core.a" "$opus_a"
-    mv "$idir/lib/liblanvid_core_merged.a" "$idir/lib/liblanvid_core.a"
-  fi
 }
 
 echo "=== [2/6] Compiling Universal macOS SDK libraries (arm64 NEON + x86_64 AVX2) ==="
@@ -75,74 +77,143 @@ build_macos_arch "x86_64" "OFF" "ON"
 UNIV_LIB_DIR="$BUILD_DIR/universal-lib"
 mkdir -p "$UNIV_LIB_DIR"
 
-lipo -create \
-  "$BUILD_DIR/install-arm64/lib/liblanvid_core.dylib" \
-  "$BUILD_DIR/install-x86_64/lib/liblanvid_core.dylib" \
-  -output "$UNIV_LIB_DIR/liblanvid_core.dylib"
+make_universal() {
+  local libname="$1"
+  local install_id="$2"
+  lipo -create \
+    "$BUILD_DIR/install-arm64/lib/${libname}.dylib" \
+    "$BUILD_DIR/install-x86_64/lib/${libname}.dylib" \
+    -output "$UNIV_LIB_DIR/${libname}.dylib"
+  lipo -create \
+    "$BUILD_DIR/install-arm64/lib/${libname}.a" \
+    "$BUILD_DIR/install-x86_64/lib/${libname}.a" \
+    -output "$UNIV_LIB_DIR/${libname}.a"
+  install_name_tool -id "$install_id" "$UNIV_LIB_DIR/${libname}.dylib"
+  if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
+    codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$UNIV_LIB_DIR/${libname}.dylib"
+  else
+    codesign --force --sign - "$UNIV_LIB_DIR/${libname}.dylib"
+  fi
+  echo "[OK] Universal ${libname}: $(lipo -archs "$UNIV_LIB_DIR/${libname}.dylib")"
+}
 
-lipo -create \
-  "$BUILD_DIR/install-arm64/lib/liblanvid_core.a" \
-  "$BUILD_DIR/install-x86_64/lib/liblanvid_core.a" \
-  -output "$UNIV_LIB_DIR/liblanvid_core.a"
+make_universal "liblanvid_core"    "/usr/local/lib/liblanvid_core.dylib"
+make_universal "libcrosslink_core" "/usr/local/lib/libcrosslink_core.dylib"
 
-install_name_tool -id "/usr/local/lib/liblanvid_core.dylib" "$UNIV_LIB_DIR/liblanvid_core.dylib"
-if [ -n "${LANVID_APP_SIGN_ID:-}" ]; then
-  codesign --force --options runtime --timestamp --sign "$LANVID_APP_SIGN_ID" "$UNIV_LIB_DIR/liblanvid_core.dylib"
-else
-  codesign --force --sign - "$UNIV_LIB_DIR/liblanvid_core.dylib"
+# Universal libopus.a (shared static dependency for static CMake consumers, zero conflict when both installed)
+if [ -f "$BUILD_DIR/install-arm64/lib/libopus.a" ] && [ -f "$BUILD_DIR/install-x86_64/lib/libopus.a" ]; then
+  lipo -create \
+    "$BUILD_DIR/install-arm64/lib/libopus.a" \
+    "$BUILD_DIR/install-x86_64/lib/libopus.a" \
+    -output "$UNIV_LIB_DIR/libopus.a"
 fi
-echo "[OK] Universal dylib slices: $(lipo -archs "$UNIV_LIB_DIR/liblanvid_core.dylib")"
 
-echo "=== [3/6] Building LanVidCore.xcframework (macOS + iOS + Simulator) ==="
+echo "=== [3/6] Building XCFrameworks (LanVidCore + CrossLinkCore) ==="
 if [ -z "${LANVID_SKIP_XCFRAMEWORK:-}" ]; then
-  bash "$APPLE_DIR/build_xcframework.sh"
+  bash "$APPLE_DIR/build_xcframework.sh" --protocol all
 fi
 
-echo "=== [4/6] Staging SDK installer component roots ==="
-ROOT_CORE="$BUILD_DIR/pkgroot-core"
-SDK_STAGE="$ROOT_CORE/usr/local/LanVidSDK"
-mkdir -p "$SDK_STAGE/include/lanvid" "$SDK_STAGE/lib/cmake/LanVidSDK" "$SDK_STAGE/lib/pkgconfig" \
-         "$SDK_STAGE/apple" "$ROOT_CORE/usr/local/lib"
+echo "=== [4/6] Staging protocol-isolated installer component roots ==="
 
-cp "$BUILD_DIR/install-arm64/include/lanvid/"* "$SDK_STAGE/include/lanvid/"
-cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$SDK_STAGE/lib/"
-cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$ROOT_CORE/usr/local/lib/liblanvid_core.dylib"
-cp "$UNIV_LIB_DIR/liblanvid_core.a"     "$SDK_STAGE/lib/"
-cp "$BUILD_DIR/install-arm64/lib/cmake/LanVidSDK/"* "$SDK_STAGE/lib/cmake/LanVidSDK/"
+# --- Component 1: LanVid Video SDK (v3.0.0) ---
+ROOT_LV="$BUILD_DIR/pkgroot-lanvid"
+LV_STAGE="$ROOT_LV/usr/local/LanVidSDK"
+mkdir -p "$LV_STAGE/include/lanvid" "$LV_STAGE/lib/cmake/LanVidSDK" "$LV_STAGE/lib/pkgconfig" \
+         "$LV_STAGE/apple" "$LV_STAGE/python" "$LV_STAGE/examples" "$ROOT_LV/usr/local/lib"
+
+cp "$BUILD_DIR/install-arm64/include/lanvid/"* "$LV_STAGE/include/lanvid/"
+cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$LV_STAGE/lib/"
+cp "$UNIV_LIB_DIR/liblanvid_core.dylib" "$ROOT_LV/usr/local/lib/liblanvid_core.dylib"
+cp "$UNIV_LIB_DIR/liblanvid_core.a"     "$LV_STAGE/lib/"
+[ -f "$UNIV_LIB_DIR/libopus.a" ] && cp "$UNIV_LIB_DIR/libopus.a" "$LV_STAGE/lib/"
+cp "$BUILD_DIR/install-arm64/lib/cmake/LanVidSDK/"* "$LV_STAGE/lib/cmake/LanVidSDK/"
 sed "s|^prefix=.*|prefix=/usr/local/LanVidSDK|" \
-  "$BUILD_DIR/install-arm64/lib/pkgconfig/lanvid-sdk.pc" > "$SDK_STAGE/lib/pkgconfig/lanvid-sdk.pc"
-if [ -d "$DIST_APPLE/LanVidCore.xcframework" ]; then
-  cp -R "$DIST_APPLE/LanVidCore.xcframework" "$SDK_STAGE/apple/"
-fi
-cp "$ROOT/sdk/README.md" "$SDK_STAGE/README.md"
+  "$BUILD_DIR/install-arm64/lib/pkgconfig/lanvid-sdk.pc" > "$LV_STAGE/lib/pkgconfig/lanvid-sdk.pc"
+[ -d "$DIST_APPLE/LanVidCore.xcframework" ] && cp -R "$DIST_APPLE/LanVidCore.xcframework" "$LV_STAGE/apple/"
+cp -R "$APPLE_DIR/LanVidKit" "$LV_STAGE/apple/"
+cp "$ROOT/sdk/python/lanvid_sdk.py" "$LV_STAGE/python/"
+[ -d "$ROOT/sdk/examples/cpp_video_client" ] && cp -R "$ROOT/sdk/examples/cpp_video_client" "$LV_STAGE/examples/"
+cp -R "$APPLE_DIR/Examples" "$LV_STAGE/apple-examples"
+cp "$ROOT/sdk/README.md" "$LV_STAGE/README.md"
 
-ROOT_SWIFT="$BUILD_DIR/pkgroot-swift/usr/local/LanVidSDK"
-ROOT_EXTRAS="$BUILD_DIR/pkgroot-extras/usr/local/LanVidSDK"
-mkdir -p "$ROOT_SWIFT/apple" "$ROOT_EXTRAS/python" "$ROOT_EXTRAS/examples"
-cp -R "$APPLE_DIR/LanVidKit" "$ROOT_SWIFT/apple/"
-sed 's|../../dist/apple/LanVidCore.xcframework|LanVidCore.xcframework|g' \
-  "$APPLE_DIR/Package.swift" > "$ROOT_SWIFT/apple/Package.swift"
-cp "$ROOT/sdk/python/lanvid_sdk.py" "$ROOT_EXTRAS/python/"
-cp -R "$APPLE_DIR/Examples" "$ROOT_EXTRAS/apple-examples"
-cp -R "$ROOT/sdk/examples/cpp_client" "$ROOT_EXTRAS/examples/"
+# --- Component 2: CrossLink Audio SDK (v1.0.0) ---
+ROOT_CL="$BUILD_DIR/pkgroot-crosslink"
+CL_STAGE="$ROOT_CL/usr/local/CrossLinkSDK"
+mkdir -p "$CL_STAGE/include/crosslink" "$CL_STAGE/lib/cmake/CrossLinkSDK" "$CL_STAGE/lib/pkgconfig" \
+         "$CL_STAGE/apple" "$CL_STAGE/python" "$CL_STAGE/examples" "$ROOT_CL/usr/local/lib"
 
-SCRIPTS_STAGE="$BUILD_DIR/scripts"
-mkdir -p "$SCRIPTS_STAGE"
-cp "$INST_DIR/scripts/preinstall" "$INST_DIR/scripts/postinstall" "$SCRIPTS_STAGE/"
-chmod 0755 "$SCRIPTS_STAGE/preinstall" "$SCRIPTS_STAGE/postinstall"
+cp "$BUILD_DIR/install-arm64/include/crosslink/"* "$CL_STAGE/include/crosslink/"
+cp "$UNIV_LIB_DIR/libcrosslink_core.dylib" "$CL_STAGE/lib/"
+cp "$UNIV_LIB_DIR/libcrosslink_core.dylib" "$ROOT_CL/usr/local/lib/libcrosslink_core.dylib"
+cp "$UNIV_LIB_DIR/libcrosslink_core.a"     "$CL_STAGE/lib/"
+[ -f "$UNIV_LIB_DIR/libopus.a" ] && cp "$UNIV_LIB_DIR/libopus.a" "$CL_STAGE/lib/"
+cp "$BUILD_DIR/install-arm64/lib/cmake/CrossLinkSDK/"* "$CL_STAGE/lib/cmake/CrossLinkSDK/"
+sed "s|^prefix=.*|prefix=/usr/local/CrossLinkSDK|" \
+  "$BUILD_DIR/install-arm64/lib/pkgconfig/crosslink-sdk.pc" > "$CL_STAGE/lib/pkgconfig/crosslink-sdk.pc"
+[ -d "$DIST_APPLE/CrossLinkCore.xcframework" ] && cp -R "$DIST_APPLE/CrossLinkCore.xcframework" "$CL_STAGE/apple/"
+cp -R "$APPLE_DIR/CrossLinkKit" "$CL_STAGE/apple/"
+cp "$ROOT/sdk/python/crosslink_sdk.py" "$CL_STAGE/python/"
+[ -d "$ROOT/sdk/examples/cpp_audio_client" ] && cp -R "$ROOT/sdk/examples/cpp_audio_client" "$CL_STAGE/examples/"
+cp "$ROOT/sdk/README.md" "$CL_STAGE/README.md"
 
-echo "=== [5/6] Packaging component .pkgs and building LanVidSDK-v${SDK_VERSION}-macOS.pkg ==="
+# Per-protocol Package.swift manifests so each installed SDK works standalone in Xcode
+cat > "$LV_STAGE/apple/Package.swift" <<'EOF'
+// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(
+    name: "LanVidKit",
+    platforms: [.iOS(.v15), .macOS(.v12)],
+    products: [.library(name: "LanVidKit", targets: ["LanVidKit"])],
+    targets: [
+        .binaryTarget(name: "LanVidCore", path: "LanVidCore.xcframework"),
+        .target(name: "LanVidKit", dependencies: ["LanVidCore"], path: "LanVidKit/Sources/LanVidKit",
+                linkerSettings: [
+                    .linkedFramework("CoreVideo"), .linkedFramework("CoreMedia"),
+                    .linkedFramework("VideoToolbox"), .linkedFramework("AVFoundation"),
+                    .linkedFramework("Metal"), .linkedFramework("MetalKit"),
+                    .linkedFramework("SystemConfiguration", .when(platforms: [.macOS])),
+                    .linkedLibrary("c++")
+                ])
+    ]
+)
+EOF
+
+cat > "$CL_STAGE/apple/Package.swift" <<'EOF'
+// swift-tools-version: 5.9
+import PackageDescription
+let package = Package(
+    name: "CrossLinkKit",
+    platforms: [.iOS(.v15), .macOS(.v12)],
+    products: [.library(name: "CrossLinkKit", targets: ["CrossLinkKit"])],
+    targets: [
+        .binaryTarget(name: "CrossLinkCore", path: "CrossLinkCore.xcframework"),
+        .target(name: "CrossLinkKit", dependencies: ["CrossLinkCore"], path: "CrossLinkKit/Sources/CrossLinkKit",
+                linkerSettings: [
+                    .linkedFramework("CoreMIDI"),
+                    .linkedFramework("CoreAudio", .when(platforms: [.macOS])),
+                    .linkedFramework("SystemConfiguration", .when(platforms: [.macOS])),
+                    .linkedLibrary("c++")
+                ])
+    ]
+)
+EOF
+
+SCRIPTS_LV="$BUILD_DIR/scripts-lanvid"
+SCRIPTS_CL="$BUILD_DIR/scripts-crosslink"
+mkdir -p "$SCRIPTS_LV" "$SCRIPTS_CL"
+cp "$INST_DIR/scripts/lanvid/preinstall" "$INST_DIR/scripts/lanvid/postinstall" "$SCRIPTS_LV/"
+cp "$INST_DIR/scripts/crosslink/preinstall" "$INST_DIR/scripts/crosslink/postinstall" "$SCRIPTS_CL/"
+chmod 0755 "$SCRIPTS_LV/"* "$SCRIPTS_CL/"*
+
+echo "=== [5/6] Packaging selectable protocol .pkgs and unified macOS installer ==="
 COMP_DIR="$BUILD_DIR/components"
 mkdir -p "$COMP_DIR"
 
-pkgbuild --root "$ROOT_CORE" --identifier "com.lanvid.sdk.core" --version "$SDK_VERSION" \
-  --scripts "$SCRIPTS_STAGE" --install-location "/" "$COMP_DIR/lanvid-core.pkg"
+pkgbuild --root "$ROOT_LV" --identifier "com.lanvid.sdk.video" --version "$LANVID_VERSION" \
+  --scripts "$SCRIPTS_LV" --install-location "/" "$COMP_DIR/lanvid-video.pkg"
 
-pkgbuild --root "$BUILD_DIR/pkgroot-swift" --identifier "com.lanvid.sdk.swift" --version "$SDK_VERSION" \
-  --install-location "/" "$COMP_DIR/lanvid-swift.pkg"
-
-pkgbuild --root "$BUILD_DIR/pkgroot-extras" --identifier "com.lanvid.sdk.extras" --version "$SDK_VERSION" \
-  --install-location "/" "$COMP_DIR/lanvid-extras.pkg"
+pkgbuild --root "$ROOT_CL" --identifier "com.crosslink.sdk.audio" --version "$CROSSLINK_VERSION" \
+  --scripts "$SCRIPTS_CL" --install-location "/" "$COMP_DIR/crosslink-audio.pkg"
 
 SIGN_ID="${LANVID_INSTALLER_SIGN_ID:-}"
 if [ -z "$SIGN_ID" ] && command -v security >/dev/null 2>&1; then
@@ -153,7 +224,7 @@ PROD_ARGS=(
   --distribution "$INST_DIR/distribution.xml"
   --resources "$INST_DIR/resources"
   --package-path "$COMP_DIR"
-  --version "$SDK_VERSION"
+  --version "$BUNDLE_VERSION"
 )
 if [ -n "$SIGN_ID" ]; then
   echo "[INFO] Signing installer with: $SIGN_ID"
@@ -163,29 +234,37 @@ else
 fi
 
 productbuild "${PROD_ARGS[@]}" "$PKG_OUT"
-echo "[OK] Created installer package: $PKG_OUT ($(du -h "$PKG_OUT" | awk '{print $1}'))"
+echo "[OK] Created selectable macOS installer: $PKG_OUT ($(du -h "$PKG_OUT" | awk '{print $1}'))"
 
-echo "=== [6/6] Creating Finder disk image: LanVidSDK-v${SDK_VERSION}-macOS.dmg ==="
+echo "=== [6/6] Creating Finder disk image: LanVidCrossLinkSDK-v${BUNDLE_VERSION}-macOS.dmg ==="
 DMG_STAGE="$BUILD_DIR/dmg-stage"
 mkdir -p "$DMG_STAGE"
 cp "$PKG_OUT" "$DMG_STAGE/"
 cp "$ROOT/sdk/README.md" "$DMG_STAGE/README.md"
 
-cat > "$DMG_STAGE/Verify_LanVidSDK.command" <<'VEOF'
+cat > "$DMG_STAGE/Verify_Installed_SDKs.command" <<'VEOF'
 #!/usr/bin/env bash
+FOUND=0
 if command -v lanvid-sdk-info >/dev/null 2>&1; then
   lanvid-sdk-info
-else
-  echo "LanVidSDK is not installed yet. Double-click LanVidSDK-v2.7.0-macOS.pkg first."
+  FOUND=1
+fi
+if command -v crosslink-sdk-info >/dev/null 2>&1; then
+  crosslink-sdk-info
+  FOUND=1
+fi
+if [ "$FOUND" -eq 0 ]; then
+  echo "Neither LanVid Video SDK nor CrossLink Audio SDK is installed yet."
+  echo "Double-click LanVidCrossLinkSDK-v3.0.0-macOS.pkg first."
 fi
 read -r -p "Press Enter to close..."
 VEOF
-chmod 0755 "$DMG_STAGE/Verify_LanVidSDK.command"
+chmod 0755 "$DMG_STAGE/Verify_Installed_SDKs.command"
 
 DMG_OK=0
 for attempt in 1 2 3 4 5; do
   if hdiutil create \
-      -volname "LanVidSDK v${SDK_VERSION}" \
+      -volname "LanVid & CrossLink SDK v${BUNDLE_VERSION}" \
       -srcfolder "$DMG_STAGE" \
       -ov -format UDZO \
       "$DMG_OUT" >/dev/null; then
@@ -201,7 +280,7 @@ if [ "$DMG_OK" -ne 1 ]; then
 fi
 
 echo "========================================================"
-echo "  SUCCESS! macOS SDK Installers Ready:"
+echo "  SUCCESS! macOS Selectable SDK Installers Ready:"
 echo "    PKG: $PKG_OUT"
 echo "    DMG: $DMG_OUT"
 echo "========================================================"

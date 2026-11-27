@@ -1,7 +1,7 @@
 #pragma once
-// LanVid SDK — Modern C++17/C++20 Header-Only RAII Wrapper
-// Communicates strictly through the stable C ABI (lanvid/lanvid_sdk.h), so it works safely
-// across mismatched MSVC / Clang / GCC runtimes without STL ABI coupling.
+// LanVid Video SDK (v3.0.0) — Modern C++17/C++20 Header-Only RAII Wrapper
+// Video + 2-channel stereo audio streaming over LAN (zero CrossLink AoIP/MIDI dependencies).
+// Communicates strictly through the stable C ABI (lanvid/lanvid_sdk.h).
 
 #include <cstdint>
 #include <cstdio>
@@ -157,37 +157,13 @@ public:
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
     }
 
+    // Pushes 1-2 channel stereo audio alongside video.
     Result<void> push_audio(const void* data, int num_frames, int sample_rate = 48000, int channels = 2,
                             LV_AudioFormat fmt = LV_AUDIO_FORMAT_PCM16, uint32_t ts_us = 0) {
         const int rc =
             lv_sender_push_audio_chunk(handle_, data, num_frames, sample_rate, channels, int(fmt), ts_us);
         return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
     }
-
-    // ---- 64-channel AoIP bus ----
-    Result<void> configure_audio_bus(const LV_AudioBusConfig& bus) {
-        const int rc = lv_sender_configure_audio_bus(handle_, &bus);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    Result<void> push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
-                                    LV_AudioFormat fmt = LV_AUDIO_FORMAT_F32,
-                                    uint64_t media_ts = LV_MEDIA_TS_AUTO) {
-        const int rc = lv_sender_push_audio_channel(handle_, channel, samples, num_samples, fmt, media_ts);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    Result<void> push_audio_multichannel(const void* data, uint16_t num_channels, uint32_t num_samples,
-                                         LV_AudioFormat fmt = LV_AUDIO_FORMAT_F32,
-                                         LV_AudioLayout layout = LV_AUDIO_LAYOUT_INTERLEAVED,
-                                         uint64_t media_ts = LV_MEDIA_TS_AUTO) {
-        const int rc = lv_sender_push_audio_multichannel(handle_, data, num_channels, num_samples, fmt,
-                                                         layout, media_ts);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    Result<void> set_audio_latency_ms(uint32_t ms) {
-        const int rc = lv_sender_set_audio_latency_ms(handle_, ms);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    uint64_t master_clock_samples() const { return lv_sender_get_master_clock_samples(handle_); }
 
     Result<void> set_quality(int quality) {
         const int rc = lv_sender_request_keyframe_quality(handle_, quality);
@@ -236,7 +212,6 @@ public:
             lv_receiver_set_video_callback(handle_, nullptr, nullptr);
             lv_receiver_set_audio_callback(handle_, nullptr, nullptr);
             lv_receiver_set_state_callback(handle_, nullptr, nullptr);
-            lv_receiver_set_multichannel_audio_callback(handle_, nullptr, nullptr);
             lv_receiver_destroy(handle_);
         }
     }
@@ -298,6 +273,10 @@ public:
     uint16_t local_port() const { return lv_receiver_get_local_port(handle_); }
     void set_volume(float vol) { lv_receiver_set_volume(handle_, vol); }
     void set_concealment(LV_ConcealmentMode m) { lv_receiver_set_concealment(handle_, int(m)); }
+    Result<void> set_audio_target_ms(double ms) {
+        const int rc = lv_receiver_set_audio_target_ms(handle_, ms);
+        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
+    }
     bool save_screenshot(const std::string& ppm_path) {
         return lv_receiver_save_screenshot(handle_, ppm_path.c_str()) != 0;
     }
@@ -305,44 +284,6 @@ public:
         return lv_receiver_pop_audio_pcm16(handle_, stereo_out, num_frames);
     }
 
-    // ---- 64-channel phase-coherent bus ----
-    using MultichannelCallback = std::function<void(const LV_MultichannelAudioBlock&)>;
-    Result<void> configure_audio_bus(const LV_AudioBusConfig& bus) {
-        const int rc = lv_receiver_configure_audio_bus(handle_, &bus);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    Result<void> set_audio_latency_ms(uint32_t ms) {
-        const int rc = lv_receiver_set_audio_latency_ms(handle_, ms);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    // Latency mode, live: true = Adaptive Wi-Fi (default), false = Fixed (Ethernet / live monitoring).
-    Result<void> set_adaptive_jitter(bool enabled) {
-        const int rc = lv_receiver_set_adaptive_jitter(handle_, enabled ? 1 : 0);
-        return rc == LV_OK ? Result<void>::ok() : Result<void>::err(rc);
-    }
-    // Measured jitter-buffer playout delay in ms (0 before playout starts).
-    double effective_latency_ms() const { return lv_receiver_get_effective_latency_ms(handle_); }
-    void on_multichannel_audio(MultichannelCallback cb) {
-        bool has_cb = false;
-        {
-            std::lock_guard<std::mutex> lk(cb_mu_);
-            mc_cb_ = std::move(cb);
-            has_cb = static_cast<bool>(mc_cb_);
-        }
-        if (handle_) {
-            lv_receiver_set_multichannel_audio_callback(handle_, has_cb ? &Receiver::mc_trampoline : nullptr, this);
-        }
-    }
-    // Returns frames rendered (>= 0) or a negative LV_ErrorCode.
-    int pop_audio_multichannel(float* out, uint16_t num_channels, uint32_t num_frames,
-                               LV_AudioLayout layout = LV_AUDIO_LAYOUT_INTERLEAVED) {
-        return lv_receiver_pop_audio_multichannel(handle_, out, num_channels, num_frames, layout);
-    }
-    LV_AudioChannelStats channel_stats(uint16_t channel) const {
-        LV_AudioChannelStats st{};
-        lv_receiver_get_channel_stats(handle_, channel, &st);
-        return st;
-    }
     LV_StreamStats stats() const {
         LV_StreamStats s{};
         lv_receiver_get_stream_stats(handle_, &s);
@@ -370,16 +311,6 @@ private:
         }
         if (cb) cb(*a);
     }
-    static void mc_trampoline(const LV_MultichannelAudioBlock* b, void* ud) {
-        if (!b || !ud) return;
-        auto* self = static_cast<Receiver*>(ud);
-        MultichannelCallback cb;
-        {
-            std::lock_guard<std::mutex> lk(self->cb_mu_);
-            cb = self->mc_cb_;
-        }
-        if (cb) cb(*b);
-    }
     static void state_trampoline(int st, int err, const char* msg, void* ud) {
         if (!ud) return;
         auto* self = static_cast<Receiver*>(ud);
@@ -396,7 +327,6 @@ private:
     VideoCallback video_cb_;
     AudioCallback audio_cb_;
     StateCallback state_cb_;
-    MultichannelCallback mc_cb_;
 };
 
 }  // namespace lanvid

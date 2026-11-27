@@ -5,7 +5,7 @@
 #include <cstring>
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
-#define LV_X86 1
+#define NET_X86 1
 #if defined(_MSC_VER)
 #include <intrin.h>
 #else
@@ -13,11 +13,15 @@
 #endif
 #endif
 
-namespace lv {
+#ifndef NET_SIMD_ENV_VAR
+#define NET_SIMD_ENV_VAR "LV_SIMD"
+#endif
+
+namespace NET_COMMON_NS {
 
 namespace {
 
-#if LV_X86
+#if NET_X86
 void cpuid(int leaf, int sub, int out[4]) {
 #if defined(_MSC_VER)
     __cpuidex(out, leaf, sub);
@@ -64,7 +68,7 @@ bool detect_avx2() { return false; }
 #endif
 
 bool env_forces_scalar() {
-    const char* v = std::getenv("LV_SIMD");
+    const char* v = std::getenv(NET_SIMD_ENV_VAR);
     return v && std::strcmp(v, "scalar") == 0;
 }
 
@@ -97,4 +101,4 @@ bool simd_enabled() {
     return !env_scalar && !g_disabled.load(std::memory_order_relaxed);
 }
 
-}  // namespace lv
+}  // namespace NET_COMMON_NS

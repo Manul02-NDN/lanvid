@@ -1,0 +1,7 @@
+framework module CrossLinkCore {
+    umbrella header "crosslink_sdk.h"
+    header "crosslink_export.h"
+    header "crosslink_types.h"
+    export *
+    module * { export * }
+}

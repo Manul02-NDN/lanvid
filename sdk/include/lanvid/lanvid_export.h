@@ -1,16 +1,17 @@
 #pragma once
 /*
- * LanVid SDK — Export Macros & ABI Version Control
+ * LanVid Video SDK — Export Macros & ABI Version Control
  * Cross-platform C99/C11 public ABI for Windows, Linux, macOS, iOS, and Android.
+ * Video + 2-channel stereo audio streaming, Multi-Cam, ISO recording, and Tally/Intercom.
  */
 
 #include <stdint.h>
 
-#define LV_SDK_VERSION_MAJOR 2
-#define LV_SDK_VERSION_MINOR 7
+#define LV_SDK_VERSION_MAJOR 3
+#define LV_SDK_VERSION_MINOR 0
 #define LV_SDK_VERSION_PATCH 0
-#define LV_SDK_VERSION_STRING "2.7.0"
-#define LV_SDK_ABI_VERSION   2
+#define LV_SDK_VERSION_STRING "3.0.0"
+#define LV_SDK_ABI_VERSION   3
 
 #if defined(_WIN32)
 #  if defined(LANVID_BUILD_SHARED)
@@ -32,7 +33,7 @@
 extern "C" {
 #endif
 
-/* Returns semantic SDK version string (e.g. "1.0.0"). */
+/* Returns semantic SDK version string (e.g. "3.0.0"). */
 LV_API const char* lv_get_version_string(void);
 
 /* Returns packed version integer: (MAJOR << 16) | (MINOR << 8) | PATCH. */

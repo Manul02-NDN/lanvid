@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>LanVid Core SDK v2.7.0</title>
+    <title>LanVid Video &amp; CrossLink Audio SDK</title>
     <organization>com.lanvid</organization>
     <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false" />
-    <options customize="allow" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
+    <options customize="always" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64,x86_64" />
 
     <volume-check>
         <allowed-os-versions>
@@ -15,36 +15,26 @@
     <conclusion file="conclusion.html" mime-type="text/html" />
 
     <choices-outline>
-        <line choice="choice_core" />
-        <line choice="choice_swift" />
-        <line choice="choice_extras" />
+        <line choice="choice_lanvid" />
+        <line choice="choice_crosslink" />
     </choices-outline>
 
-    <choice id="choice_core"
-            title="LanVid Core SDK (Обов'язково)"
-            description="Universal liblanvid_core.dylib &amp; liblanvid_core.a (arm64 NEON + x86_64 AVX2), LanVidCore.xcframework, C/C++ headers, CMake &amp; pkg-config packages."
-            start_selected="true"
-            enabled="false">
-        <pkg-ref id="com.lanvid.sdk.core" />
-    </choice>
-
-    <choice id="choice_swift"
-            title="Swift Package LanVidKit"
-            description="Idiomatic Swift 5.9+ async/await wrapper (LanVidSender, LanVidReceiver, LanVidDiscovery, MetalVideoView) for iOS 15+ and macOS 12+."
+    <choice id="choice_lanvid"
+            title="LanVid Video SDK v3.0.0 (Відеопротокол + 2ch Stereo)"
+            description="Ультранизька затримка відео (AVX2/NEON DCT, HW H.264/H.265, XOR FEC, AIMD), 2-канальне стерео аудіо, Multi-Cam, ISO Recorder, Tally/Intercom. Включає C/C++20, CMake (LanVidSDK), LanVidCore.xcframework, Swift LanVidKit та Python lanvid_sdk."
             start_selected="true"
             enabled="true">
-        <pkg-ref id="com.lanvid.sdk.swift" />
+        <pkg-ref id="com.lanvid.sdk.video" />
     </choice>
 
-    <choice id="choice_extras"
-            title="Python Bindings &amp; Xcode/CMake Examples"
-            description="Zero-dependency Python ctypes/NumPy wrapper (lanvid_sdk.py), SwiftUI examples, and CMake C++17 client."
+    <choice id="choice_crosslink"
+            title="CrossLink Audio SDK v1.0.0 (Аудіопротокол 64ch AoIP + MIDI 2.0 + Grid)"
+            description="Професійний 64-канальний студійний AoIP (48/96 kHz, MasterClock, XOR FEC/NACK, 1+1 Wi-Fi redundancy), Full-Duplex DAW SHM Bus, MIDI 2.0, Personal Monitor Bus, Layer-2 Grid. Включає C/C++20, CMake (CrossLinkSDK), CrossLinkCore.xcframework, Swift CrossLinkKit та Python crosslink_sdk."
             start_selected="true"
             enabled="true">
-        <pkg-ref id="com.lanvid.sdk.extras" />
+        <pkg-ref id="com.crosslink.sdk.audio" />
     </choice>
 
-    <pkg-ref id="com.lanvid.sdk.core" version="2.7.0" onConclusion="none">lanvid-core.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.swift" version="2.7.0" onConclusion="none">lanvid-swift.pkg</pkg-ref>
-    <pkg-ref id="com.lanvid.sdk.extras" version="2.7.0" onConclusion="none">lanvid-extras.pkg</pkg-ref>
+    <pkg-ref id="com.lanvid.sdk.video" version="3.0.0" onConclusion="none">lanvid-video.pkg</pkg-ref>
+    <pkg-ref id="com.crosslink.sdk.audio" version="1.0.0" onConclusion="none">crosslink-audio.pkg</pkg-ref>
 </installer-gui-script>

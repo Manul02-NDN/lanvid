@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# CrossLink Audio SDK v1.0.0 — macOS component postinstall
+set -euo pipefail
+
+LOG_FILE="/var/log/crosslink_sdk_install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== [CrossLink Audio SDK postinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+SDK_ROOT="/usr/local/CrossLinkSDK"
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "${USER:-root}")"
+[ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ] && CONSOLE_USER="root"
+
+mkdir -p /usr/local/include /usr/local/lib/cmake /usr/local/lib/pkgconfig /usr/local/bin
+
+rm -rf /usr/local/include/crosslink
+ln -sfn "$SDK_ROOT/include/crosslink" /usr/local/include/crosslink
+ln -sfn "$SDK_ROOT/lib/libcrosslink_core.dylib" /usr/local/lib/libcrosslink_core.dylib
+ln -sfn "$SDK_ROOT/lib/libcrosslink_core.a"     /usr/local/lib/libcrosslink_core.a
+rm -rf /usr/local/lib/cmake/CrossLinkSDK
+ln -sfn "$SDK_ROOT/lib/cmake/CrossLinkSDK" /usr/local/lib/cmake/CrossLinkSDK
+ln -sfn "$SDK_ROOT/lib/pkgconfig/crosslink-sdk.pc" /usr/local/lib/pkgconfig/crosslink-sdk.pc
+
+if [ -d "/opt/homebrew/lib/pkgconfig" ]; then
+  ln -sfn "$SDK_ROOT/lib/pkgconfig/crosslink-sdk.pc" /opt/homebrew/lib/pkgconfig/crosslink-sdk.pc
+fi
+if [ -d "/opt/homebrew/lib/cmake" ]; then
+  rm -rf /opt/homebrew/lib/cmake/CrossLinkSDK
+  ln -sfn "$SDK_ROOT/lib/cmake/CrossLinkSDK" /opt/homebrew/lib/cmake/CrossLinkSDK
+fi
+
+if [ -f "$SDK_ROOT/python/crosslink_sdk.py" ]; then
+  for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    if [ -x "$py" ]; then
+      SITE_DIR="$("$py" -c 'import site; ps = site.getsitepackages(); print(ps[0] if ps else "")' 2>/dev/null || true)"
+      if [ -n "$SITE_DIR" ] && [ -d "$SITE_DIR" ] && [ -w "$SITE_DIR" ]; then
+        printf '%s\n' "$SDK_ROOT/python" > "$SITE_DIR/crosslink_sdk.pth"
+      fi
+    fi
+  done
+  if [ "$CONSOLE_USER" != "root" ]; then
+    USER_SITE="$(sudo -u "$CONSOLE_USER" python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+    if [ -n "$USER_SITE" ]; then
+      sudo -u "$CONSOLE_USER" mkdir -p "$USER_SITE" 2>/dev/null || true
+      printf '%s\n' "$SDK_ROOT/python" > "$USER_SITE/crosslink_sdk.pth" 2>/dev/null || true
+      chown "$CONSOLE_USER":staff "$USER_SITE/crosslink_sdk.pth" 2>/dev/null || true
+    fi
+  fi
+fi
+
+cat > /usr/local/bin/crosslink-sdk-info <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SDK_ROOT="/usr/local/CrossLinkSDK"
+DYLIB="/usr/local/lib/libcrosslink_core.dylib"
+echo "========================================================"
+echo "  CrossLink Audio SDK v1.0.0 — Installation Info & Test"
+echo "========================================================"
+echo "Host Arch     : $(uname -m) ($(sw_vers -productVersion 2>/dev/null || echo macOS))"
+echo "SDK Root      : $SDK_ROOT"
+echo "Headers       : /usr/local/include/crosslink"
+echo "Universal Lib : $DYLIB ($(lipo -archs "$DYLIB" 2>/dev/null || echo unknown))"
+echo "CMake Package : /usr/local/lib/cmake/CrossLinkSDK (CrossLinkSDK::Audio)"
+echo "pkg-config    : /usr/local/lib/pkgconfig/crosslink-sdk.pc"
+echo "--------------------------------------------------------"
+if command -v python3 >/dev/null 2>&1 && [ -f "$SDK_ROOT/python/crosslink_sdk.py" ]; then
+  CROSSLINK_LIB_PATH="$DYLIB" PYTHONPATH="$SDK_ROOT/python:${PYTHONPATH:-}" python3 - <<'PYEOF'
+import time, struct
+from crosslink_sdk import CrossLinkSDK, CrossLinkSender, CrossLinkReceiver
+sdk = CrossLinkSDK()
+print(f"Runtime ABI   : v{sdk.version} | SIMD: {sdk.simd}")
+got_midi = []
+with CrossLinkReceiver(bind_port=0, num_channels=8, latency_ms=10, device_name="MacAudioSelfTest", discovery_port=15122) as rx:
+    rx.on_midi(lambda st, d1, d2, p, ts: got_midi.append((st, d1, d2)))
+    nodes = sdk.discover_nodes(250, 15122)
+    with CrossLinkSender(dest_ip="127.0.0.1", dest_port=rx.local_port, latency_ms=10) as tx:
+        pcm = struct.pack("<240f", *([0.25] * 240))
+        tx.push_audio_channel(0, pcm)
+        tx.push_midi(0x90, 60, 100)
+        for _ in range(40):
+            if got_midi: break
+            time.sleep(0.01)
+ok = len(got_midi) >= 1 and any(n["name"] == "MacAudioSelfTest" for n in nodes)
+print(f"Self-Test     : {'PASS' if ok else 'WARN'} (nodes={len(nodes)}, midi_rx={len(got_midi)})")
+PYEOF
+fi
+EOF
+chmod 0755 /usr/local/bin/crosslink-sdk-info
+
+FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
+if [ -x "$FW" ]; then
+  for t in "$SDK_ROOT/lib/libcrosslink_core.dylib" "/usr/local/lib/libcrosslink_core.dylib" "/usr/local/bin/crosslink-sdk-info"; do
+    [ -e "$t" ] && { "$FW" --add "$t" >/dev/null 2>&1 || true; "$FW" --unblockapp "$t" >/dev/null 2>&1 || true; }
+  done
+fi
+echo "=== [CrossLink Audio SDK postinstall] Complete ==="
+exit 0

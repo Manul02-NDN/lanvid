@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: CrossLinkSDK
+Description: CrossLink Ultra-Low Latency 64-Channel Studio AoIP, MIDI 2.0, Personal Monitor & Layer-2 Grid SDK
+Version: @CROSSLINK_SDK_VERSION@
+Cflags: -I${includedir} -DCROSSLINK_USE_SHARED=1
+Libs: -L${libdir} -lcrosslink_core
+Libs.private: @CROSSLINK_PKGCONFIG_PRIVATE_LIBS@

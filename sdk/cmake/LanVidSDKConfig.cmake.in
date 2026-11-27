@@ -3,6 +3,22 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
+if(NOT TARGET Opus::opus)
+  find_library(_LANVID_BUNDLED_OPUS NAMES opus libopus
+    PATHS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@"
+    NO_DEFAULT_PATH)
+  if(_LANVID_BUNDLED_OPUS)
+    add_library(Opus::opus UNKNOWN IMPORTED)
+    set_target_properties(Opus::opus PROPERTIES IMPORTED_LOCATION "${_LANVID_BUNDLED_OPUS}")
+  else()
+    find_dependency(Opus)
+  endif()
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/LanVidSDKTargets.cmake")
+
+if(TARGET LanVidSDK::VideoStatic AND TARGET Opus::opus)
+  target_link_libraries(LanVidSDK::VideoStatic INTERFACE Opus::opus)
+endif()
 
 check_required_components(LanVidSDK)

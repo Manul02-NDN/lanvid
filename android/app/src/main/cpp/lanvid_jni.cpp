@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "lanvid/lanvid_sdk.h"
-#include "lanvid_c_api.h"
 
 #define LV_LOGI(...) __android_log_print(ANDROID_LOG_INFO, "LanVidJNI", __VA_ARGS__)
 #define LV_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LanVidJNI", __VA_ARGS__)
@@ -223,12 +222,11 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     if (!g_sender) g_sender = lv_sender_create();
     else lv_sender_stop(g_sender);
     if (!g_sender) return JNI_FALSE;
-    LvSenderConfig sc;
-    lv_sender_config_default(&sc);
+    LV_SenderConfig sc{};
+    lv_sdk_sender_config_default(&sc);
     const std::string ip = jstr_to_std(env, dest_ip);
     std::snprintf(sc.dest_ip, sizeof(sc.dest_ip), "%s", ip.c_str());
     sc.dest_port = uint16_t(std::clamp(int(dest_port), 1024, 65535));
-    sc.source_type = LV_SOURCE_EXTERNAL;
     sc.width = width;
     sc.height = height;
     sc.fps = double(fps > 0 ? fps : 60);
@@ -240,7 +238,7 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     sc.q_min = 35;
     sc.q_max = 85;
     sc.threads = 0;
-    const bool ok = lv_sender_start(g_sender, &sc) != 0;
+    const bool ok = lv_sdk_sender_start(g_sender, &sc) == LV_OK;
     g_sender_running.store(ok, std::memory_order_release);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
@@ -249,8 +247,7 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetAudioLatencyMs(
                                                                                 jint latency_ms) {
     std::lock_guard<std::mutex> lk(g_receiver_mu);
     if (g_receiver) {
-        lv_receiver_set_audio_latency_ms(g_receiver,
-                                         uint32_t(std::clamp(int(latency_ms), 2, 2000)));
+        lv_receiver_set_audio_target_ms(g_receiver, double(std::clamp(int(latency_ms), 5, 250)));
     }
 }
 
@@ -310,7 +307,8 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushRgba(
 
     std::lock_guard<std::mutex> lk(g_sender_mu);
     if (!g_sender || !g_sender_running.load(std::memory_order_acquire)) return JNI_FALSE;
-    return lv_sender_push_raw_frame(g_sender, ptr, width, height, stride, LV_PIXFMT_RGBA, 0)
+    return lv_sender_push_packed_frame(g_sender, ptr, width, height, stride,
+                                       LV_PIXEL_FORMAT_RGBA8888, 0) == LV_OK
                ? JNI_TRUE
                : JNI_FALSE;
 }
@@ -327,8 +325,10 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushAudioPcm16
     {
         std::lock_guard<std::mutex> lk(g_sender_mu);
         if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
-            ok = lv_sender_push_audio_pcm16(g_sender, reinterpret_cast<const int16_t*>(data),
-                                            num_frames, sample_rate, channels, 0);
+            ok = lv_sender_push_audio_chunk(g_sender, data, num_frames, sample_rate, channels,
+                                            LV_AUDIO_FORMAT_PCM16, 0) == LV_OK
+                     ? 1
+                     : 0;
         }
     }
     env->ReleaseShortArrayElements(pcm, data, JNI_ABORT);
@@ -336,18 +336,19 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushAudioPcm16
 }
 
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetSenderStatsJson(JNIEnv* env, jclass) {
-    LvSenderStats st{};
+    LV_StreamStats st{};
     {
         std::lock_guard<std::mutex> lk(g_sender_mu);
-        if (g_sender) lv_sender_get_stats(g_sender, &st);
+        if (g_sender) lv_sender_get_stream_stats(g_sender, &st);
     }
     char buf[512];
+    const int running = (st.state == LV_STATE_RUNNING || st.state == LV_STATE_CONNECTED) ? 1 : 0;
     std::snprintf(buf, sizeof(buf),
                   "{\"running\":%d,\"width\":%d,\"height\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
                   "\"enc_ms\":%.2f,\"q\":%d,\"loss\":%.2f,\"audio_kbps\":%.0f,\"frames\":%llu}",
-                  st.running, st.width, st.height, st.tx_fps, st.tx_mbps, st.encode_tx_ms,
-                  st.active_quality, st.rx_loss_pct, st.audio_kbps,
-                  static_cast<unsigned long long>(st.frames_sent));
+                  running, st.width, st.height, st.fps, st.bitrate_mbps, st.encode_ms,
+                  st.active_quality, st.packet_loss_pct, st.audio_kbps,
+                  static_cast<unsigned long long>(st.frames_total));
     return env->NewStringUTF(buf);
 }
 
@@ -360,17 +361,16 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartReceiver(
     else lv_receiver_stop(g_receiver);
     if (!g_receiver) return JNI_FALSE;
 
-    LvReceiverConfig rc;
-    lv_receiver_config_default(&rc);
+    LV_ReceiverConfig rc{};
+    lv_sdk_receiver_config_default(&rc);
     rc.bind_port = uint16_t(std::clamp(int(port), 1024, 65535));
     rc.audio_target_ms = audio_target_ms > 0.0 ? audio_target_ms : 12.0;
-    rc.enable_audio = 0;
-    rc.external_audio_pull = 1;  // AAudio pulls directly via lv_receiver_pop_audio_pcm16
+    rc.enable_os_audio = 0;  // AAudio pulls directly via lv_receiver_pop_audio_pcm16
     rc.enable_discovery = 1;
     const std::string dn = jstr_to_std(env, device_name);
     if (!dn.empty()) std::snprintf(rc.device_name, sizeof(rc.device_name), "%s", dn.c_str());
 
-    if (!lv_receiver_start(g_receiver, &rc)) return JNI_FALSE;
+    if (lv_sdk_receiver_start(g_receiver, &rc) != LV_OK) return JNI_FALSE;
     start_aaudio_locked(g_receiver);
     start_render_loop_locked(g_receiver);
     return JNI_TRUE;
@@ -402,18 +402,19 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetVolume(JNIEnv*,
 }
 
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetReceiverStatsJson(JNIEnv* env, jclass) {
-    LvReceiverStats st{};
+    LV_StreamStats st{};
     {
         std::lock_guard<std::mutex> lk(g_receiver_mu);
-        if (g_receiver) lv_receiver_get_stats(g_receiver, &st);
+        if (g_receiver) lv_receiver_get_stream_stats(g_receiver, &st);
     }
     char buf[512];
+    const int running = (st.state == LV_STATE_RUNNING || st.state == LV_STATE_CONNECTED) ? 1 : 0;
     std::snprintf(buf, sizeof(buf),
                   "{\"running\":%d,\"width\":%d,\"height\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
                   "\"lat_p50\":%.2f,\"lat_p99\":%.2f,\"loss\":%.2f,\"fec\":%llu,"
                   "\"audio_kbps\":%.0f,\"audio_buf\":%.1f}",
-                  st.running, st.width, st.height, st.fps, st.rx_mbps, st.latency_p50_ms,
-                  st.latency_p99_ms, st.loss_pct, static_cast<unsigned long long>(st.fec_recovered),
+                  running, st.width, st.height, st.fps, st.bitrate_mbps, st.latency_p50_ms,
+                  st.latency_p99_ms, st.packet_loss_pct, static_cast<unsigned long long>(st.fec_recovered),
                   st.audio_kbps, st.audio_buffer_ms);
     return env->NewStringUTF(buf);
 }

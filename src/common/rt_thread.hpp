@@ -10,7 +10,9 @@
 
 #include <cstdint>
 
-namespace lv {
+#include "common/common_ns.hpp"
+
+namespace NET_COMMON_NS {
 
 // period_us: how often the thread wakes (e.g. 128 frames @ 48 kHz = 2667 us);
 // computation_us: CPU time it needs per period; constraint_us: deadline within the period.
@@ -39,4 +41,4 @@ private:
 #endif
 };
 
-}  // namespace lv
+}  // namespace NET_COMMON_NS

@@ -29,7 +29,6 @@ targets:
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
       - sdk: CoreImage.framework
-      - sdk: CoreMIDI.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.manul02.lanvid.camera

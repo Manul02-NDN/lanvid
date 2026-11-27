@@ -1,6 +1,7 @@
-module LanVidCore {
-    umbrella header "lanvid/lanvid_sdk.h"
-    header "lanvid/lanvid_export.h"
-    header "lanvid/lanvid_types.h"
+framework module LanVidCore {
+    umbrella header "lanvid_sdk.h"
+    header "lanvid_export.h"
+    header "lanvid_types.h"
     export *
+    module * { export * }
 }

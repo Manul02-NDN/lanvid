@@ -11,7 +11,9 @@
 #include <mach/mach_time.h>
 #endif
 
-namespace lv {
+#include "common/common_ns.hpp"
+
+namespace NET_COMMON_NS {
 
 inline uint64_t now_us() {
     using namespace std::chrono;
@@ -90,4 +92,4 @@ inline void sleep_until_us(uint64_t target_us, Fn&& idle_cb) {
     }
 }
 
-}  // namespace lv
+}  // namespace NET_COMMON_NS

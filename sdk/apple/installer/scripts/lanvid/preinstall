@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# LanVid Video SDK v3.0.0 — macOS component preinstall
+# Strictly manages ONLY LanVid files (never touches /usr/local/CrossLinkSDK!).
+set -euo pipefail
+
+LOG_FILE="/var/log/lanvid_sdk_install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== [LanVid Video SDK preinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+ARCH="$(uname -m)"
+MACOS_VER="$(sw_vers -productVersion 2>/dev/null || echo "0.0")"
+MACOS_MAJOR="${MACOS_VER%%.*}"
+echo "[INFO] Arch: $ARCH | macOS: $MACOS_VER"
+
+if [ "${MACOS_MAJOR:-0}" -lt 12 ] 2>/dev/null; then
+  echo "[ERROR] LanVid Video SDK requires macOS 12.0 or newer (detected $MACOS_VER)."
+  exit 1
+fi
+
+if [ -d "/usr/local/LanVidSDK" ]; then
+  echo "[INFO] Cleaning previous /usr/local/LanVidSDK before upgrade..."
+  rm -rf "/usr/local/LanVidSDK"
+fi
+echo "=== [LanVid Video SDK preinstall] Complete ==="
+exit 0

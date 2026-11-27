@@ -22,7 +22,7 @@
 #include <sched.h>
 #endif
 
-namespace lv {
+namespace NET_COMMON_NS {
 
 #if defined(_WIN32)
 namespace {
@@ -118,4 +118,4 @@ RealtimeThreadScope::~RealtimeThreadScope() {
 #endif
 }
 
-}  // namespace lv
+}  // namespace NET_COMMON_NS

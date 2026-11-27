@@ -1,0 +1,1 @@
+-keep class com.crosslink.sdk.internal.CrossLinkNativeBridge { *; }

@@ -1,5 +1,8 @@
 """
-LanVid SDK — Python ctypes + optional NumPy Bindings (Windows / Linux / macOS)
+LanVid Video SDK v3.0.0 — Python ctypes + optional NumPy Bindings (Windows / Linux / macOS)
+
+Pure ultra-low-latency LAN Video + 2-channel Stereo Audio protocol.
+For 64-channel AoIP, MIDI 2.0, Personal Monitor Bus, and Layer-2 Grid, see `crosslink_sdk.py`.
 
 Zero required third-party dependencies. If `numpy` is installed, frames can be sent and
 received directly as `(H, W, 4)` uint8 `numpy.ndarray` objects with zero extra copies.
@@ -21,9 +24,9 @@ except ImportError:
     _HAS_NUMPY = False
 
 # ---- Constants matching sdk/include/lanvid/lanvid_export.h & lanvid_types.h ----
-__version__ = "2.7.0"
-LV_SDK_VERSION_MAJOR = 2
-LV_SDK_VERSION_MINOR = 7
+__version__ = "3.0.0"
+LV_SDK_VERSION_MAJOR = 3
+LV_SDK_VERSION_MINOR = 0
 LV_SDK_VERSION_PATCH = 0
 
 LV_PIXEL_FORMAT_BGRA8888 = 0
@@ -32,14 +35,9 @@ LV_PIXEL_FORMAT_I420 = 2
 LV_PIXEL_FORMAT_NV12 = 3
 LV_PIXEL_FORMAT_NV21 = 4
 
+LV_AUDIO_MAX_CHANNELS = 2
 LV_AUDIO_FORMAT_PCM16 = 0
 LV_AUDIO_FORMAT_F32 = 1
-LV_AUDIO_FORMAT_PCM24_PACKED = 2
-
-LV_AUDIO_MAX_CHANNELS = 64
-LV_AUDIO_LAYOUT_INTERLEAVED = 0
-LV_AUDIO_LAYOUT_PLANAR = 1
-LV_MEDIA_TS_AUTO = 0xFFFFFFFFFFFFFFFF
 
 LV_CODEC_LANVID_DCT = 0
 LV_CODEC_H264 = 1
@@ -179,56 +177,13 @@ AUDIO_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.POINTER(LV_AudioChunkView), ctypes
 STATE_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p)
 
 
-class LV_AudioBusConfig(ctypes.Structure):
-    _fields_ = [
-        ("sample_rate", ctypes.c_int32),
-        ("latency_ms", ctypes.c_uint32),
-        ("num_channels", ctypes.c_int32),
-        ("block_frames", ctypes.c_uint32),
-    ]
-
-
-class LV_MultichannelAudioBlock(ctypes.Structure):
-    _fields_ = [
-        ("data", ctypes.POINTER(ctypes.c_float)),
-        ("num_channels", ctypes.c_int32),
-        ("num_frames", ctypes.c_int32),
-        ("sample_rate", ctypes.c_int32),
-        ("reserved", ctypes.c_uint32),
-        ("playout_position_samples", ctypes.c_uint64),
-        ("block_index", ctypes.c_uint64),
-    ]
-
-
-class LV_AudioChannelStats(ctypes.Structure):
-    _fields_ = [
-        ("packets_rx", ctypes.c_uint64),
-        ("packets_lost", ctypes.c_uint64),
-        ("fec_recovered", ctypes.c_uint64),
-        ("nack_recovered", ctypes.c_uint64),
-        ("nacks_sent", ctypes.c_uint64),
-        ("underruns", ctypes.c_uint64),
-        ("late_packets", ctypes.c_uint64),
-        ("level_dbfs", ctypes.c_float),
-        ("active", ctypes.c_int32),
-        ("jitter_us", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-    ]
-
-
-MC_AUDIO_CB_TYPE = ctypes.CFUNCTYPE(None, ctypes.POINTER(LV_MultichannelAudioBlock), ctypes.c_void_p)
-
-
-def _as_audio_buffer(samples, fmt: int):
-    """Returns (ctypes pointer, keep-alive object, number of samples) for numpy arrays or bytes."""
+def _as_stereo_buffer(samples, fmt: int):
     if _HAS_NUMPY and isinstance(samples, np.ndarray):
-        dtype = {LV_AUDIO_FORMAT_PCM16: np.int16, LV_AUDIO_FORMAT_F32: np.float32,
-                 LV_AUDIO_FORMAT_PCM24_PACKED: np.uint8}[fmt]
+        dtype = np.int16 if fmt == LV_AUDIO_FORMAT_PCM16 else np.float32
         arr = np.ascontiguousarray(samples, dtype=dtype)
-        n = arr.size if fmt != LV_AUDIO_FORMAT_PCM24_PACKED else arr.size // 3
-        return arr.ctypes.data_as(ctypes.c_void_p), arr, n
+        return arr.ctypes.data_as(ctypes.c_void_p), arr, int(arr.size)
     raw = bytes(samples)
-    bps = {LV_AUDIO_FORMAT_PCM16: 2, LV_AUDIO_FORMAT_F32: 4, LV_AUDIO_FORMAT_PCM24_PACKED: 3}[fmt]
+    bps = 2 if fmt == LV_AUDIO_FORMAT_PCM16 else 4
     buf = (ctypes.c_uint8 * len(raw)).from_buffer_copy(raw)
     return ctypes.cast(buf, ctypes.c_void_p), buf, len(raw) // bps
 
@@ -254,6 +209,7 @@ def _find_library(explicit_path: Optional[str] = None) -> str:
         here.parents[1] / "build" / lib_name,
         here.parents[1] / "dist" / f"LanVidSDK-v{__version__}" / "bin" / lib_name,
         here.parents[1] / "dist" / f"LanVidSDK-v{__version__}" / "lib" / lib_name,
+        Path("/usr/local/lib") / lib_name,
     ]
     for c in candidates:
         if c.is_file():
@@ -301,6 +257,8 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_sender_force_keyframe.restype = ctypes.c_int
     lib.lv_sender_set_fec_group.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.lv_sender_set_fec_group.restype = ctypes.c_int
+    lib.lv_sender_set_adaptive_quality.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.lv_sender_set_adaptive_quality.restype = ctypes.c_int
     lib.lv_sender_get_stream_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_StreamStats)]
     lib.lv_sender_get_stream_stats.restype = ctypes.c_int
 
@@ -314,6 +272,10 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_receiver_set_video_callback.argtypes = [ctypes.c_void_p, VIDEO_CB_TYPE, ctypes.c_void_p]
     lib.lv_receiver_set_audio_callback.argtypes = [ctypes.c_void_p, AUDIO_CB_TYPE, ctypes.c_void_p]
     lib.lv_receiver_set_state_callback.argtypes = [ctypes.c_void_p, STATE_CB_TYPE, ctypes.c_void_p]
+    lib.lv_receiver_pop_audio_pcm16.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_int]
+    lib.lv_receiver_pop_audio_pcm16.restype = ctypes.c_int
+    lib.lv_receiver_set_audio_target_ms.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    lib.lv_receiver_set_audio_target_ms.restype = ctypes.c_int
     lib.lv_receiver_get_latest_frame.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
         ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
@@ -324,53 +286,19 @@ def _load_lib(lib_path: Optional[str] = None) -> ctypes.CDLL:
     lib.lv_receiver_get_stream_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_StreamStats)]
     lib.lv_receiver_get_stream_stats.restype = ctypes.c_int
 
-    # ---- 64-channel AoIP bus ----
-    lib.lv_audio_bus_config_default.argtypes = [ctypes.POINTER(LV_AudioBusConfig)]
-    lib.lv_sender_configure_audio_bus.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_AudioBusConfig)]
-    lib.lv_sender_configure_audio_bus.restype = ctypes.c_int
-    lib.lv_sender_push_audio_channel.argtypes = [
-        ctypes.c_void_p, ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int, ctypes.c_uint64,
-    ]
-    lib.lv_sender_push_audio_channel.restype = ctypes.c_int
-    lib.lv_sender_push_audio_multichannel.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int, ctypes.c_int,
-        ctypes.c_uint64,
-    ]
-    lib.lv_sender_push_audio_multichannel.restype = ctypes.c_int
-    lib.lv_sender_set_audio_latency_ms.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.lv_sender_set_audio_latency_ms.restype = ctypes.c_int
-    lib.lv_sender_get_master_clock_samples.argtypes = [ctypes.c_void_p]
-    lib.lv_sender_get_master_clock_samples.restype = ctypes.c_uint64
-    lib.lv_receiver_configure_audio_bus.argtypes = [ctypes.c_void_p, ctypes.POINTER(LV_AudioBusConfig)]
-    lib.lv_receiver_configure_audio_bus.restype = ctypes.c_int
-    lib.lv_receiver_set_audio_latency_ms.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    lib.lv_receiver_set_audio_latency_ms.restype = ctypes.c_int
-    lib.lv_receiver_set_adaptive_jitter.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    lib.lv_receiver_set_adaptive_jitter.restype = ctypes.c_int
-    lib.lv_receiver_get_effective_latency_ms.argtypes = [ctypes.c_void_p]
-    lib.lv_receiver_get_effective_latency_ms.restype = ctypes.c_double
-    lib.lv_receiver_set_multichannel_audio_callback.argtypes = [ctypes.c_void_p, MC_AUDIO_CB_TYPE, ctypes.c_void_p]
-    lib.lv_receiver_set_multichannel_audio_callback.restype = ctypes.c_int
-    lib.lv_receiver_pop_audio_multichannel.argtypes = [
-        ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_uint16, ctypes.c_uint32, ctypes.c_int,
-    ]
-    lib.lv_receiver_pop_audio_multichannel.restype = ctypes.c_int
-    lib.lv_receiver_get_channel_stats.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.POINTER(LV_AudioChannelStats)]
-    lib.lv_receiver_get_channel_stats.restype = ctypes.c_int
-
     lib.lv_discovery_scan_peers.argtypes = [
         ctypes.c_int, ctypes.c_uint16, ctypes.POINTER(LV_DiscoveredPeer), ctypes.c_int,
     ]
     lib.lv_discovery_scan_peers.restype = ctypes.c_int
 
     if not lib.lv_check_abi_compatibility(LV_SDK_VERSION_MAJOR, LV_SDK_VERSION_MINOR):
-        raise RuntimeError("Incompatible LanVidSDK shared library ABI version")
+        raise RuntimeError("Incompatible LanVidSDK shared library ABI version (expected v3.x)")
     lib.lv_init()
     return lib
 
 
 class LanVidSDK:
-    """Entry point holding the loaded shared library."""
+    """Entry point holding the loaded LanVid Video shared library."""
 
     def __init__(self, lib_path: Optional[str] = None) -> None:
         self.lib = _load_lib(lib_path)
@@ -409,6 +337,8 @@ class LanVidSDK:
 
 
 class LanVidSender:
+    """LanVid Video + 2-channel Stereo Audio Sender."""
+
     def __init__(
         self,
         dest_ip: str = "127.0.0.1",
@@ -463,52 +393,30 @@ class LanVidSender:
             stride = w * 4
             if len(frame) < stride * h:
                 raise ValueError(f"Frame buffer too small: {len(frame)} < {stride * h}")
-            buf = (ctypes.c_uint8 * len(frame)).from_buffer_copy(frame) if isinstance(frame, bytes) else (ctypes.c_uint8 * len(frame)).from_buffer(frame)
+            buf = (
+                (ctypes.c_uint8 * len(frame)).from_buffer_copy(frame)
+                if isinstance(frame, bytes)
+                else (ctypes.c_uint8 * len(frame)).from_buffer(frame)
+            )
             ptr = ctypes.cast(buf, ctypes.c_void_p)
         rc = self._lib.lv_sender_push_packed_frame(self._handle, ptr, w, h, stride, pixel_format, timestamp_us)
         if rc != LV_OK:
             raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
 
-    # ---- 64-channel AoIP bus ----
-    def configure_audio_bus(self, latency_ms: int = 20, sample_rate: int = 48000) -> None:
-        """Call before start() to pick 48/96 kHz; latency may also be changed live."""
-        bus = LV_AudioBusConfig()
-        self._lib.lv_audio_bus_config_default(ctypes.byref(bus))
-        bus.latency_ms = int(latency_ms)
-        bus.sample_rate = int(sample_rate)
-        rc = self._lib.lv_sender_configure_audio_bus(self._handle, ctypes.byref(bus))
-        if rc != LV_OK:
-            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def push_audio_channel(self, channel: int, samples, fmt: int = LV_AUDIO_FORMAT_F32,
-                           media_ts: Optional[int] = None) -> None:
-        """Pushes one channel (0..63); `samples` is a 1-D numpy array or raw bytes."""
-        ptr, _keep, n = _as_audio_buffer(samples, fmt)
-        ts = LV_MEDIA_TS_AUTO if media_ts is None else int(media_ts)
-        rc = self._lib.lv_sender_push_audio_channel(self._handle, int(channel), ptr, n, fmt, ts)
+    def push_stereo_audio(self, samples, channels: int = 2, sample_rate: int = 48000,
+                          audio_format: int = LV_AUDIO_FORMAT_PCM16, timestamp_us: int = 0) -> None:
+        """Pushes 1-2 channel interleaved stereo audio alongside video (PCM16 or F32)."""
+        if channels not in (1, 2):
+            raise ValueError("LanVid Video protocol carries 1-2 stereo audio channels (use CrossLinkSDK for 64ch AoIP)")
+        ptr, _keep, total_samples = _as_stereo_buffer(samples, audio_format)
+        num_frames = total_samples // channels
+        if num_frames <= 0:
+            raise ValueError("Empty audio buffer")
+        rc = self._lib.lv_sender_push_audio_chunk(
+            self._handle, ptr, num_frames, int(sample_rate), int(channels), int(audio_format), int(timestamp_us)
+        )
         if rc != LV_OK:
             raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def push_audio_multichannel(self, frames, fmt: int = LV_AUDIO_FORMAT_F32,
-                                media_ts: Optional[int] = None) -> None:
-        """Pushes an interleaved `(num_samples, num_channels)` numpy array (all channels phase-locked)."""
-        if not (_HAS_NUMPY and isinstance(frames, np.ndarray) and frames.ndim == 2):
-            raise TypeError("push_audio_multichannel expects a 2-D numpy array (num_samples, num_channels)")
-        n, ch = frames.shape
-        ptr, _keep, _ = _as_audio_buffer(frames, fmt)
-        ts = LV_MEDIA_TS_AUTO if media_ts is None else int(media_ts)
-        rc = self._lib.lv_sender_push_audio_multichannel(self._handle, ptr, ch, n, fmt,
-                                                         LV_AUDIO_LAYOUT_INTERLEAVED, ts)
-        if rc != LV_OK:
-            raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def set_audio_latency_ms(self, latency_ms: int) -> None:
-        rc = self._lib.lv_sender_set_audio_latency_ms(self._handle, int(latency_ms))
-        if rc != LV_OK:
-            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def master_clock_samples(self) -> int:
-        return int(self._lib.lv_sender_get_master_clock_samples(self._handle))
 
     def set_quality(self, quality: int) -> None:
         self._lib.lv_sender_request_keyframe_quality(self._handle, int(quality))
@@ -521,6 +429,9 @@ class LanVidSender:
 
     def set_fec_group(self, group_size: int) -> None:
         self._lib.lv_sender_set_fec_group(self._handle, int(group_size))
+
+    def set_adaptive_quality(self, enabled: bool, q_min: int = 35, q_max: int = 85) -> None:
+        self._lib.lv_sender_set_adaptive_quality(self._handle, 1 if enabled else 0, int(q_min), int(q_max))
 
     def stats(self) -> LV_StreamStats:
         s = LV_StreamStats()
@@ -541,12 +452,15 @@ class LanVidSender:
 
 
 class LanVidReceiver:
+    """LanVid Video + 2-channel Stereo Audio Receiver."""
+
     def __init__(
         self,
         bind_port: int = 5000,
         output_format: int = LV_PIXEL_FORMAT_BGRA8888,
-        device_name: str = "PythonReceiver",
+        device_name: str = "PythonVideoReceiver",
         discovery_port: int = 5099,
+        audio_target_ms: float = 12.0,
         lib_path: Optional[str] = None,
     ) -> None:
         self._sdk = LanVidSDK(lib_path)
@@ -559,9 +473,10 @@ class LanVidReceiver:
         self._cfg.bind_port = bind_port
         self._cfg.discovery_port = discovery_port
         self._cfg.output_format = output_format
+        self._cfg.audio_target_ms = float(audio_target_ms)
         self._cfg.device_name = device_name.encode("utf-8")
         self._video_cb_ref = None
-        self._mc_cb_ref = None
+        self._audio_cb_ref = None
         self._last_seq = ctypes.c_uint32(0)
         self._poll_buf: Optional[bytearray] = None
 
@@ -599,6 +514,32 @@ class LanVidReceiver:
         self._video_cb_ref = VIDEO_CB_TYPE(_trampoline)
         self._lib.lv_receiver_set_video_callback(self._handle, self._video_cb_ref, None)
 
+    def on_stereo_audio(self, callback: Optional[Callable[[object, int, int, int], None]]) -> None:
+        """Registers callback(pcm_ndarray_or_bytes, num_frames, sample_rate, channels), or None to clear."""
+        if callback is None:
+            self._audio_cb_ref = AUDIO_CB_TYPE(0)
+            self._lib.lv_receiver_set_audio_callback(self._handle, self._audio_cb_ref, None)
+            return
+
+        def _trampoline(chunk_ptr, _ud):
+            if not chunk_ptr:
+                return
+            c = chunk_ptr.contents
+            if not c.data or c.num_frames <= 0 or c.channels <= 0:
+                return
+            bps = 2 if c.audio_format == LV_AUDIO_FORMAT_PCM16 else 4
+            nbytes = c.num_frames * c.channels * bps
+            raw = ctypes.string_at(c.data, nbytes)
+            if _HAS_NUMPY:
+                dtype = np.int16 if c.audio_format == LV_AUDIO_FORMAT_PCM16 else np.float32
+                arr = np.frombuffer(raw, dtype=dtype).reshape((c.num_frames, c.channels)).copy()
+                callback(arr, int(c.num_frames), int(c.sample_rate), int(c.channels))
+            else:
+                callback(raw, int(c.num_frames), int(c.sample_rate), int(c.channels))
+
+        self._audio_cb_ref = AUDIO_CB_TYPE(_trampoline)
+        self._lib.lv_receiver_set_audio_callback(self._handle, self._audio_cb_ref, None)
+
     def start(self) -> int:
         rc = self._lib.lv_sdk_receiver_start(self._handle, ctypes.byref(self._cfg))
         if rc != LV_OK:
@@ -608,6 +549,23 @@ class LanVidReceiver:
     @property
     def local_port(self) -> int:
         return int(self._lib.lv_receiver_get_local_port(self._handle))
+
+    def pop_stereo_audio_pcm16(self, num_frames: int):
+        """Pulls stereo 48 kHz PCM16 frames from the lock-free stereo jitter buffer."""
+        nf = int(num_frames)
+        buf = (ctypes.c_int16 * (nf * 2))()
+        got = self._lib.lv_receiver_pop_audio_pcm16(self._handle, buf, nf)
+        if got < 0:
+            raise RuntimeError(self._lib.lv_error_string(got).decode("utf-8"))
+        if _HAS_NUMPY:
+            return np.ctypeslib.as_array(buf)[: got * 2].reshape((got, 2)).copy()
+        return [buf[i] for i in range(got * 2)]
+
+    def set_audio_target_ms(self, target_ms: float) -> None:
+        self._lib.lv_receiver_set_audio_target_ms(self._handle, float(target_ms))
+
+    def set_volume(self, volume: float) -> None:
+        self._lib.lv_receiver_set_volume(self._handle, float(volume))
 
     def get_latest_frame(self, want_rgba: bool = False) -> Optional[Tuple[object, int, int]]:
         w = ctypes.c_int(0)
@@ -633,71 +591,6 @@ class LanVidReceiver:
             return arr, w.value, h.value
         return bytes(self._poll_buf[:need]), w.value, h.value
 
-    # ---- 64-channel phase-coherent bus ----
-    def configure_audio_bus(self, latency_ms: int = 20, sample_rate: int = 48000,
-                            num_channels: int = 64, block_frames: int = 240) -> None:
-        bus = LV_AudioBusConfig(int(sample_rate), int(latency_ms), int(num_channels), int(block_frames))
-        rc = self._lib.lv_receiver_configure_audio_bus(self._handle, ctypes.byref(bus))
-        if rc != LV_OK:
-            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def set_audio_latency_ms(self, latency_ms: int) -> None:
-        """Live change 2..2000 ms without reconnecting."""
-        rc = self._lib.lv_receiver_set_audio_latency_ms(self._handle, int(latency_ms))
-        if rc != LV_OK:
-            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def set_adaptive_jitter(self, enabled: bool) -> None:
-        """Latency mode, live: True = Adaptive Wi-Fi (default), False = Fixed (Ethernet / live monitoring)."""
-        rc = self._lib.lv_receiver_set_adaptive_jitter(self._handle, 1 if enabled else 0)
-        if rc != LV_OK:
-            raise ValueError(self._lib.lv_error_string(rc).decode("utf-8"))
-
-    def effective_latency_ms(self) -> float:
-        """Measured jitter-buffer playout delay in ms right now (0.0 before playout starts)."""
-        return float(self._lib.lv_receiver_get_effective_latency_ms(self._handle))
-
-    def pop_audio_multichannel(self, num_channels: int, num_frames: int):
-        """Returns a `(frames_rendered, num_channels)` float32 array (or list of floats without numpy)."""
-        ch = int(num_channels)
-        nf = int(num_frames)
-        buf = (ctypes.c_float * (ch * nf))()
-        rc = self._lib.lv_receiver_pop_audio_multichannel(self._handle, buf, ch, nf, LV_AUDIO_LAYOUT_INTERLEAVED)
-        if rc < 0:
-            raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
-        got = min(rc, nf)
-        if _HAS_NUMPY:
-            return np.ctypeslib.as_array(buf)[: got * ch].reshape((got, ch)).copy()
-        return [buf[i] for i in range(got * ch)]
-
-    def on_multichannel_audio(self, callback: Optional[Callable[[object, int], None]]) -> None:
-        """callback(frames, playout_position_samples); frames is (num_frames, num_channels) float32."""
-        if callback is None:
-            self._mc_cb_ref = MC_AUDIO_CB_TYPE(0)
-            self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, self._mc_cb_ref, None)
-            return
-
-        def _trampoline(blk_ptr, _ud):
-            if not blk_ptr:
-                return
-            b = blk_ptr.contents
-            if not b.data or b.num_frames <= 0 or b.num_channels <= 0:
-                return
-            count = b.num_frames * b.num_channels
-            if _HAS_NUMPY:
-                arr = np.ctypeslib.as_array(b.data, shape=(count,)).reshape((b.num_frames, b.num_channels)).copy()
-            else:
-                arr = [b.data[i] for i in range(count)]
-            callback(arr, int(b.playout_position_samples))
-
-        self._mc_cb_ref = MC_AUDIO_CB_TYPE(_trampoline)
-        self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, self._mc_cb_ref, None)
-
-    def channel_stats(self, channel: int) -> LV_AudioChannelStats:
-        st = LV_AudioChannelStats()
-        self._lib.lv_receiver_get_channel_stats(self._handle, int(channel), ctypes.byref(st))
-        return st
-
     def stats(self) -> LV_StreamStats:
         s = LV_StreamStats()
         self._lib.lv_receiver_get_stream_stats(self._handle, ctypes.byref(s))
@@ -710,7 +603,7 @@ class LanVidReceiver:
     def close(self) -> None:
         if self._handle:
             self._lib.lv_receiver_set_video_callback(self._handle, VIDEO_CB_TYPE(0), None)
-            self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, MC_AUDIO_CB_TYPE(0), None)
+            self._lib.lv_receiver_set_audio_callback(self._handle, AUDIO_CB_TYPE(0), None)
             self._lib.lv_receiver_destroy(self._handle)
             self._handle = None
 

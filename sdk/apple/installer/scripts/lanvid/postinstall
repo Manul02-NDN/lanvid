@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# LanVid Video SDK v3.0.0 — macOS component postinstall
+set -euo pipefail
+
+LOG_FILE="/var/log/lanvid_sdk_install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "=== [LanVid Video SDK postinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+SDK_ROOT="/usr/local/LanVidSDK"
+CONSOLE_USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "${USER:-root}")"
+[ "$CONSOLE_USER" = "loginwindow" ] || [ -z "$CONSOLE_USER" ] && CONSOLE_USER="root"
+
+mkdir -p /usr/local/include /usr/local/lib/cmake /usr/local/lib/pkgconfig /usr/local/bin
+
+rm -rf /usr/local/include/lanvid
+ln -sfn "$SDK_ROOT/include/lanvid" /usr/local/include/lanvid
+ln -sfn "$SDK_ROOT/lib/liblanvid_core.dylib" /usr/local/lib/liblanvid_core.dylib
+ln -sfn "$SDK_ROOT/lib/liblanvid_core.a"     /usr/local/lib/liblanvid_core.a
+rm -rf /usr/local/lib/cmake/LanVidSDK
+ln -sfn "$SDK_ROOT/lib/cmake/LanVidSDK" /usr/local/lib/cmake/LanVidSDK
+ln -sfn "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" /usr/local/lib/pkgconfig/lanvid-sdk.pc
+
+if [ -d "/opt/homebrew/lib/pkgconfig" ]; then
+  ln -sfn "$SDK_ROOT/lib/pkgconfig/lanvid-sdk.pc" /opt/homebrew/lib/pkgconfig/lanvid-sdk.pc
+fi
+if [ -d "/opt/homebrew/lib/cmake" ]; then
+  rm -rf /opt/homebrew/lib/cmake/LanVidSDK
+  ln -sfn "$SDK_ROOT/lib/cmake/LanVidSDK" /opt/homebrew/lib/cmake/LanVidSDK
+fi
+
+if [ -f "$SDK_ROOT/python/lanvid_sdk.py" ]; then
+  for py in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    if [ -x "$py" ]; then
+      SITE_DIR="$("$py" -c 'import site; ps = site.getsitepackages(); print(ps[0] if ps else "")' 2>/dev/null || true)"
+      if [ -n "$SITE_DIR" ] && [ -d "$SITE_DIR" ] && [ -w "$SITE_DIR" ]; then
+        printf '%s\n' "$SDK_ROOT/python" > "$SITE_DIR/lanvid_sdk.pth"
+      fi
+    fi
+  done
+  if [ "$CONSOLE_USER" != "root" ]; then
+    USER_SITE="$(sudo -u "$CONSOLE_USER" python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+    if [ -n "$USER_SITE" ]; then
+      sudo -u "$CONSOLE_USER" mkdir -p "$USER_SITE" 2>/dev/null || true
+      printf '%s\n' "$SDK_ROOT/python" > "$USER_SITE/lanvid_sdk.pth" 2>/dev/null || true
+      chown "$CONSOLE_USER":staff "$USER_SITE/lanvid_sdk.pth" 2>/dev/null || true
+    fi
+  fi
+fi
+
+cat > /usr/local/bin/lanvid-sdk-info <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+SDK_ROOT="/usr/local/LanVidSDK"
+DYLIB="/usr/local/lib/liblanvid_core.dylib"
+echo "========================================================"
+echo "  LanVid Video SDK v3.0.0 — Installation Info & Test"
+echo "========================================================"
+echo "Host Arch     : $(uname -m) ($(sw_vers -productVersion 2>/dev/null || echo macOS))"
+echo "SDK Root      : $SDK_ROOT"
+echo "Headers       : /usr/local/include/lanvid"
+echo "Universal Lib : $DYLIB ($(lipo -archs "$DYLIB" 2>/dev/null || echo unknown))"
+echo "CMake Package : /usr/local/lib/cmake/LanVidSDK (LanVidSDK::Video)"
+echo "pkg-config    : /usr/local/lib/pkgconfig/lanvid-sdk.pc"
+echo "--------------------------------------------------------"
+if command -v python3 >/dev/null 2>&1 && [ -f "$SDK_ROOT/python/lanvid_sdk.py" ]; then
+  LANVID_LIB_PATH="$DYLIB" PYTHONPATH="$SDK_ROOT/python:${PYTHONPATH:-}" python3 - <<'PYEOF'
+import time
+from lanvid_sdk import LanVidSDK, LanVidSender, LanVidReceiver
+sdk = LanVidSDK()
+print(f"Runtime ABI   : v{sdk.version} | SIMD: {sdk.simd}")
+got_v, got_a = [], []
+with LanVidReceiver(bind_port=0, device_name="MacVideoSelfTest", discovery_port=15121) as rx:
+    rx.on_video(lambda f, w, h, fid: got_v.append((w, h, fid)))
+    rx.on_stereo_audio(lambda a, nf, sr, ch: got_a.append((nf, ch)))
+    peers = sdk.discover_peers(250, 15121)
+    with LanVidSender(dest_ip="127.0.0.1", dest_port=rx.local_port) as tx:
+        raw = bytes([160] * (160 * 96 * 4))
+        pcm = bytes([0] * (240 * 2 * 2))
+        for _ in range(2):
+            tx.push_frame(raw, 160, 96)
+            tx.push_stereo_audio(pcm, channels=2)
+            time.sleep(0.01)
+        for _ in range(40):
+            if len(got_v) >= 2 and len(got_a) >= 2: break
+            time.sleep(0.01)
+ok = len(got_v) == 2 and len(got_a) >= 2 and any(p["name"] == "MacVideoSelfTest" for p in peers)
+print(f"Self-Test     : {'PASS' if ok else 'WARN'} (peers={len(peers)}, video={len(got_v)}/2, stereo_audio={len(got_a)}/2)")
+PYEOF
+fi
+EOF
+chmod 0755 /usr/local/bin/lanvid-sdk-info
+
+FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
+if [ -x "$FW" ]; then
+  for t in "$SDK_ROOT/lib/liblanvid_core.dylib" "/usr/local/lib/liblanvid_core.dylib" "/usr/local/bin/lanvid-sdk-info"; do
+    [ -e "$t" ] && { "$FW" --add "$t" >/dev/null 2>&1 || true; "$FW" --unblockapp "$t" >/dev/null 2>&1 || true; }
+  done
+fi
+echo "=== [LanVid Video SDK postinstall] Complete ==="
+exit 0

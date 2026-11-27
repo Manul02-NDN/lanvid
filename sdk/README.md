@@ -1,148 +1,87 @@
-# LanVidSDK v2.7.0 — Cross-Platform Ultra-Low Latency LAN Video & Audio SDK
+# LanVid Video SDK (`v3.0.0`) & CrossLink Audio SDK (`v1.0.0`) — Developer Guide
 
-**LanVidSDK** надає єдине C++20/C-ABI ядро (intra-only slice-паралельний AVX2/NEON кодек, UDP + XOR FEC + AIMD, 48 kHz PCM16/F32 аудіо, LAN Auto-Discovery) для інтеграції у власні застосунки під **Windows, Linux, macOS, iOS, Android та Python**.
+Два повністю відокремлених, взаємно очищених C++20 / C ABI SDK без спільних глобальних станів і без перехресних залежностей:
 
-- **Затримка:** `< 1 ms` кодування/декодування 4K на сучасному CPU (AVX2 / ARM64 NEON), `< 4–6 ms` E2E по LAN.
-- **Zero-Copy API:** пряме приймання `CVPixelBuffer` (BGRA / NV12), Android `Image` (`YUV_420_888`), `AVFrame` / `obs_source_frame`, та push-колбеки на прийомі без polling-циклів.
-- **Стабільний C ABI:** `lanvid_sdk.h` + `lv_check_abi_compatibility()` — без залежності від версії STL.
+1. **LanVid Video SDK (`v3.0.0`)** — відео по LAN (`LVC DCT` AVX2/NEON, HW `H.264`/`H.265`, XOR FEC, AIMD/PLI), **2-канальне стерео аудіо** (48 kHz PCM16/F32), Multi-Cam (до 16 камер), `VideoPlayoutBuffer`, ISO Recorder, Virtual Camera `VideoBus`, Tally та Duplex Intercom.
+2. **CrossLink Audio SDK (`v1.0.0`)** — 64-канальний фазово-когерентний студійний AoIP (48/96 kHz, `MasterClock`, XOR FEC + NACK, 1+1 Wi-Fi redundancy, Dual-NIC failover), Full-Duplex 64×64 DAW SHM Bus (`CrossLinkAudioBus_v1`), `ChannelPatchbay`, MIDI 2.0, `ControlSync`, Personal Monitor Bus та Layer-2 Grid DSP.
 
 ---
 
-## Quick Start (10 рядків коду)
+## Вибіркове встановлення (Усе разом / Лише відео / Лише аудіо)
 
-### 1. C++17 / C++20 (`find_package(LanVidSDK)`)
+### 1. Інтерактивні інсталятори
+- **macOS / Linux:** `./scripts/install_sdk.sh` (або `--mode all|video|audio --prefix /usr/local`)
+- **Windows PowerShell:** `.\scripts\install_sdk.ps1` (або `-Mode all|video|audio -Prefix C:\SDK`)
+- **macOS GUI `.pkg` / `.dmg`:** `./sdk/apple/build_macos_pkg.sh` -> відкрийте `dist/apple/LanVidCrossLinkSDK-v3.0.0-macOS.pkg` та оберіть у меню Customize:
+  - ☑ **LanVid Video SDK v3.0.0** (`/usr/local/LanVidSDK`, команда `lanvid-sdk-info`)
+  - ☑ **CrossLink Audio SDK v1.0.0** (`/usr/local/CrossLinkSDK`, команда `crosslink-sdk-info`)
 
+### 2. Збірка пакета SDK через Python
+```bash
+python3 sdk/build_sdk.py --protocol all   --verify-client   # Обидва SDK + тест спільного лінкування (shared + static)
+python3 sdk/build_sdk.py --protocol video --verify-client   # Тільки LanVid Video SDK
+python3 sdk/build_sdk.py --protocol audio --verify-client   # Тільки CrossLink Audio SDK
+```
+
+---
+
+## Quick Start
+
+### 1. C++17 / C++20 (CMake)
+
+**Лише відео + 2ch стерео (LanVid):**
 ```cmake
 find_package(LanVidSDK REQUIRED)
-target_link_libraries(my_app PRIVATE LanVidSDK::Core)
+target_link_libraries(my_video_app PRIVATE LanVidSDK::Video)
 ```
-
 ```cpp
 #include <lanvid/lanvid.hpp>
-
 lanvid::Runtime rt;
 lanvid::Receiver rx;
-rx.on_video([](const LV_VideoFrameView& f) { /* zero-copy BGRA/RGBA frame */ });
-rx.on_audio([](const LV_AudioChunkView& a) { /* 48 kHz stereo PCM16/F32 */ });
+rx.on_video([](const LV_VideoFrameView& f) { /* zero-copy BGRA/RGBA */ });
+rx.on_audio([](const LV_AudioChunkView& a) { /* 1-2 ch stereo PCM16/F32 */ });
 rx.start(lanvid::Receiver::default_config(5000));
-
-auto peers = lanvid::Discovery::scan(400);
-lanvid::Sender tx;
-tx.start(lanvid::Sender::default_config(peers.empty() ? "127.0.0.1" : peers[0].ip, 5000));
-tx.push_frame(bgra_ptr, 1920, 1080);
 ```
 
-### 2. Swift — iOS 15+ та macOS 12+ (`LanVidKit` SwiftPM + XCFramework + One-Click `.pkg`)
+**Лише 64-канальний AoIP + MIDI 2.0 (CrossLink):**
+```cmake
+find_package(CrossLinkSDK REQUIRED)
+target_link_libraries(my_audio_app PRIVATE CrossLinkSDK::Audio)
+```
+```cpp
+#include <crosslink/crosslink.hpp>
+crosslink::Runtime rt;
+crosslink::Receiver rx;
+rx.on_midi([](const CL_MidiEvent& ev) { /* sample-accurate MIDI2 */ });
+rx.start(crosslink::Receiver::default_config(5004, 20, 64, 48000));
+```
 
-#### Встановлення на MacBook в один клік (`LanVidSDK-v2.7.0-macOS.pkg`)
-1. На MacBook (Apple Silicon M1–M4 або Intel) запустіть `python3 sdk/build_sdk.py` або `./sdk/apple/build_macos_pkg.sh` (або подвійний клік по `sdk/apple/installer/Install_LanVidSDK.command` у Finder) — це згенерує **`dist/apple/LanVidSDK-v2.7.0-macOS.pkg`** та **`dist/apple/LanVidSDK-v2.7.0-macOS.dmg`**.
-2. Відкрийте `LanVidSDK-v2.7.0-macOS.pkg` подвійним кліком у Finder — майстер `Installer.app` автоматично:
-   - перевірить архітектуру (`arm64` NEON / `x86_64` AVX2), версію macOS (`>= 12.0`), порти UDP `5000`/`5099` та Xcode Command Line Tools;
-   - встановить універсальну бібліотеку, `LanVidCore.xcframework`, `LanVidKit` Swift Package, CMake/pkg-config симлінки (вкл. `/opt/homebrew/`), `import lanvid_sdk` для Python 3 та винятки в macOS Firewall.
-3. Перевірте встановлення, активний SIMD та loopback self-test однією командою у Терміналі:
+**Обидва протоколи в одному бінарнику (shared або static без колізій символів):**
+```cmake
+find_package(LanVidSDK REQUIRED)
+find_package(CrossLinkSDK REQUIRED)
+target_link_libraries(my_studio_app PRIVATE LanVidSDK::Video CrossLinkSDK::Audio)
+```
 
+### 2. Swift — iOS 15+ / macOS 12+ (`LanVidKit` та `CrossLinkKit`)
+- Пакет `sdk/apple/Package.swift` експортує два незалежних продукти:
+  - `LanVidKit` (`LanVidCore.xcframework`) — VideoToolbox / Metal / AVFoundation (без CoreAudio/CoreMIDI).
+  - `CrossLinkKit` (`CrossLinkCore.xcframework`) — CoreAudio / CoreMIDI (без VideoToolbox/Metal).
+- Збірка XCFramework: `./sdk/apple/build_xcframework.sh --protocol all|video|audio`.
+
+### 3. Android Kotlin AAR (`sdk/android/`)
+- `:lanvid-sdk` -> `dist/android/lanvid-video-sdk-3.0.0.aar` (`com.lanvid.sdk.*`, зібрано з `LANVID_SDK_COMPONENTS=VIDEO`)
+- `:crosslink-sdk` -> `dist/android/crosslink-audio-sdk-1.0.0.aar` (`com.crosslink.sdk.*`, зібрано з `LANVID_SDK_COMPONENTS=AUDIO`)
 ```bash
-lanvid-sdk-info
+cd sdk/android
+gradle --no-daemon :lanvid-sdk:exportAar :crosslink-sdk:exportAar
 ```
 
-4. Підключіть `/usr/local/LanVidSDK/apple` як локальний Swift Package у Xcode (або `LanVidCore.xcframework`):
-
-```swift
-import LanVidKit
-
-let receiver = try LanVidReceiver()
-try receiver.start(config: .init(bindPort: 5000, enableAudioPlayback: true))
-for await pixelBuffer in receiver.videoFrames() {
-    metalRenderer.enqueue(pixelBuffer, in: metalView) // Metal MTKView
-}
-
-// Відправка з камери / ReplayKit (zero-copy CVPixelBuffer BGRA або NV12):
-let sender = try LanVidSender()
-let peers = await LanVidDiscovery.scanOnce()
-try sender.start(config: .init(destHost: peers.first?.ip ?? "192.168.1.50"))
-try sender.push(sampleBuffer: sampleBuffer)
-```
-
-### 3. Kotlin — Android (`lanvid-sdk-2.7.0.aar`)
-
-Додайте `dist/android/lanvid-sdk-2.7.0.aar` у `libs/` та `implementation(files("libs/lanvid-sdk-2.7.0.aar"))`:
-
-```kotlin
-import com.lanvid.sdk.*
-
-// Прийом у SurfaceView + нативний низьколатентний AAudio:
-val receiver = LanVidReceiver()
-lanVidSurfaceView.attach(receiver)
-receiver.start(port = 5000, enableAudioPlayback = true)
-
-// Передача камери (YUV_420_888 без конвертації в RGB):
-val peers = LanVidDiscovery.scan(400)
-val sender = LanVidSender()
-sender.start(destIp = peers.firstOrNull()?.ip ?: "192.168.1.50", destPort = 5000)
-sender.pushYuvImage(camera2Image) // прямий zero-copy шлях із Camera2/CameraX
-```
-
-### 4. Python (`ctypes` + `numpy`)
-
+### 4. Python (`ctypes` + опціональний `numpy`)
 ```python
-import numpy as np
-from lanvid_sdk import LanVidSender, LanVidReceiver, LanVidSDK
+# Відео + 2ch стерео (LanVid v3.0.0)
+from lanvid_sdk import LanVidSDK, LanVidSender, LanVidReceiver
 
-with LanVidReceiver(bind_port=5000) as rx:
-    rx.on_video(lambda frame, w, h, fid: print(f"Got frame {fid}: {frame.shape}"))
-    peers = LanVidSDK().discover_peers(300)
-    with LanVidSender(dest_ip=peers[0]["ip"], dest_port=5000) as tx:
-        tx.push_frame(np.zeros((1080, 1920, 4), dtype=np.uint8))
-```
-
-### 5. 64-канальна AoIP шина (C ABI, однаково для C++ / Swift / Kotlin / Python)
-
-```c
-LV_AudioBusConfig bus;
-lv_audio_bus_config_default(&bus);           /* 48 kHz, 20 ms, 64 канали, блоки по 240 */
-bus.latency_ms = 25;                          /* 2 (Ultra Low) .. 2000 (Bulletproof) */
-lv_sender_configure_audio_bus(tx, &bus);      /* до lv_sdk_sender_start() */
-lv_receiver_configure_audio_bus(rx, &bus);
-
-/* Відправка: окремий канал з будь-якого потоку або одразу N каналів (ASIO/CoreAudio/JACK) */
-lv_sender_push_audio_channel(tx, 17, mono_f32, 48, LV_AUDIO_FORMAT_F32, LV_MEDIA_TS_AUTO);
-lv_sender_push_audio_multichannel(tx, interleaved, 64, 240, LV_AUDIO_FORMAT_PCM24_PACKED,
-                                  LV_AUDIO_LAYOUT_INTERLEAVED, LV_MEDIA_TS_AUTO);
-
-/* Прийом: фазово-вирівняний блок у колбеку АБО pull з аудіоколбеку пристрою */
-lv_receiver_pop_audio_multichannel(rx, out_f32, 64, frames, LV_AUDIO_LAYOUT_PLANAR);
-lv_receiver_set_audio_latency_ms(rx, 500);    /* на льоту, без розриву з'єднання */
-LV_AudioChannelStats st; lv_receiver_get_channel_stats(rx, 17, &st); /* dBFS, втрати, FEC, NACK, джитер */
-```
-
-`LV_MEDIA_TS_AUTO` прив'язує перший push до Master Clock відправника і далі веде позицію безперервно; для DAW
-передавайте власну позицію в семплах (`lv_sender_get_master_clock_samples()`). Колбек і pull-режим
-взаємовиключні (`pop` повертає `LV_ERR_UNSUPPORTED`, поки колбек зареєстровано). Поточна версія бінарного контракту: `LV_SDK_ABI_VERSION` = 2 (`v2.7.0`).
-
----
-
-## Структура дистрибутиву `dist/LanVidSDK-v2.7.0/`
-
-- `include/lanvid/` — публічні заголовки `lanvid_export.h`, `lanvid_types.h`, `lanvid_sdk.h`, `lanvid.hpp`
-- `bin/` та `lib/` — скомпільована бібліотека `lanvid_core.dll` / `liblanvid_core.so` / `liblanvid_core.dylib`
-- `lib/cmake/LanVidSDK/` — `LanVidSDKConfig.cmake`, `LanVidSDKTargets.cmake`
-- `lib/pkgconfig/lanvid-sdk.pc` — файл конфігурації для `pkg-config`
-- `apple/` — `Package.swift`, `LanVidKit`, `build_xcframework.sh`, SwiftUI-приклади (`iOSCameraSender`, `MacReceiverMetal`)
-- `android/` — `lanvid-sdk-2.7.0.aar` (`arm64-v8a`, `armeabi-v7a`, `x86_64`) + Kotlin/JNI вихідний модуль
-- `cpp/` та `examples/cpp_client/` — C++17 wrapper і зовнішній приклад для `find_package(LanVidSDK)`
-- `python/` — `lanvid_sdk.py`
-
-## Збірка дистрибутиву
-
-```bash
-# Збірка для поточної ОС + компіляція і запуск зовнішнього C++ клієнта
-python sdk/build_sdk.py --verify-client
-
-# Збірка Android AAR (arm64-v8a + armeabi-v7a + x86_64)
-cd sdk/android && gradle exportAar
-
-# Збірка Apple XCFramework + macOS one-click інсталятора (.pkg + .dmg) на MacBook
-./sdk/apple/build_macos_pkg.sh
-# або автоматично в складі повного пакета SDK:
-python3 sdk/build_sdk.py
+# 64-канальний AoIP + MIDI 2.0 + Audio Node Discovery (CrossLink v1.0.0)
+from crosslink_sdk import CrossLinkSDK, CrossLinkSender, CrossLinkReceiver
 ```

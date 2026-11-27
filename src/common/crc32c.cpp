@@ -5,11 +5,11 @@
 #include "common/cpu_features.hpp"
 
 #if defined(_M_X64) || defined(__x86_64__)
-#define LV_CRC_HW 1
+#define NET_CRC_HW 1
 #include <nmmintrin.h>
 #endif
 
-namespace lv {
+namespace NET_COMMON_NS {
 
 namespace {
 
@@ -38,7 +38,7 @@ const CrcTables& sw_tables() {
     return tbl;
 }
 
-#if LV_CRC_HW
+#if NET_CRC_HW
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((target("sse4.2")))
 #endif
@@ -80,10 +80,10 @@ uint32_t crc32c_update_sw(uint32_t prev_crc, const uint8_t* data, size_t len) {
 }
 
 uint32_t crc32c_update(uint32_t prev_crc, const uint8_t* data, size_t len) {
-#if LV_CRC_HW
+#if NET_CRC_HW
     if (cpu_has_sse42() && simd_enabled()) return crc32c_hw(prev_crc, data, len);
 #endif
     return crc32c_update_sw(prev_crc, data, len);
 }
 
-}  // namespace lv
+}  // namespace NET_COMMON_NS
