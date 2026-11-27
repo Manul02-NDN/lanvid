@@ -372,16 +372,19 @@ bool AudioRxEngine::on_packet(const PacketHeader& h, const uint8_t* payload, siz
         rate_drops_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    if (ah.sample_format == AudioFormat2::kOpus && ah.num_samples > 2880) return false;
     const uint32_t seq = h.frame_id;
     auto& sp = streams_[ah.stream_id];
     if (!sp) {
-        sp = std::make_unique<Stream>();
-        sp->recv_bits.assign(kWindow / 64, 0);
-        sp->miss.assign(kWindow, {});
+        auto ns = std::make_unique<Stream>();
+        ns->recv_bits.assign(kWindow / 64, 0);
+        ns->miss.assign(kWindow, {});
+        sp = std::move(ns);
+        stream_ptrs_[ah.stream_id].store(sp.get(), std::memory_order_release);
     }
     Stream& s = *sp;
     s.channel = ah.channel_index;
-    channel_to_stream_[ah.channel_index].store(int16_t(ah.stream_id), std::memory_order_relaxed);
+    channel_to_stream_[ah.channel_index].store(int16_t(ah.stream_id), std::memory_order_release);
 
     if (ah.flags & kAudioFlagFecParity) {
         AudioFecInfo fi;
@@ -439,6 +442,14 @@ bool AudioRxEngine::accept_data(Stream& s, const AudioHeader2& ah, const uint8_t
             for (auto& po : s.opus_pending) po.valid = false;
 #endif
         } else if (d > 0) {
+            while (int32_t(seq - s.first_unresolved) >= int32_t(kWindow) - 64) {
+                auto& old_m = s.miss[s.first_unresolved & (kWindow - 1)];
+                if (old_m.state == 1 && !bit_get(s.first_unresolved)) {
+                    old_m.state = 2;
+                    s.lost.fetch_add(1, std::memory_order_relaxed);
+                }
+                ++s.first_unresolved;
+            }
             for (uint32_t q = s.highest + 1; q != seq; ++q) {  // register holes
                 bit_clr(q);
                 auto& m = s.miss[q & (kWindow - 1)];
@@ -713,9 +724,11 @@ void AudioRxEngine::service(uint64_t now) {
 AudioChannelRxStats AudioRxEngine::channel_stats(uint16_t ch) const {
     AudioChannelRxStats o;
     if (ch >= kMaxAudioChannels) return o;
-    const int16_t sid = channel_to_stream_[ch].load(std::memory_order_relaxed);
-    if (sid < 0 || !streams_[sid]) return o;
-    const Stream& s = *streams_[sid];
+    const int16_t sid = channel_to_stream_[ch].load(std::memory_order_acquire);
+    if (sid < 0 || sid >= int16_t(kMaxAudioChannels)) return o;
+    const Stream* sp = stream_ptrs_[sid].load(std::memory_order_acquire);
+    if (!sp) return o;
+    const Stream& s = *sp;
     o.seen = s.seen_pub.load(std::memory_order_relaxed);
     o.stream_id = uint16_t(sid);
     o.packets_rx = s.rx.load(std::memory_order_relaxed);
@@ -731,22 +744,22 @@ AudioChannelRxStats AudioRxEngine::channel_stats(uint16_t ch) const {
 
 uint64_t AudioRxEngine::total_nacks_sent() const {
     uint64_t sum = 0;
-    for (const auto& sp : streams_)
-        if (sp) sum += sp->nacks_sent.load(std::memory_order_relaxed);
+    for (const auto& sp : stream_ptrs_)
+        if (const Stream* s = sp.load(std::memory_order_acquire)) sum += s->nacks_sent.load(std::memory_order_relaxed);
     return sum;
 }
 
 uint64_t AudioRxEngine::total_duplicates() const {
     uint64_t sum = 0;
-    for (const auto& sp : streams_)
-        if (sp) sum += sp->dups.load(std::memory_order_relaxed);
+    for (const auto& sp : stream_ptrs_)
+        if (const Stream* s = sp.load(std::memory_order_acquire)) sum += s->dups.load(std::memory_order_relaxed);
     return sum;
 }
 
 uint64_t AudioRxEngine::total_duplicates_recovered() const {
     uint64_t sum = 0;
-    for (const auto& sp : streams_)
-        if (sp) sum += sp->dups_rec.load(std::memory_order_relaxed);
+    for (const auto& sp : stream_ptrs_)
+        if (const Stream* s = sp.load(std::memory_order_acquire)) sum += s->dups_rec.load(std::memory_order_relaxed);
     return sum;
 }
 

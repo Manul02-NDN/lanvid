@@ -67,11 +67,14 @@ bool AudioPlayback::start(AudioJitterBuffer* buffer) {
     stop();
     if (!buffer) return false;
     impl_->stop.store(false, std::memory_order_relaxed);
+    impl_->wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!impl_->wake_event) return false;
+    HANDLE evt = impl_->wake_event;
 
     std::promise<bool> ready;
     auto fut = ready.get_future();
 
-    impl_->thread = std::thread([this, buffer, p = std::move(ready)]() mutable {
+    impl_->thread = std::thread([this, buffer, evt, p = std::move(ready)]() mutable {
         const bool com_ok = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
         DWORD mmcss_task = 0;
         HANDLE mmcss = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_task);
@@ -80,8 +83,6 @@ bool AudioPlayback::start(AudioJitterBuffer* buffer) {
         IMMDevice* device = nullptr;
         IAudioClient* client = nullptr;
         IAudioRenderClient* render = nullptr;
-        HANDLE evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        impl_->wake_event = evt;
 
         auto cleanup = [&]() {
             if (client) client->Stop();
@@ -89,17 +90,9 @@ bool AudioPlayback::start(AudioJitterBuffer* buffer) {
             safe_release(client);
             safe_release(device);
             safe_release(enumerator);
-            impl_->wake_event = nullptr;
-            if (evt) CloseHandle(evt);
             if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
             if (com_ok) CoUninitialize();
         };
-
-        if (!evt) {
-            cleanup();
-            p.set_value(false);
-            return;
-        }
 
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
@@ -192,7 +185,13 @@ bool AudioPlayback::start(AudioJitterBuffer* buffer) {
     });
 
     const bool ok = fut.get();
-    if (!ok && impl_->thread.joinable()) impl_->thread.join();
+    if (!ok) {
+        if (impl_->thread.joinable()) impl_->thread.join();
+        if (impl_->wake_event) {
+            CloseHandle(impl_->wake_event);
+            impl_->wake_event = nullptr;
+        }
+    }
     return ok;
 }
 
@@ -201,6 +200,10 @@ void AudioPlayback::stop() {
     impl_->stop.store(true, std::memory_order_release);
     if (impl_->wake_event) SetEvent(impl_->wake_event);
     if (impl_->thread.joinable()) impl_->thread.join();
+    if (impl_->wake_event) {
+        CloseHandle(impl_->wake_event);
+        impl_->wake_event = nullptr;
+    }
     impl_->running.store(false, std::memory_order_release);
 }
 

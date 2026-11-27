@@ -29,20 +29,52 @@
 
 namespace {
 
-std::mutex g_mu;
+// Separate locks for sender and receiver lifecycles (lock ordering: g_ti_mu -> g_sender_mu).
+std::mutex g_sender_mu;
 LvSenderHandle* g_sender = nullptr;
 std::atomic<bool> g_sender_running{false};
+
+std::mutex g_receiver_mu;
 LvReceiverHandle* g_receiver = nullptr;
 
 // Native Window surface renderer state
 std::mutex g_surf_mu;
 ANativeWindow* g_window = nullptr;
+uint64_t g_window_gen = 0;
 std::thread g_render_thread;
 std::atomic<bool> g_render_stop{false};
 
-// Native AAudio playback state
+// Native AAudio playback state (guarded by g_receiver_mu)
 AAudioStream* g_audio_stream = nullptr;
 std::atomic<bool> g_audio_active{false};
+
+std::string json_escape(const char* s, size_t max_len) {
+    std::string out;
+    if (!s) return out;
+    out.reserve(max_len);
+    for (size_t i = 0; i < max_len && s[i] != '\0'; ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x", unsigned(c));
+                    out += esc;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
+    }
+    return out;
+}
 
 aaudio_data_callback_result_t aaudio_data_cb(AAudioStream*, void* user_data, void* audio_data,
                                              int32_t num_frames) {
@@ -53,7 +85,12 @@ aaudio_data_callback_result_t aaudio_data_cb(AAudioStream*, void* user_data, voi
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-void start_aaudio(LvReceiverHandle* rx) {
+void aaudio_error_cb(AAudioStream*, void*, aaudio_result_t error) {
+    LV_LOGE("AAudio stream disconnected/error (%d); marking inactive", int(error));
+    g_audio_active.store(false, std::memory_order_release);
+}
+
+void start_aaudio_locked(LvReceiverHandle* rx) {
     if (g_audio_stream || !rx) return;
     AAudioStreamBuilder* builder = nullptr;
     if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK || !builder) return;
@@ -65,6 +102,7 @@ void start_aaudio(LvReceiverHandle* rx) {
     AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setDataCallback(builder, aaudio_data_cb, rx);
+    AAudioStreamBuilder_setErrorCallback(builder, aaudio_error_cb, rx);
 
     AAudioStream* stream = nullptr;
     if (AAudioStreamBuilder_openStream(builder, &stream) == AAUDIO_OK && stream) {
@@ -79,7 +117,7 @@ void start_aaudio(LvReceiverHandle* rx) {
     AAudioStreamBuilder_delete(builder);
 }
 
-void stop_aaudio() {
+void stop_aaudio_locked() {
     g_audio_active.store(false, std::memory_order_release);
     if (g_audio_stream) {
         AAudioStream_requestStop(g_audio_stream);
@@ -88,33 +126,35 @@ void stop_aaudio() {
     }
 }
 
-void stop_render_loop() {
+void stop_render_loop_locked() {
     g_render_stop.store(true, std::memory_order_release);
     if (g_render_thread.joinable()) g_render_thread.join();
 }
 
-void start_render_loop(LvReceiverHandle* rx) {
-    stop_render_loop();
+void start_render_loop_locked(LvReceiverHandle* rx) {
+    stop_render_loop_locked();
     g_render_stop.store(false, std::memory_order_release);
     g_render_thread = std::thread([rx]() {
         std::vector<uint8_t> rgba;
         uint32_t last_seq = 0;
         int cur_w = 0, cur_h = 0;
+        uint64_t seen_win_gen = 0;
 
         while (!g_render_stop.load(std::memory_order_relaxed)) {
             int w = 0, h = 0;
             int rc = lv_receiver_get_latest_frame(rx, rgba.data(), rgba.size(), &w, &h, &last_seq, 1);
-            if (rc == -1 && w > 0 && h > 0) {
+            if (rc == -1 && w > 0 && h > 0 && w <= 7680 && h <= 4320) {
                 rgba.resize(size_t(w) * size_t(h) * 4);
                 rc = lv_receiver_get_latest_frame(rx, rgba.data(), rgba.size(), &w, &h, &last_seq, 1);
             }
             if (rc == 1 && w > 0 && h > 0) {
                 std::lock_guard<std::mutex> slk(g_surf_mu);
                 if (g_window) {
-                    if (w != cur_w || h != cur_h) {
+                    if (g_window_gen != seen_win_gen || w != cur_w || h != cur_h) {
                         ANativeWindow_setBuffersGeometry(g_window, w, h, WINDOW_FORMAT_RGBA_8888);
                         cur_w = w;
                         cur_h = h;
+                        seen_win_gen = g_window_gen;
                     }
                     ANativeWindow_Buffer wb{};
                     if (ANativeWindow_lock(g_window, &wb, nullptr) == 0 && wb.bits) {
@@ -178,10 +218,11 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeScanLan(JNIEnv*
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     JNIEnv* env, jclass, jstring dest_ip, jint dest_port, jint width, jint height, jint fps,
     jint quality, jint fec_group, jboolean adaptive, jint codec, jint bitrate_kbps) {
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_sender_mu);
     g_sender_running.store(false, std::memory_order_release);
     if (!g_sender) g_sender = lv_sender_create();
     else lv_sender_stop(g_sender);
+    if (!g_sender) return JNI_FALSE;
     LvSenderConfig sc;
     lv_sender_config_default(&sc);
     const std::string ip = jstr_to_std(env, dest_ip);
@@ -195,7 +236,7 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
     sc.fec_group_size = std::max(0, int(fec_group));
     sc.adaptive_quality = adaptive ? 1 : 0;
     sc.codec = std::clamp(int(codec), 0, 2);
-    sc.bitrate_kbps = uint32_t(std::clamp(int(bitrate_kbps), 250, 100000));
+    sc.bitrate_kbps = uint32_t(std::clamp(int(bitrate_kbps), 250, 150000));
     sc.q_min = 35;
     sc.q_max = 85;
     sc.threads = 0;
@@ -206,7 +247,7 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartSender(
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetAudioLatencyMs(JNIEnv*, jclass,
                                                                                 jint latency_ms) {
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_receiver_mu);
     if (g_receiver) {
         lv_receiver_set_audio_latency_ms(g_receiver,
                                          uint32_t(std::clamp(int(latency_ms), 2, 2000)));
@@ -215,7 +256,7 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetAudioLatencyMs(
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeStopSender(JNIEnv*, jclass) {
     g_sender_running.store(false, std::memory_order_release);
-    std::lock_guard<std::mutex> lk(g_mu);
+    std::lock_guard<std::mutex> lk(g_sender_mu);
     if (g_sender) lv_sender_stop(g_sender);
 }
 
@@ -223,8 +264,20 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushYuv420(
     JNIEnv* env, jclass, jobject y_buf, jobject u_buf, jobject v_buf, jint width, jint height,
     jint y_stride, jint u_stride, jint v_stride, jint uv_pixel_stride, jint rotation_deg,
     jboolean mirror_h) {
-    if (!g_sender_running.load(std::memory_order_acquire) || !g_sender || !y_buf || !u_buf || !v_buf)
+    if (!g_sender_running.load(std::memory_order_acquire) || !y_buf || !u_buf || !v_buf ||
+        width <= 0 || height <= 0 || y_stride < width || u_stride <= 0 || v_stride <= 0)
         return JNI_FALSE;
+    const jlong y_cap = env->GetDirectBufferCapacity(y_buf);
+    const jlong u_cap = env->GetDirectBufferCapacity(u_buf);
+    const jlong v_cap = env->GetDirectBufferCapacity(v_buf);
+    const int uv_pix = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    const jlong y_need = jlong(height - 1) * jlong(y_stride) + jlong(width);
+    const jlong uv_h = jlong((height + 1) / 2);
+    const jlong uv_w = jlong((width + 1) / 2);
+    const jlong u_need = (uv_h - 1) * jlong(u_stride) + (uv_w - 1) * jlong(uv_pix) + 1;
+    const jlong v_need = (uv_h - 1) * jlong(v_stride) + (uv_w - 1) * jlong(uv_pix) + 1;
+    if (y_cap < y_need || u_cap < u_need || v_cap < v_need) return JNI_FALSE;
+
     LV_YuvPlanes yp{};
     yp.plane_y = static_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
     yp.plane_u = static_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
@@ -233,8 +286,11 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushYuv420(
     yp.y_stride = y_stride;
     yp.u_stride = u_stride;
     yp.v_stride = v_stride;
-    yp.uv_pixel_stride = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    yp.uv_pixel_stride = uv_pix;
     yp.pixel_format = (yp.uv_pixel_stride == 2) ? LV_PIXEL_FORMAT_NV12 : LV_PIXEL_FORMAT_I420;
+
+    std::lock_guard<std::mutex> lk(g_sender_mu);
+    if (!g_sender || !g_sender_running.load(std::memory_order_acquire)) return JNI_FALSE;
     return lv_sender_push_yuv_planes_ex(g_sender, &yp, width, height, rotation_deg,
                                         mirror_h ? 1 : 0, 0) == LV_OK
                ? JNI_TRUE
@@ -243,9 +299,17 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushYuv420(
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushRgba(
     JNIEnv* env, jclass, jobject rgba_buf, jint width, jint height, jint stride) {
-    if (!g_sender || !rgba_buf) return JNI_FALSE;
+    if (!g_sender_running.load(std::memory_order_acquire) || !rgba_buf ||
+        width <= 0 || height <= 0 || stride < width * 4)
+        return JNI_FALSE;
+    const jlong cap = env->GetDirectBufferCapacity(rgba_buf);
+    const jlong need = jlong(height - 1) * jlong(stride) + jlong(width) * 4;
+    if (cap < need) return JNI_FALSE;
     const auto* ptr = static_cast<const uint8_t*>(env->GetDirectBufferAddress(rgba_buf));
     if (!ptr) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lk(g_sender_mu);
+    if (!g_sender || !g_sender_running.load(std::memory_order_acquire)) return JNI_FALSE;
     return lv_sender_push_raw_frame(g_sender, ptr, width, height, stride, LV_PIXFMT_RGBA, 0)
                ? JNI_TRUE
                : JNI_FALSE;
@@ -253,18 +317,30 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushRgba(
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativePushAudioPcm16(
     JNIEnv* env, jclass, jshortArray pcm, jint num_frames, jint sample_rate, jint channels) {
-    if (!g_sender || !pcm || num_frames <= 0) return JNI_FALSE;
+    if (!g_sender_running.load(std::memory_order_acquire) || !pcm || num_frames <= 0 || channels <= 0)
+        return JNI_FALSE;
+    const jlong need = jlong(num_frames) * jlong(channels);
+    if (need > env->GetArrayLength(pcm)) return JNI_FALSE;
     jshort* data = env->GetShortArrayElements(pcm, nullptr);
     if (!data) return JNI_FALSE;
-    const int ok = lv_sender_push_audio_pcm16(g_sender, reinterpret_cast<const int16_t*>(data),
-                                              num_frames, sample_rate, channels, 0);
+    int ok = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_sender_mu);
+        if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
+            ok = lv_sender_push_audio_pcm16(g_sender, reinterpret_cast<const int16_t*>(data),
+                                            num_frames, sample_rate, channels, 0);
+        }
+    }
     env->ReleaseShortArrayElements(pcm, data, JNI_ABORT);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetSenderStatsJson(JNIEnv* env, jclass) {
     LvSenderStats st{};
-    if (g_sender) lv_sender_get_stats(g_sender, &st);
+    {
+        std::lock_guard<std::mutex> lk(g_sender_mu);
+        if (g_sender) lv_sender_get_stats(g_sender, &st);
+    }
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "{\"running\":%d,\"width\":%d,\"height\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
@@ -277,10 +353,12 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetSenderStatsJ
 
 JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartReceiver(
     JNIEnv* env, jclass, jint port, jdouble audio_target_ms, jstring device_name) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    stop_render_loop();
-    stop_aaudio();
+    std::lock_guard<std::mutex> lk(g_receiver_mu);
+    stop_render_loop_locked();
+    stop_aaudio_locked();
     if (!g_receiver) g_receiver = lv_receiver_create();
+    else lv_receiver_stop(g_receiver);
+    if (!g_receiver) return JNI_FALSE;
 
     LvReceiverConfig rc;
     lv_receiver_config_default(&rc);
@@ -293,15 +371,15 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeStartReceiver(
     if (!dn.empty()) std::snprintf(rc.device_name, sizeof(rc.device_name), "%s", dn.c_str());
 
     if (!lv_receiver_start(g_receiver, &rc)) return JNI_FALSE;
-    start_aaudio(g_receiver);
-    start_render_loop(g_receiver);
+    start_aaudio_locked(g_receiver);
+    start_render_loop_locked(g_receiver);
     return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeStopReceiver(JNIEnv*, jclass) {
-    std::lock_guard<std::mutex> lk(g_mu);
-    stop_render_loop();
-    stop_aaudio();
+    std::lock_guard<std::mutex> lk(g_receiver_mu);
+    stop_render_loop_locked();
+    stop_aaudio_locked();
     if (g_receiver) lv_receiver_stop(g_receiver);
 }
 
@@ -315,15 +393,20 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetReceiverSurface
     if (surface) {
         g_window = ANativeWindow_fromSurface(env, surface);
     }
+    ++g_window_gen;
 }
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetVolume(JNIEnv*, jclass, jfloat vol) {
+    std::lock_guard<std::mutex> lk(g_receiver_mu);
     if (g_receiver) lv_receiver_set_volume(g_receiver, vol);
 }
 
 JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeGetReceiverStatsJson(JNIEnv* env, jclass) {
     LvReceiverStats st{};
-    if (g_receiver) lv_receiver_get_stats(g_receiver, &st);
+    {
+        std::lock_guard<std::mutex> lk(g_receiver_mu);
+        if (g_receiver) lv_receiver_get_stats(g_receiver, &st);
+    }
     char buf[512];
     std::snprintf(buf, sizeof(buf),
                   "{\"running\":%d,\"width\":%d,\"height\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
@@ -353,8 +436,11 @@ static void on_android_tally(const LV_TallyState* st, void*) {
 
 static void on_android_video_config_sync(const LV_VideoConfigSync* cfg, void*) {
     if (!cfg) return;
-    if ((cfg->flags & 0x01u) != 0 && g_sender_running.load(std::memory_order_acquire) && g_sender) {
-        lv_sender_force_keyframe(g_sender);
+    if ((cfg->flags & 0x01u) != 0) {
+        std::lock_guard<std::mutex> slk(g_sender_mu);
+        if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
+            lv_sender_force_keyframe(g_sender);
+        }
     }
     std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
     g_last_vcfg = *cfg;
@@ -370,7 +456,7 @@ JNIEXPORT jboolean JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyConnect(
     }
     const std::string ip = jstr_to_std(env, studio_ip);
     const std::string lbl = jstr_to_std(env, label);
-    g_ti = lv_tally_intercom_create_camera(ip.c_str(), uint16_t(studio_port),
+    g_ti = lv_tally_intercom_create_camera(ip.c_str(), uint16_t(std::clamp(int(studio_port), 1, 65535)),
                                            uint32_t(camera_id > 0 ? camera_id : 1),
                                            lbl.empty() ? "CAM 1" : lbl.c_str());
     if (!g_ti) return JNI_FALSE;
@@ -391,14 +477,17 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyDisconnect(JN
 }
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeForceKeyframe(JNIEnv*, jclass) {
-    if (g_sender_running.load(std::memory_order_acquire) && g_sender) {
+    std::lock_guard<std::mutex> lk(g_sender_mu);
+    if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
         lv_sender_force_keyframe(g_sender);
     }
 }
 
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeSetSenderBitrateKbps(JNIEnv*, jclass,
                                                                                    jint bitrate_kbps) {
-    if (g_sender_running.load(std::memory_order_acquire) && g_sender && bitrate_kbps > 0) {
+    if (bitrate_kbps <= 0) return;
+    std::lock_guard<std::mutex> lk(g_sender_mu);
+    if (g_sender && g_sender_running.load(std::memory_order_acquire)) {
         lv_sender_set_bitrate(g_sender, uint32_t(std::clamp(int(bitrate_kbps), 250, 150000)));
     }
 }
@@ -431,10 +520,12 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
     bool has_vc = false;
     int dir_speaking = 0;
     float duck = 1.0f;
+    const uint8_t bat_clamped = uint8_t(std::clamp(int(battery_pct), 0, 100));
+    const int8_t temp_clamped = int8_t(std::clamp(int(temp_c), -40, 125));
     {
         std::lock_guard<std::recursive_mutex> lk(g_ti_mu);
         if (g_ti) {
-            lv_tally_intercom_update_camera_telemetry(g_ti, uint8_t(battery_pct), int8_t(temp_c));
+            lv_tally_intercom_update_camera_telemetry(g_ti, bat_clamped, temp_clamped);
             lv_tally_intercom_poll(g_ti);
             st = g_last_tally;
             vc = g_last_vcfg;
@@ -443,7 +534,10 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
             duck = lv_tally_intercom_ducking_gain(g_ti);
         }
     }
-    char buf[768];
+    const std::string label_esc = json_escape(st.camera_label[0] ? st.camera_label : "CAM 1",
+                                              sizeof(st.camera_label));
+    const std::string tag_esc = json_escape(vc.assigned_cam_tag, sizeof(vc.assigned_cam_tag));
+    char buf[1024];
     const int rec = (st.flags & 1u) ? 1 : 0;
     const uint32_t rgba = (uint32_t(vc.badge_accent_rgba[0]) << 24) | (uint32_t(vc.badge_accent_rgba[1]) << 16) |
                           (uint32_t(vc.badge_accent_rgba[2]) << 8) | uint32_t(vc.badge_accent_rgba[3]);
@@ -455,8 +549,8 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_app_LanVidNative_nativeTallyPollJson(
         "\"badgeAccentRgba\":%u,\"syncRev\":%llu,\"syncRes\":%u,\"syncFps\":%u,"
         "\"syncCodec\":%u,\"syncBitrateKbps\":%u,\"syncDelayMs\":%u,\"syncFixedDelay\":%s,\"syncLens\":%u}",
         unsigned(st.tally_state), unsigned(st.tally_state), rec ? "true" : "false", rec,
-        dir_speaking ? "true" : "false", duck, st.camera_label[0] ? st.camera_label : "CAM 1",
-        has_vc ? "true" : "false", unsigned(vc.assigned_cam_number), vc.assigned_cam_tag,
+        dir_speaking ? "true" : "false", duck, label_esc.c_str(),
+        has_vc ? "true" : "false", unsigned(vc.assigned_cam_number), tag_esc.c_str(),
         unsigned(rgba), static_cast<unsigned long long>(vc.config_revision),
         unsigned(vc.resolution_preset), unsigned(vc.target_fps), unsigned(vc.codec),
         unsigned(vc.bitrate_kbps), unsigned(vc.video_delay_ms ? vc.video_delay_ms : 33),
@@ -473,6 +567,7 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomSetState(
 JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomPushMic(
     JNIEnv* env, jclass, jfloatArray samples, jint frames) {
     if (!samples || frames <= 0) return;
+    if (frames > env->GetArrayLength(samples)) return;
     jfloat* ptr = env->GetFloatArrayElements(samples, nullptr);
     if (!ptr) return;
     {
@@ -485,6 +580,7 @@ JNIEXPORT void JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomPushMic(
 JNIEXPORT jint JNICALL Java_com_lanvid_app_LanVidNative_nativeIntercomPullRx(
     JNIEnv* env, jclass, jfloatArray out_samples, jint frames) {
     if (!out_samples || frames <= 0) return 0;
+    if (frames > env->GetArrayLength(out_samples)) return 0;
     jfloat* ptr = env->GetFloatArrayElements(out_samples, nullptr);
     if (!ptr) return 0;
     int got = 0;

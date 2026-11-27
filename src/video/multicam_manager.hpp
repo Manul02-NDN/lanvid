@@ -201,12 +201,12 @@ private:
     bool session_active_ = false;
     IsoSessionConfig session_{};
     std::string session_dir_;
-    uint64_t session_t0_us_ = 0;
+    std::atomic<uint64_t> session_t0_us_{0};
     uint64_t session_unix_s_ = 0;
     uint64_t session_tc_frame_ = 0;
     std::unique_ptr<IsoRecorder> program_rec_;
     std::unique_ptr<class IVideoEncoder> program_enc_;
-    std::vector<uint8_t> program_scaled_;
+    Image program_scaled_img_;
 
     // Decoupled background ISO encode/write queue (never blocks video preview or vCam)
     struct IsoJob {

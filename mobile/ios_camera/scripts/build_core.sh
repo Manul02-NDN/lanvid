@@ -11,15 +11,6 @@ HDR="$OUT/headers"
 DEPLOY="16.0"
 GEN="Unix Makefiles"; command -v ninja >/dev/null 2>&1 && GEN="Ninja"
 
-# Reuse fresh sibling xcframework if explicitly requested (local fast iteration)
-if [ "${LANVID_REUSE_MONITOR_CORE:-0}" = "1" ] && [ -d "$ROOT/mobile/ios/build/LanVidCore.xcframework" ]; then
-  mkdir -p "$OUT"
-  rm -rf "$OUT/LanVidCore.xcframework"
-  cp -R "$ROOT/mobile/ios/build/LanVidCore.xcframework" "$OUT/LanVidCore.xcframework"
-  echo "Copied $OUT/LanVidCore.xcframework from mobile/ios/build"
-  exit 0
-fi
-
 rm -rf "$OUT/LanVidCore.xcframework" "$HDR"
 mkdir -p "$HDR/lanvid"
 cp "$ROOT/sdk/include/lanvid/"*.h "$HDR/lanvid/"

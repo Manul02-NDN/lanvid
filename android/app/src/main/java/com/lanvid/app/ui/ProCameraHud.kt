@@ -71,7 +71,7 @@ data class ProCameraState(
     val guideOverlay: String = "16:9",
     // Encoder & Stream Drawer
     val resolution: String = "1080p",
-    val fps: String = "30",
+    val fps: String = "60",
     val codec: String = "H.265",
     val tenBit: Boolean = false,
     val cbrMode: Boolean = true,

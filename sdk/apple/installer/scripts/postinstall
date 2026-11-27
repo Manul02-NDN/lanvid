@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-LOG_FILE="/tmp/lanvid_sdk_install.log"
+LOG_FILE="/var/log/lanvid_sdk_install.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=== [LanVidSDK postinstall] $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
@@ -138,7 +138,7 @@ if command -v lipo >/dev/null 2>&1; then
   echo "Mach-O Slices : $(lipo -archs "$DYLIB" 2>/dev/null || echo unknown)"
 fi
 
-if command -v python3 >/dev/null 2>&1; then
+if command -v python3 >/dev/null 2>&1 && [ -f "$SDK_ROOT/python/lanvid_sdk.py" ]; then
   LANVID_LIB_PATH="$DYLIB" PYTHONPATH="$SDK_ROOT/python:${PYTHONPATH:-}" python3 - <<'PYEOF'
 import time
 from lanvid_sdk import LanVidSDK, LanVidSender, LanVidReceiver
@@ -165,58 +165,27 @@ status = "PASS" if (len(got) == 2 and any(p["name"] == "MacSelfTest" for p in pe
 print(f"Self-Test     : {status} (discovered={len(peers)}, loopback_frames={len(got)}/2)")
 PYEOF
 else
-  echo "[INFO] python3 not found; skipping runtime ctypes self-test."
+  echo "[INFO] python3 or Python SDK extras not installed; skipping runtime ctypes self-test."
 fi
 EOF
 chmod 0755 /usr/local/bin/lanvid-sdk-info
 echo "[OK] Installed /usr/local/bin/lanvid-sdk-info"
 
-# 5. Conditional configuration of optional Customize components & macOS Application Firewall
-# Only activates LaunchDaemons / ChmodBPF / OBS Plugin if the user left those components selected!
-if [ -x "/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" ] && \
-   [ -f "/Library/LaunchDaemons/com.lanvid.chmod-bpf.plist" ]; then
-  if ! dscl . -read /Groups/access_bpf >/dev/null 2>&1; then
-    dseditgroup -q -o create access_bpf || true
-  fi
-  if [ "$CONSOLE_USER" != "root" ]; then
-    dseditgroup -q -o edit -a "$CONSOLE_USER" -t user access_bpf || true
-  fi
-  "/Library/Application Support/LanVid/ChmodBPF/ChmodBPF" || true
-  echo "[OK] ChmodBPF component selected -> access_bpf permissions applied."
-else
-  echo "[INFO] ChmodBPF component unchecked in Customize mode -> skipping /dev/bpf* setup."
-fi
-
-if [ -x "/usr/local/bin/lanvid_dsp_server" ] && \
-   [ -f "/Library/LaunchDaemons/com.lanvid.dspserver.plist" ]; then
-  echo "[OK] DSP Server component selected -> LaunchDaemon com.lanvid.dspserver ready."
-else
-  echo "[INFO] DSP Server component unchecked in Customize mode -> skipping LaunchDaemon start."
-fi
-
+# 5. Configure macOS Application Firewall exemptions for installed SDK binaries
 FW="/usr/libexec/ApplicationFirewall/socketfilterfw"
 if [ -x "$FW" ]; then
   FW_TARGETS=(
-    "/Applications/LanVid Studio.app"
-    "/Applications/LanVid Studio.app/Contents/MacOS/LanVid Studio"
-    "/Applications/LanVid Audio.app"
-    "/Applications/LanVid Audio.app/Contents/MacOS/LanVid Audio"
-    "/Applications/LanVid Video.app"
-    "/Applications/LanVid Video.app/Contents/MacOS/LanVid Video"
     "$SDK_ROOT/lib/liblanvid_core.dylib"
     "/usr/local/lib/liblanvid_core.dylib"
     "/usr/local/bin/lanvid-sdk-info"
   )
-  if [ -x "/usr/local/bin/lanvid_dsp_server" ]; then
-    FW_TARGETS+=("/usr/local/bin/lanvid_dsp_server")
-  fi
   for target in "${FW_TARGETS[@]}"; do
     if [ -e "$target" ]; then
       "$FW" --add "$target" >/dev/null 2>&1 || true
       "$FW" --unblockapp "$target" >/dev/null 2>&1 || true
     fi
   done
-  echo "[OK] Configured macOS Application Firewall rules for installed LanVid components."
+  echo "[OK] Configured macOS Application Firewall rules for installed LanVidSDK components."
 fi
 
 # 6. Open /usr/local/LanVidSDK in Finder for the logged-in user (interactive installs only)

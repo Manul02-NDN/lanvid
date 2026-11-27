@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -235,6 +236,7 @@ public:
             lv_receiver_set_video_callback(handle_, nullptr, nullptr);
             lv_receiver_set_audio_callback(handle_, nullptr, nullptr);
             lv_receiver_set_state_callback(handle_, nullptr, nullptr);
+            lv_receiver_set_multichannel_audio_callback(handle_, nullptr, nullptr);
             lv_receiver_destroy(handle_);
         }
     }
@@ -252,18 +254,39 @@ public:
     }
 
     void on_video(VideoCallback cb) {
-        video_cb_ = std::move(cb);
-        lv_receiver_set_video_callback(handle_, video_cb_ ? &Receiver::video_trampoline : nullptr, this);
+        bool has_cb = false;
+        {
+            std::lock_guard<std::mutex> lk(cb_mu_);
+            video_cb_ = std::move(cb);
+            has_cb = static_cast<bool>(video_cb_);
+        }
+        if (handle_) {
+            lv_receiver_set_video_callback(handle_, has_cb ? &Receiver::video_trampoline : nullptr, this);
+        }
     }
 
     void on_audio(AudioCallback cb) {
-        audio_cb_ = std::move(cb);
-        lv_receiver_set_audio_callback(handle_, audio_cb_ ? &Receiver::audio_trampoline : nullptr, this);
+        bool has_cb = false;
+        {
+            std::lock_guard<std::mutex> lk(cb_mu_);
+            audio_cb_ = std::move(cb);
+            has_cb = static_cast<bool>(audio_cb_);
+        }
+        if (handle_) {
+            lv_receiver_set_audio_callback(handle_, has_cb ? &Receiver::audio_trampoline : nullptr, this);
+        }
     }
 
     void on_state(StateCallback cb) {
-        state_cb_ = std::move(cb);
-        lv_receiver_set_state_callback(handle_, state_cb_ ? &Receiver::state_trampoline : nullptr, this);
+        bool has_cb = false;
+        {
+            std::lock_guard<std::mutex> lk(cb_mu_);
+            state_cb_ = std::move(cb);
+            has_cb = static_cast<bool>(state_cb_);
+        }
+        if (handle_) {
+            lv_receiver_set_state_callback(handle_, has_cb ? &Receiver::state_trampoline : nullptr, this);
+        }
     }
 
     Result<void> start(const LV_ReceiverConfig& cfg) {
@@ -300,8 +323,15 @@ public:
     // Measured jitter-buffer playout delay in ms (0 before playout starts).
     double effective_latency_ms() const { return lv_receiver_get_effective_latency_ms(handle_); }
     void on_multichannel_audio(MultichannelCallback cb) {
-        mc_cb_ = std::move(cb);
-        lv_receiver_set_multichannel_audio_callback(handle_, mc_cb_ ? &Receiver::mc_trampoline : nullptr, this);
+        bool has_cb = false;
+        {
+            std::lock_guard<std::mutex> lk(cb_mu_);
+            mc_cb_ = std::move(cb);
+            has_cb = static_cast<bool>(mc_cb_);
+        }
+        if (handle_) {
+            lv_receiver_set_multichannel_audio_callback(handle_, has_cb ? &Receiver::mc_trampoline : nullptr, this);
+        }
     }
     // Returns frames rendered (>= 0) or a negative LV_ErrorCode.
     int pop_audio_multichannel(float* out, uint16_t num_channels, uint32_t num_frames,
@@ -321,23 +351,48 @@ public:
 
 private:
     static void video_trampoline(const LV_VideoFrameView* f, void* ud) {
+        if (!f || !ud) return;
         auto* self = static_cast<Receiver*>(ud);
-        if (self->video_cb_ && f) self->video_cb_(*f);
+        VideoCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu_);
+            cb = self->video_cb_;
+        }
+        if (cb) cb(*f);
     }
     static void audio_trampoline(const LV_AudioChunkView* a, void* ud) {
+        if (!a || !ud) return;
         auto* self = static_cast<Receiver*>(ud);
-        if (self->audio_cb_ && a) self->audio_cb_(*a);
+        AudioCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu_);
+            cb = self->audio_cb_;
+        }
+        if (cb) cb(*a);
     }
     static void mc_trampoline(const LV_MultichannelAudioBlock* b, void* ud) {
+        if (!b || !ud) return;
         auto* self = static_cast<Receiver*>(ud);
-        if (self->mc_cb_ && b) self->mc_cb_(*b);
+        MultichannelCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu_);
+            cb = self->mc_cb_;
+        }
+        if (cb) cb(*b);
     }
     static void state_trampoline(int st, int err, const char* msg, void* ud) {
+        if (!ud) return;
         auto* self = static_cast<Receiver*>(ud);
-        if (self->state_cb_) self->state_cb_(LV_StreamState(st), LV_ErrorCode(err), msg ? msg : "");
+        StateCallback cb;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu_);
+            cb = self->state_cb_;
+        }
+        if (cb) cb(LV_StreamState(st), LV_ErrorCode(err), msg ? msg : "");
     }
 
     LvReceiverHandle* handle_ = nullptr;
+    mutable std::mutex cb_mu_;
     VideoCallback video_cb_;
     AudioCallback audio_cb_;
     StateCallback state_cb_;

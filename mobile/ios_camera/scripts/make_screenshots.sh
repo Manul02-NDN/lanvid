@@ -15,7 +15,7 @@ RAW="$HERE/build/screenshots-raw"
 BUNDLE="com.manul02.lanvid.camera"
 cd "$HERE"
 
-[ -d build/LanVidCore.xcframework ] || LANVID_REUSE_MONITOR_CORE=1 ./scripts/build_core.sh
+[ -d build/LanVidCore.xcframework ] || ./scripts/build_core.sh
 xcodegen generate >/dev/null
 xcodebuild -project LanVidCamera.xcodeproj -scheme LanVidCamera -sdk iphonesimulator -configuration Debug \
   -destination "platform=iOS Simulator,name=$DEVICE" -derivedDataPath build/DerivedData \

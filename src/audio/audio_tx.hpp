@@ -138,6 +138,7 @@ private:
     std::atomic<uint16_t> epoch_{0};
     std::atomic<uint8_t> codec_profile_{uint8_t(AudioCodecProfile::kPcm32F)};
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
+    std::atomic<Stream*> stream_ptrs_[kMaxAudioChannels]{};
     std::mutex create_mu_;
 
     std::atomic<uint64_t> packets_sent_{0}, bytes_sent_{0}, parity_sent_{0}, retransmits_{0},

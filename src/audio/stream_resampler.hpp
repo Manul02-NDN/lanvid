@@ -35,7 +35,8 @@ public:
 
     // Frames that must be buffered so that produce(n, ratio) can emit n frames.
     uint32_t needed_for(uint32_t n, double ratio) const {
-        const double last = pos_ + double(n ? n - 1 : 0) * ratio;
+        if (n == 0) return 0;
+        const double last = pos_ + double(n - 1) * ratio;
         return uint32_t(last) + 2;
     }
 
@@ -69,19 +70,21 @@ public:
 
     // Emits up to `max_out` frames into out[c] (c < channels; null entries skipped). Returns count.
     uint32_t produce(float* const* out, int channels, uint32_t max_out, double ratio) {
+        const double pos0 = pos_;
         uint32_t k = 0;
         while (k < max_out) {
-            const uint32_t i0 = uint32_t(pos_);
+            const double p = pos0 + double(k) * ratio;
+            const uint32_t i0 = uint32_t(p);
             if (i0 + 1 >= len_) break;  // need one sample of look-ahead
-            const float frac = float(pos_ - double(i0));
+            const float frac = float(p - double(i0));
             for (int c = 0; c < channels && c < ch_; ++c) {
-                if (!out[c]) continue;
+                if (!out || !out[c]) continue;
                 const float* s = buf_.data() + size_t(c) * cap_;
                 out[c][k] = s[i0] + (s[i0 + 1] - s[i0]) * frac;
             }
-            pos_ += ratio;
             ++k;
         }
+        pos_ = pos0 + double(k) * ratio;
         // Drop fully consumed source frames, keep the rest (exact continuity).
         const uint32_t drop = std::min<uint32_t>(uint32_t(pos_), len_);
         if (drop) {

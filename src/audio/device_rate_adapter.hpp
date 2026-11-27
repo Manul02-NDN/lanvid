@@ -40,20 +40,22 @@ public:
     void configure(int channels, uint32_t max_block, uint32_t mix_block) {
         ch_ = std::clamp(channels, 1, LockFreePlanarRing::kMaxChannels);
         max_block_ = std::max<uint32_t>(max_block, 64);
-        const uint32_t cap = max_block_ * 4 + 64;  // up to 2x rate ratio + headroom
+        const uint32_t cap = max_block_ * 6 + 64;  // handles low device rates (e.g. 8/16 kHz -> 48 kHz) + headroom
         rs_.configure(ch_, cap);
         tmp_.assign(size_t(ch_), std::vector<float>(cap, 0.0f));
         mix_block_.store(std::max<uint32_t>(mix_block, 32), std::memory_order_relaxed);
-        seen_block_ = 0;
-        trim_ = 0.0;
-        primed_ = false;
+        seen_block_.store(0, std::memory_order_relaxed);
+        trim_.store(0.0, std::memory_order_relaxed);
+        primed_.store(false, std::memory_order_relaxed);
     }
     void set_mix_block(uint32_t frames) { mix_block_.store(std::max<uint32_t>(frames, 32), std::memory_order_relaxed); }
 
     // Fill (48 kHz frames) the drift loop steers the ring to.
     uint32_t target_fill(double dev_rate) const {
-        const double dev48 = double(seen_block_) * double(kMatrixRate) / std::max(1000.0, dev_rate);
-        return mix_block_.load(std::memory_order_relaxed) + uint32_t(std::ceil(dev48)) + 32;
+        const double dev48 = double(seen_block_.load(std::memory_order_relaxed)) * double(kMatrixRate) /
+                             std::max(1000.0, dev_rate);
+        const uint32_t want = mix_block_.load(std::memory_order_relaxed) + uint32_t(std::ceil(dev48)) + 32;
+        return std::min<uint32_t>(want, kPlanarRingCap - 64);
     }
 
     // Device wants `n` frames at `dev_rate` -> out[c] (c < out_ch; null planes skipped). Always writes n
@@ -61,22 +63,23 @@ public:
     uint32_t render(LockFreePlanarRing& ring, float* const* out, int out_ch, uint32_t n, double dev_rate) {
         n = std::min(n, max_block_);
         if (n == 0) return 0;
-        seen_block_ = std::max(seen_block_, n);
+        const uint32_t prev_seen = seen_block_.load(std::memory_order_relaxed);
+        if (n > prev_seen) seen_block_.store(n, std::memory_order_relaxed);
         dev_rate = dev_rate > 1000.0 ? dev_rate : double(kMatrixRate);
         const uint32_t target = target_fill(dev_rate);
         const int oc = std::min(out_ch, ch_);
-        if (!primed_) {
+        if (!primed_.load(std::memory_order_relaxed)) {
             if (ring.available() < target) {
                 silence(out, out_ch, 0, n);
                 return 0;
             }
-            primed_ = true;
+            primed_.store(true, std::memory_order_relaxed);
             rs_.reset();
         }
         // Fill above target -> the device clock is slower than the matrix: consume slightly faster.
         const double fill = double(ring.available()) + double(rs_.buffered());
         update_trim(fill, double(target), n, dev_rate);
-        const double ratio = double(kMatrixRate) / dev_rate * (1.0 + trim_);
+        const double ratio = double(kMatrixRate) / dev_rate * (1.0 + trim_.load(std::memory_order_relaxed));
         const uint32_t need = rs_.needed_for(n, ratio);
         if (rs_.buffered() < need) {
             const uint32_t pull = std::min(need - rs_.buffered(), rs_.space());
@@ -89,11 +92,11 @@ public:
         }
         const uint32_t made = rs_.produce(out, oc, n, ratio);
         for (int c = oc; c < out_ch; ++c)
-            if (out[c]) std::memset(out[c], 0, size_t(n) * sizeof(float));
+            if (out && out[c]) std::memset(out[c], 0, size_t(n) * sizeof(float));
         if (made < n) {
             silence(out, oc, made, n);
             underruns_.fetch_add(1, std::memory_order_relaxed);
-            primed_ = false;  // refill before playing again (one clean gap, not a crackle per block)
+            primed_.store(false, std::memory_order_relaxed);  // refill before playing again (one clean gap, not a crackle per block)
         }
         return made;
     }
@@ -103,14 +106,15 @@ public:
     uint32_t capture(LockFreePlanarRing& ring, const float* const* in, int in_ch, uint32_t n, double dev_rate) {
         n = std::min(n, max_block_);
         if (n == 0) return 0;
-        seen_block_ = std::max(seen_block_, n);
+        const uint32_t prev_seen = seen_block_.load(std::memory_order_relaxed);
+        if (n > prev_seen) seen_block_.store(n, std::memory_order_relaxed);
         dev_rate = dev_rate > 1000.0 ? dev_rate : double(kMatrixRate);
         const float* src[LockFreePlanarRing::kMaxChannels];
         for (int c = 0; c < ch_; ++c) src[c] = (c < in_ch && in) ? in[c] : nullptr;
         rs_.push(src, ch_, n);
         // Fill above target -> the matrix reads slower than the device delivers: emit slightly less.
         update_trim(double(ring.available()), double(target_fill(dev_rate)), n, dev_rate);
-        const double ratio = dev_rate / double(kMatrixRate) * (1.0 + trim_);
+        const double ratio = dev_rate / double(kMatrixRate) * (1.0 + trim_.load(std::memory_order_relaxed));
         float* t[LockFreePlanarRing::kMaxChannels];
         for (int c = 0; c < ch_; ++c) t[c] = tmp_[size_t(c)].data();
         const uint32_t cap = uint32_t(tmp_.empty() ? 0 : tmp_[0].size());
@@ -120,31 +124,32 @@ public:
         return made ? ring.write(ct, uint32_t(ch_), made) : 0;
     }
 
-    double trim_ppm() const { return trim_ * 1e6; }
+    double trim_ppm() const { return trim_.load(std::memory_order_relaxed) * 1e6; }
     uint64_t underruns() const { return underruns_.load(std::memory_order_relaxed); }
-    bool primed() const { return primed_; }
+    bool primed() const { return primed_.load(std::memory_order_relaxed); }
 
 private:
     void update_trim(double fill, double target, uint32_t n, double dev_rate) {
         const double err = std::clamp((fill - target) / std::max(64.0, target), -1.0, 1.0);
         const double want = std::clamp(err * kMaxTrim, -kMaxTrim, kMaxTrim);
         const double alpha = std::min(1.0, double(n) / (dev_rate * 0.5));  // ~0.5 s low-pass
-        trim_ += (want - trim_) * alpha;
-        trim_ = std::clamp(trim_, -kMaxTrim, kMaxTrim);
+        const double cur = trim_.load(std::memory_order_relaxed);
+        trim_.store(std::clamp(cur + (want - cur) * alpha, -kMaxTrim, kMaxTrim), std::memory_order_relaxed);
     }
     static void silence(float* const* out, int ch, uint32_t from, uint32_t to) {
+        if (!out) return;
         for (int c = 0; c < ch; ++c)
             if (out[c] && to > from) std::memset(out[c] + from, 0, size_t(to - from) * sizeof(float));
     }
 
     int ch_ = 2;
     uint32_t max_block_ = 4096;
-    uint32_t seen_block_ = 0;
+    std::atomic<uint32_t> seen_block_{0};
     std::atomic<uint32_t> mix_block_{256};
     StreamResampler rs_;
     std::vector<std::vector<float>> tmp_;
-    double trim_ = 0.0;
-    bool primed_ = false;
+    std::atomic<double> trim_{0.0};
+    std::atomic<bool> primed_{false};
     std::atomic<uint64_t> underruns_{0};
 };
 

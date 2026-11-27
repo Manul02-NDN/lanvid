@@ -27,8 +27,11 @@ bool ShmAudioHost::start(const Config& cfg, PushFn tx, PopFn rx) {
     cfg_.block_frames = std::clamp<uint32_t>(cfg_.block_frames, 16, kShmBusFrames / 4);
     tx_ = std::move(tx);
     rx_ = std::move(rx);
-    if (!bus_.open(cfg_.bus_name.empty() ? nullptr : cfg_.bus_name.c_str())) return false;
-    bus_.host_heartbeat();
+    {
+        std::lock_guard<std::mutex> lk(bus_mu_);
+        if (!bus_.open(cfg_.bus_name.empty() ? nullptr : cfg_.bus_name.c_str())) return false;
+        bus_.host_heartbeat();
+    }
     stop_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread([this] { loop(); });
@@ -39,10 +42,12 @@ void ShmAudioHost::stop() {
     stop_.store(true, std::memory_order_release);
     if (thread_.joinable()) thread_.join();
     running_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(bus_mu_);
     bus_.close();
 }
 
 void ShmAudioHost::publish_network_state(uint32_t latency_ms, bool clock_synced, double skew_ppm) {
+    std::lock_guard<std::mutex> lk(bus_mu_);
     ShmBusHeader* h = bus_.header();
     if (!h) return;
     h->target_latency_ms.store(latency_ms, std::memory_order_relaxed);
@@ -130,8 +135,9 @@ void ShmAudioHost::loop() {
                 const uint32_t n = std::min(blk, target - fill);
                 for (uint32_t c = 0; c < ch; ++c) std::fill(bufs[c].begin(), bufs[c].begin() + n, 0.0f);
                 rx_(planes.data(), ch, n);
-                std::vector<const float*> cp(planes.begin(), planes.end());
-                bus_.host_write_rx(cp.data(), ch, n);
+                const float* cp[kShmBusChannels];
+                for (uint32_t c = 0; c < ch; ++c) cp[c] = planes[c];
+                bus_.host_write_rx(cp, ch, n);
                 rx_frames_.fetch_add(n, std::memory_order_relaxed);
             }
         }
@@ -144,6 +150,7 @@ void ShmAudioHost::loop() {
 
 ShmHostStatus ShmAudioHost::status() const {
     ShmHostStatus s;
+    std::lock_guard<std::mutex> lk(bus_mu_);
     auto& bus = const_cast<ShmAudioBus&>(bus_);
     const ShmBusHeader* h = bus.header();
     if (!h) return s;

@@ -107,6 +107,7 @@ bool UdpSocket::bind_to_interface(const std::string& local_ip, uint16_t port,
             (void)::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &addr, sizeof(addr));
         }
 #if defined(__APPLE__) && defined(IP_BOUND_IF)
+        (void)if_name;
         if (if_index != 0) {
             unsigned int idx = if_index;
             (void)::setsockopt(fd_, IPPROTO_IP, IP_BOUND_IF, &idx, sizeof(idx));
@@ -145,48 +146,48 @@ bool UdpSocket::set_tos(int tos_value) const {
     if (cached_tos_.load(std::memory_order_relaxed) == tos_value) return true;
     int tos = tos_value;
     const bool ok = ::setsockopt(fd_, IPPROTO_IP, IP_TOS, &tos, sizeof(tos)) == 0;
-#if defined(IPV6_TCLASS)
-    int tclass = tos_value;  // effective on IPv6 sockets; harmless on AF_INET
-    (void)::setsockopt(fd_, IPPROTO_IPV6, IPV6_TCLASS, &tclass, sizeof(tclass));
-#endif
     if (ok) cached_tos_.store(tos_value, std::memory_order_relaxed);
     return ok;
 }
 
 bool UdpSocket::set_qos_class(QosTrafficClass cls) const {
+    const int prev_tos = cached_tos_.load(std::memory_order_relaxed);
     bool ok = false;
+    int desired_svc = -1;
     switch (cls) {
         case QosTrafficClass::kSyncControl:
             ok = set_tos(kDscpCs7Tos) || set_tos(kDscpCs6Tos) || set_tos(kDscpEfTos);
 #if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
-            {
-                int svc = NET_SERVICE_TYPE_VO;
-                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
-            }
+            desired_svc = NET_SERVICE_TYPE_VO;
 #endif
-            return ok;
+            break;
         case QosTrafficClass::kAudio:
             ok = set_tos(kDscpEfTos);
 #if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
-            {
-                int svc = NET_SERVICE_TYPE_VO;
-                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
-            }
+            desired_svc = NET_SERVICE_TYPE_VO;
 #endif
-            return ok;
+            break;
         case QosTrafficClass::kVideo:
             ok = set_tos(kDscpAf41Tos);
 #if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
-            {
-                int svc = NET_SERVICE_TYPE_VI;
-                (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
-            }
+            desired_svc = NET_SERVICE_TYPE_VI;
 #endif
-            return ok;
+            break;
         case QosTrafficClass::kBestEffort:
         default:
-            return set_tos(0);
+            ok = set_tos(0);
+            break;
     }
+#if defined(__APPLE__) && defined(SO_NET_SERVICE_TYPE)
+    if (desired_svc >= 0 && cached_tos_.load(std::memory_order_relaxed) != prev_tos) {
+        int svc = desired_svc;
+        (void)::setsockopt(fd_, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, sizeof(svc));
+    }
+#else
+    (void)prev_tos;
+    (void)desired_svc;
+#endif
+    return ok;
 }
 
 bool UdpSocket::set_low_latency_qos() {

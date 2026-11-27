@@ -71,7 +71,15 @@ bool VideoBus::open(const char* name) {
         fd = shm_open(shm_name_, O_RDWR, 0666);
         if (fd < 0) return false;
         struct stat st {};
-        if (fstat(fd, &st) != 0 || size_t(st.st_size) < size) {
+        bool size_ok = false;
+        for (int wait_i = 0; wait_i < 20; ++wait_i) {
+            if (fstat(fd, &st) == 0 && size_t(st.st_size) >= size) {
+                size_ok = true;
+                break;
+            }
+            usleep(1000);
+        }
+        if (!size_ok) {
             ::close(fd);
             return false;  // older / foreign layout: never write into it
         }
@@ -80,12 +88,13 @@ bool VideoBus::open(const char* name) {
     ::close(fd);
     if (mem == MAP_FAILED) return false;
 #endif
+    std::lock_guard<std::mutex> lk(host_mu_);
     base_ = mem;
     size_ = size;
     hdr_ = static_cast<VideoBusHeader*>(mem);
     slots_ = reinterpret_cast<VideoBusSlot*>(static_cast<uint8_t*>(mem) + kHeaderBytes);
     frames_ = reinterpret_cast<uint8_t*>(slots_ + kVideoBusSlots);
-    if (created || hdr_->magic.load(std::memory_order_acquire) != kVideoBusMagic) {
+    if (created) {
         std::memset(mem, 0, kHeaderBytes + sizeof(VideoBusSlot) * kVideoBusSlots);
         hdr_->version = kVideoBusVersion;
         hdr_->slots = kVideoBusSlots;
@@ -99,12 +108,37 @@ bool VideoBus::open(const char* name) {
             slots_[i].enabled.store(1, std::memory_order_relaxed);
         }
         hdr_->magic.store(kVideoBusMagic, std::memory_order_release);
+    } else {
+        for (int wait_i = 0; wait_i < 50 && hdr_->magic.load(std::memory_order_acquire) != kVideoBusMagic; ++wait_i) {
+#if defined(_WIN32)
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+        }
+        if (hdr_->magic.load(std::memory_order_acquire) != kVideoBusMagic) {
+            // Segment existed but was never initialized (stale crash): initialize cleanly now.
+            std::memset(mem, 0, kHeaderBytes + sizeof(VideoBusSlot) * kVideoBusSlots);
+            hdr_->version = kVideoBusVersion;
+            hdr_->slots = kVideoBusSlots;
+            hdr_->max_width = kVideoBusMaxWidth;
+            hdr_->max_height = kVideoBusMaxHeight;
+            hdr_->frame_bytes = uint32_t(kVideoBusFrameBytes);
+            hdr_->active_vcams.store(kVideoBusCameraSlots, std::memory_order_relaxed);
+            hdr_->placeholder_enabled.store(1, std::memory_order_relaxed);
+            for (uint32_t i = 0; i < kVideoBusSlots; ++i) {
+                std::snprintf(slots_[i].label, sizeof(slots_[i].label), "%s", video_bus_device_name(i));
+                slots_[i].enabled.store(1, std::memory_order_relaxed);
+            }
+            hdr_->magic.store(kVideoBusMagic, std::memory_order_release);
+        }
     }
     return hdr_->version == kVideoBusVersion;
 #endif
 }
 
 void VideoBus::close() {
+    std::lock_guard<std::mutex> lk(host_mu_);
     if (!base_) return;
 #if defined(_WIN32)
     UnmapViewOfFile(base_);
@@ -127,6 +161,7 @@ uint8_t* VideoBus::frame_buffer(uint32_t slot_index, uint32_t buf) const {
 
 bool VideoBus::publish(uint32_t slot_index, VideoBusFormat fmt, uint32_t width, uint32_t height, const uint8_t* data,
                        uint32_t src_stride, uint64_t timestamp_us, uint32_t fps_x100) {
+    std::lock_guard<std::mutex> lk(host_mu_);
     VideoBusSlot* s = slot(slot_index);
     if (!s || !data || width == 0 || height == 0) return false;
     size_t bytes = 0;
@@ -144,8 +179,9 @@ bool VideoBus::publish(uint32_t slot_index, VideoBusFormat fmt, uint32_t width, 
     if (bytes > kVideoBusFrameBytes || width > kVideoBusMaxWidth || height > kVideoBusMaxHeight) return false;
     if (src_stride == 0) src_stride = row;
 
-    const uint32_t back = s->front.load(std::memory_order_relaxed) ^ 1u;
+    const uint32_t back = (s->front.load(std::memory_order_relaxed) & 1u) ^ 1u;
     uint8_t* dst = frame_buffer(slot_index, back);
+    if (!dst) return false;
     if (fmt == VideoBusFormat::kBGRA) {
         for (uint32_t y = 0; y < height; ++y) std::memcpy(dst + size_t(y) * row, data + size_t(y) * src_stride, row);
     } else {
@@ -154,8 +190,8 @@ bool VideoBus::publish(uint32_t slot_index, VideoBusFormat fmt, uint32_t width, 
         uint8_t* duv = dst + size_t(row) * height;
         for (uint32_t y = 0; y < height / 2; ++y) std::memcpy(duv + size_t(y) * row, uv + size_t(y) * src_stride, row);
     }
-    // seqlock publish: odd while the description changes, even afterwards
-    const uint64_t q = s->seq.load(std::memory_order_relaxed);
+    // seqlock publish: odd while the description changes, even afterwards (serialized by host_mu_)
+    const uint64_t q = s->seq.load(std::memory_order_relaxed) & ~uint64_t(1);
     s->seq.store(q + 1, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_release);
     s->width = width;
@@ -174,9 +210,10 @@ bool VideoBus::publish(uint32_t slot_index, VideoBusFormat fmt, uint32_t width, 
 
 void VideoBus::set_slot_info(uint32_t slot_index, const char* label, const char* source_name, bool connected,
                              bool standby) {
+    std::lock_guard<std::mutex> lk(host_mu_);
     VideoBusSlot* s = slot(slot_index);
     if (!s) return;
-    const uint64_t q = s->seq.load(std::memory_order_relaxed);
+    const uint64_t q = s->seq.load(std::memory_order_relaxed) & ~uint64_t(1);
     s->seq.store(q + 1, std::memory_order_release);
     std::atomic_thread_fence(std::memory_order_release);
     if (label) std::snprintf(s->label, sizeof(s->label), "%s", label);
@@ -188,6 +225,7 @@ void VideoBus::set_slot_info(uint32_t slot_index, const char* label, const char*
 }
 
 void VideoBus::set_active_vcams(uint32_t count, bool placeholder_enabled) {
+    std::lock_guard<std::mutex> lk(host_mu_);
     if (!hdr_) return;
     count = std::min(count, kVideoBusCameraSlots);
     hdr_->active_vcams.store(count, std::memory_order_release);
@@ -197,6 +235,7 @@ void VideoBus::set_active_vcams(uint32_t count, bool placeholder_enabled) {
 }
 
 void VideoBus::heartbeat() {
+    std::lock_guard<std::mutex> lk(host_mu_);
     if (hdr_) hdr_->host_heartbeat_ms.store(video_bus_now_ms(), std::memory_order_release);
 }
 
@@ -218,17 +257,22 @@ bool VideoBus::read_latest(uint32_t slot_index, uint8_t* dst, size_t dst_cap, Fr
         std::memcpy(fi.label, s->label, sizeof(fi.label));
         fi.label[sizeof(fi.label) - 1] = 0;
         const uint32_t front = s->front.load(std::memory_order_relaxed);
-        const size_t bytes = fi.format == VideoBusFormat::kBGRA ? size_t(fi.stride) * fi.height
-                             : fi.format == VideoBusFormat::kNV12 ? size_t(fi.stride) * fi.height * 3 / 2
-                                                                 : 0;
+        const bool dims_ok = fi.width > 0 && fi.height > 0 && fi.width <= kVideoBusMaxWidth &&
+                             fi.height <= kVideoBusMaxHeight && front <= 1u;
+        const size_t bytes = !dims_ok ? 0
+                             : fi.format == VideoBusFormat::kBGRA ? size_t(fi.stride) * size_t(fi.height)
+                             : fi.format == VideoBusFormat::kNV12 ? size_t(fi.stride) * size_t(fi.height) * 3 / 2
+                                                                  : 0;
         const bool connected = s->connected.load(std::memory_order_acquire) != 0;
         const bool standby = s->standby.load(std::memory_order_acquire) != 0;
         const uint64_t now_ms = video_bus_now_ms(), wrote_ms = s->last_write_ms.load(std::memory_order_relaxed);
         const uint64_t age = wrote_ms >= now_ms ? 0 : now_ms - wrote_ms;  // host may have written after `now_ms`
-        fi.fresh = connected && !standby && bytes > 0 && age <= kVideoBusStaleMs && fi.frame_seq > 0;
+        fi.fresh = connected && !standby && bytes > 0 && bytes <= kVideoBusFrameBytes &&
+                   age <= kVideoBusStaleMs && fi.frame_seq > 0;
         if (fi.fresh && dst) {
-            if (bytes > dst_cap) return false;
-            std::memcpy(dst, frame_buffer(slot_index, front), bytes);
+            const uint8_t* src_buf = frame_buffer(slot_index, front);
+            if (!src_buf || bytes > dst_cap) return false;
+            std::memcpy(dst, src_buf, bytes);
         }
         std::atomic_thread_fence(std::memory_order_acquire);
         if (s->seq.load(std::memory_order_acquire) != q0) continue;  // host published meanwhile: retry
@@ -396,6 +440,8 @@ void video_bus_bgra_to_yuy2(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_
 void video_bus_bgra_to_nv12(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t bgra_stride, uint8_t* nv12,
                             uint32_t y_stride) {
     uint8_t* uvp = nv12 + size_t(y_stride) * h;
+    const uint32_t w2 = w & ~1u;
+    const uint32_t h2 = h & ~1u;
     for (uint32_t y = 0; y < h; ++y) {
         const uint8_t* s = bgra + size_t(y) * bgra_stride;
         uint8_t* d = nv12 + size_t(y) * y_stride;
@@ -403,7 +449,7 @@ void video_bus_bgra_to_nv12(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_
             int Y, U, V;
             rgb_to_yuv(s[x * 4 + 2], s[x * 4 + 1], s[x * 4 + 0], Y, U, V);
             d[x] = uint8_t(std::clamp(Y, 0, 255));
-            if (!(y & 1) && !(x & 1)) {
+            if (y < h2 && x < w2 && !(y & 1) && !(x & 1)) {
                 uint8_t* uv = uvp + size_t(y / 2) * y_stride + x;
                 uv[0] = uint8_t(std::clamp(U, 0, 255));
                 uv[1] = uint8_t(std::clamp(V, 0, 255));

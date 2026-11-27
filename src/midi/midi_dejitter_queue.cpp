@@ -88,13 +88,18 @@ void MidiDejitterQueue::push(const TimedMidiEvent& ev, uint64_t arrival_local_us
         } else if (obs_offset < min_offset_samples_) {
             // Faster packet arrived -> tighten baseline immediately (true minimum transit floor)
             min_offset_samples_ = obs_offset;
+            drift_relax_ticks_ = 0;
         } else {
-            // Very slow upward relaxation (+1 sample per ~128 events) handles gentle quartz drift
+            // Very slow upward relaxation (+1 sample per 128 events) handles gentle quartz drift
             // without chasing Wi-Fi jitter spikes.
             const int64_t excess = obs_offset - min_offset_samples_;
             if (excess > int64_t(sample_rate_) / 2) {
                 // Step-change (> 500 ms clock jump / sender restart) -> re-anchor immediately
                 min_offset_samples_ = obs_offset;
+                drift_relax_ticks_ = 0;
+            } else if (excess > 0 && ++drift_relax_ticks_ >= 128u) {
+                ++min_offset_samples_;
+                drift_relax_ticks_ = 0;
             }
         }
         mapped_local_rx_samples = media_samples + min_offset_samples_;
@@ -122,7 +127,13 @@ void MidiDejitterQueue::push(const TimedMidiEvent& ev, uint64_t arrival_local_us
     se.target_playout_samples = late ? arrival_samples : target_playout;
     se.ev = ev;
     se.was_late = late;
-    queue_.push(se);
+    if (queue_.size() >= kMaxQueuedEvents) {
+        auto oldest = std::min_element(queue_.begin(), queue_.end(), [](const ScheduledEvent& a, const ScheduledEvent& b) {
+            return b > a;
+        });
+        if (oldest != queue_.end()) queue_.erase(oldest);
+    }
+    queue_.push_back(se);
     total_enqueued_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -131,11 +142,18 @@ uint32_t MidiDejitterQueue::pop_due_local(uint64_t local_now_us, const DispatchF
     std::vector<ScheduledEvent> due;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        while (!queue_.empty() && queue_.top().target_playout_samples <= now_samples) {
-            due.push_back(queue_.top());
-            queue_.pop();
+        size_t keep = 0;
+        for (size_t i = 0; i < queue_.size(); ++i) {
+            if (queue_[i].target_playout_samples <= now_samples) {
+                due.push_back(queue_[i]);
+            } else {
+                if (keep != i) queue_[keep] = queue_[i];
+                ++keep;
+            }
         }
+        queue_.resize(keep);
     }
+    std::sort(due.begin(), due.end(), [](const ScheduledEvent& a, const ScheduledEvent& b) { return b > a; });
     for (const auto& se : due) {
         if (on_event) on_event(se.ev, se.was_late);
         total_dispatched_.fetch_add(1, std::memory_order_relaxed);
@@ -147,16 +165,23 @@ uint32_t MidiDejitterQueue::pop_due_media(uint64_t playout_media_ts_us, const Di
     std::vector<ScheduledEvent> due;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        // When AudioSyncMatrix is actively rendering audio, release every event whose sender
-        // `media_ts_us <= playout_media_ts_us` (plus any late-flagged event).
-        // Because queue_ is ordered by target_playout_samples (which is monotonic with media_ts_us
-        // under a constant buffer), check queue_.top().ev.media_ts_us <= playout_media_ts_us.
-        while (!queue_.empty() &&
-               (queue_.top().ev.media_ts_us <= playout_media_ts_us || queue_.top().was_late)) {
-            due.push_back(queue_.top());
-            queue_.pop();
+        // Release every event whose sender `media_ts_us <= playout_media_ts_us` (or late-flagged),
+        // immune to head-of-line blocking when buffer latency decreases mid-stream.
+        size_t keep = 0;
+        for (size_t i = 0; i < queue_.size(); ++i) {
+            if (queue_[i].ev.media_ts_us <= playout_media_ts_us || queue_[i].was_late) {
+                due.push_back(queue_[i]);
+            } else {
+                if (keep != i) queue_[keep] = queue_[i];
+                ++keep;
+            }
         }
+        queue_.resize(keep);
     }
+    std::sort(due.begin(), due.end(), [](const ScheduledEvent& a, const ScheduledEvent& b) {
+        if (a.ev.media_ts_us != b.ev.media_ts_us) return a.ev.media_ts_us < b.ev.media_ts_us;
+        return a.ev.event_seq < b.ev.event_seq;
+    });
     for (const auto& se : due) {
         if (on_event) on_event(se.ev, se.was_late);
         total_dispatched_.fetch_add(1, std::memory_order_relaxed);
@@ -168,8 +193,9 @@ void MidiDejitterQueue::reset() {
     std::lock_guard<std::mutex> lk(mu_);
     has_baseline_ = false;
     min_offset_samples_ = 0;
+    drift_relax_ticks_ = 0;
     absorbed_jitter_ms_ = 0.0;
-    while (!queue_.empty()) queue_.pop();
+    queue_.clear();
 }
 
 MidiDejitterStats MidiDejitterQueue::stats() const {

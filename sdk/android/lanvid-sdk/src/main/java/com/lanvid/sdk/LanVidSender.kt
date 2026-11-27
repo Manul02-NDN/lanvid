@@ -5,8 +5,12 @@ import com.lanvid.sdk.internal.NativeBridge
 import org.json.JSONObject
 import java.io.Closeable
 import java.nio.ByteBuffer
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 
 class LanVidSender : Closeable {
+    private val lock = ReentrantReadWriteLock()
     private var handle: Long = NativeBridge.senderCreate()
 
     fun start(
@@ -20,14 +24,15 @@ class LanVidSender : Closeable {
         adaptiveQuality: Boolean = true,
         codec: LanVidCodec = LanVidCodec.DCT,
         bitrateKbps: Int = 8000
-    ): Boolean {
-        return NativeBridge.senderStart(
+    ): Boolean = lock.read {
+        if (handle == 0L) return false
+        NativeBridge.senderStart(
             handle, destIp, destPort, width, height, fps, quality, fecGroup, adaptiveQuality,
             codec.id, bitrateKbps
         ) == 0
     }
 
-    fun stop() {
+    fun stop() = lock.read {
         if (handle != 0L) NativeBridge.senderStop(handle)
     }
 
@@ -39,7 +44,7 @@ class LanVidSender : Closeable {
         image: Image,
         rotationDegrees: Int = 0,
         mirrorHorizontal: Boolean = false
-    ): Boolean {
+    ): Boolean = lock.read {
         if (handle == 0L || image.planes.size < 3) return false
         val p0 = image.planes[0]
         val p1 = image.planes[1]
@@ -47,7 +52,7 @@ class LanVidSender : Closeable {
         val yBuf = ensureDirect(p0.buffer)
         val uBuf = ensureDirect(p1.buffer)
         val vBuf = ensureDirect(p2.buffer)
-        return NativeBridge.senderPushYuv420Ex(
+        NativeBridge.senderPushYuv420Ex(
             handle, yBuf, uBuf, vBuf,
             image.width, image.height, p0.rowStride, p1.rowStride, p2.rowStride, p1.pixelStride,
             rotationDegrees, mirrorHorizontal
@@ -65,44 +70,53 @@ class LanVidSender : Closeable {
     }
 
     /** Zero-copy push of packed RGBA_8888 direct ByteBuffer (e.g. MediaProjection ImageReader). */
-    fun pushRgba(buffer: ByteBuffer, width: Int, height: Int, stride: Int = width * 4): Boolean {
+    fun pushRgba(buffer: ByteBuffer, width: Int, height: Int, stride: Int = width * 4): Boolean = lock.read {
         if (handle == 0L) return false
-        return NativeBridge.senderPushPacked(handle, buffer, width, height, stride, 1) == 0
+        val direct = ensureDirect(buffer)
+        NativeBridge.senderPushPacked(handle, direct, width, height, stride, 1) == 0
     }
 
-    fun pushAudioPcm16(pcm: ShortArray, numFrames: Int, sampleRate: Int = 48000, channels: Int = 2): Boolean {
+    fun pushAudioPcm16(pcm: ShortArray, numFrames: Int, sampleRate: Int = 48000, channels: Int = 2): Boolean = lock.read {
         if (handle == 0L) return false
-        return NativeBridge.senderPushAudioPcm16(handle, pcm, numFrames, sampleRate, channels) == 0
+        NativeBridge.senderPushAudioPcm16(handle, pcm, numFrames, sampleRate, channels) == 0
     }
 
     // ---- 64-channel AoIP bus ----
     /** Call before start() to choose 48/96 kHz; [latencyMs] 2..2000 may also be changed live. */
-    fun configureAudioBus(latencyMs: Int = 20, sampleRate: Int = 48000): Boolean =
+    fun configureAudioBus(latencyMs: Int = 20, sampleRate: Int = 48000): Boolean = lock.read {
         handle != 0L && NativeBridge.senderConfigureAudioBus(handle, sampleRate, latencyMs) == 0
+    }
 
     /** Independent push of one channel (0..63); [mediaTs] = -1 continues the channel automatically. */
-    fun pushAudioChannel(channel: Int, samples: FloatArray, count: Int = samples.size, mediaTs: Long = -1L): Boolean =
+    fun pushAudioChannel(channel: Int, samples: FloatArray, count: Int = samples.size, mediaTs: Long = -1L): Boolean = lock.read {
         handle != 0L && NativeBridge.senderPushAudioChannelF32(handle, channel, samples, count, mediaTs) == 0
+    }
 
     /** Interleaved Float32 push of [channels] channels sharing one master-clock timestamp. */
-    fun pushAudioMultichannel(interleaved: FloatArray, channels: Int, frames: Int, mediaTs: Long = -1L): Boolean =
+    fun pushAudioMultichannel(interleaved: FloatArray, channels: Int, frames: Int, mediaTs: Long = -1L): Boolean = lock.read {
         handle != 0L && NativeBridge.senderPushAudioMultichannelF32(handle, interleaved, channels, frames, mediaTs) == 0
+    }
 
-    fun setAudioLatencyMs(latencyMs: Int) { if (handle != 0L) NativeBridge.senderSetAudioLatency(handle, latencyMs) }
-    fun masterClockSamples(): Long = if (handle != 0L) NativeBridge.senderMasterClockSamples(handle) else 0L
+    fun setAudioLatencyMs(latencyMs: Int) = lock.read {
+        if (handle != 0L) NativeBridge.senderSetAudioLatency(handle, latencyMs)
+    }
 
-    fun setQuality(quality: Int) { if (handle != 0L) NativeBridge.senderSetQuality(handle, quality) }
-    fun setBitrateKbps(bitrateKbps: Int) { if (handle != 0L) NativeBridge.senderSetBitrate(handle, bitrateKbps) }
-    fun forceKeyframe() { if (handle != 0L) NativeBridge.senderForceKeyframe(handle) }
-    fun setFecGroup(groupSize: Int) { if (handle != 0L) NativeBridge.senderSetFec(handle, groupSize) }
-    fun setAdaptiveQuality(enabled: Boolean, qMin: Int = 35, qMax: Int = 85) {
+    fun masterClockSamples(): Long = lock.read {
+        if (handle != 0L) NativeBridge.senderMasterClockSamples(handle) else 0L
+    }
+
+    fun setQuality(quality: Int) = lock.read { if (handle != 0L) NativeBridge.senderSetQuality(handle, quality) }
+    fun setBitrateKbps(bitrateKbps: Int) = lock.read { if (handle != 0L) NativeBridge.senderSetBitrate(handle, bitrateKbps) }
+    fun forceKeyframe() = lock.read { if (handle != 0L) NativeBridge.senderForceKeyframe(handle) }
+    fun setFecGroup(groupSize: Int) = lock.read { if (handle != 0L) NativeBridge.senderSetFec(handle, groupSize) }
+    fun setAdaptiveQuality(enabled: Boolean, qMin: Int = 35, qMax: Int = 85) = lock.read {
         if (handle != 0L) NativeBridge.senderSetAdaptive(handle, enabled, qMin, qMax)
     }
 
-    fun stats(): LanVidStreamStats {
+    fun stats(): LanVidStreamStats = lock.read {
         if (handle == 0L) return LanVidStreamStats()
         val o = JSONObject(NativeBridge.senderStatsJson(handle))
-        return LanVidStreamStats(
+        LanVidStreamStats(
             state = o.optInt("state"),
             width = o.optInt("width"),
             height = o.optInt("height"),
@@ -115,7 +129,7 @@ class LanVidSender : Closeable {
         )
     }
 
-    override fun close() {
+    override fun close() = lock.write {
         if (handle != 0L) {
             NativeBridge.senderDestroy(handle)
             handle = 0L

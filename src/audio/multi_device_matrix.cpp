@@ -189,13 +189,22 @@ private:
         }
 
         const uint32_t dev_sr = wfx->nSamplesPerSec ? wfx->nSamplesPerSec : 48000;
-        const uint32_t dev_ch = std::clamp<uint32_t>(wfx->nChannels, 1, 8);
+        const uint32_t hw_ch = std::max<uint32_t>(1, wfx->nChannels);
+        const uint32_t dev_ch = std::min<uint32_t>(hw_ch, 8);
+        const uint32_t bits_per_sample = wfx->wBitsPerSample;
+        const uint32_t bytes_per_sample = bits_per_sample / 8;
         dev_rate_.store(dev_sr, std::memory_order_release);
 
         bool is_float = (wfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
         if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE && wfx->cbSize >= 22) {
             const auto* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(wfx);
             is_float = IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) != 0;
+        }
+        if (bytes_per_sample != 2 && bytes_per_sample != 3 && bytes_per_sample != 4) {
+            CoTaskMemFree(wfx);
+            client->Release();
+            if (need_uninit) CoUninitialize();
+            return;
         }
 
         const REFERENCE_TIME hns_dur = 200000;  // 20 ms shared buffer
@@ -257,10 +266,24 @@ private:
                     if (SUCCEEDED(render_cli->GetBuffer(avail_out, &dst)) && dst) {
                         adapter_.render(*out_ring_, ptrs.data(), int(dev_ch), avail_out, double(dev_sr));
                         for (UINT32 i = 0; i < avail_out; ++i) {
-                            for (uint32_t c = 0; c < dev_ch; ++c) {
-                                const float v = std::clamp(planes[c][i], -1.0f, 1.0f);
-                                if (is_float) reinterpret_cast<float*>(dst)[size_t(i) * dev_ch + c] = v;
-                                else reinterpret_cast<int16_t*>(dst)[size_t(i) * dev_ch + c] = int16_t(std::lrint(v * 32767.0f));
+                            for (uint32_t c = 0; c < hw_ch; ++c) {
+                                const float v = (c < dev_ch) ? std::clamp(planes[c][i], -1.0f, 1.0f) : 0.0f;
+                                const size_t k = size_t(i) * hw_ch + c;
+                                if (is_float && bytes_per_sample == 4) {
+                                    reinterpret_cast<float*>(dst)[k] = v;
+                                } else if (bytes_per_sample == 2) {
+                                    reinterpret_cast<int16_t*>(dst)[k] =
+                                        int16_t(std::clamp<long>(std::lrint(double(v) * 32767.0), -32768L, 32767L));
+                                } else if (bytes_per_sample == 3) {
+                                    const int32_t q = int32_t(
+                                        std::clamp<long long>(std::llround(double(v) * 8388607.0), -8388608LL, 8388607LL));
+                                    dst[k * 3 + 0] = BYTE(q & 0xFF);
+                                    dst[k * 3 + 1] = BYTE((q >> 8) & 0xFF);
+                                    dst[k * 3 + 2] = BYTE((q >> 16) & 0xFF);
+                                } else {
+                                    reinterpret_cast<int32_t*>(dst)[k] = int32_t(std::clamp<long long>(
+                                        std::llround(double(v) * 2147483647.0), -2147483648LL, 2147483647LL));
+                                }
                             }
                         }
                         render_cli->ReleaseBuffer(avail_out, 0);
@@ -280,9 +303,20 @@ private:
                             for (uint32_t c = 0; c < dev_ch; ++c) {
                                 float v = 0.0f;
                                 if (!silent && src) {
-                                    const size_t k = size_t(off + i) * dev_ch + c;
-                                    v = is_float ? reinterpret_cast<const float*>(src)[k]
-                                                 : float(reinterpret_cast<const int16_t*>(src)[k]) / 32768.0f;
+                                    const size_t k = size_t(off + i) * hw_ch + c;
+                                    if (is_float && bytes_per_sample == 4) {
+                                        v = reinterpret_cast<const float*>(src)[k];
+                                    } else if (bytes_per_sample == 2) {
+                                        v = float(reinterpret_cast<const int16_t*>(src)[k]) / 32768.0f;
+                                    } else if (bytes_per_sample == 3) {
+                                        int32_t q = int32_t(uint32_t(src[k * 3 + 0]) |
+                                                            (uint32_t(src[k * 3 + 1]) << 8) |
+                                                            (uint32_t(src[k * 3 + 2]) << 16));
+                                        if (q & 0x800000) q -= 0x1000000;
+                                        v = float(q) / 8388608.0f;
+                                    } else {
+                                        v = float(double(reinterpret_cast<const int32_t*>(src)[k]) / 2147483648.0);
+                                    }
                                 }
                                 planes[c][i] = v;
                             }
@@ -372,10 +406,10 @@ public:
     uint32_t capture_prime() const { return ad_in_.target_fill(sr_); }
 
 private:
-    static inline ExternalAsioSlotBackend* s_active_ = nullptr;
+    static inline std::atomic<ExternalAsioSlotBackend*> s_active_{nullptr};
 
     static void cb_bufferSwitch(long idx, ASIOBool) {
-        auto* self = s_active_;
+        auto* self = s_active_.load(std::memory_order_acquire);
         if (!self) return;
         self->on_switch(idx);
     }
@@ -391,6 +425,7 @@ private:
     }
 
     void on_switch(long idx) {
+        if (idx != 0 && idx != 1) return;
         const uint32_t n = uint32_t(buf_size_);
         // Inputs from external ASIO -> matrix in_ring_
         if (in_ch_ > 0 && in_ring_) {
@@ -398,8 +433,20 @@ private:
                 const void* src = buf_infos_[size_t(c)].buffers[idx];
                 float* dst = scratch_in_[size_t(c)].data();
                 if (!src) { std::memset(dst, 0, n * sizeof(float)); continue; }
-                if (in_types_[size_t(c)] == ASIOSTFloat32LSB) {
+                const ASIOSampleType st = in_types_[size_t(c)];
+                if (st == ASIOSTFloat32LSB) {
                     std::memcpy(dst, src, n * sizeof(float));
+                } else if (st == ASIOSTInt16LSB) {
+                    const auto* s16 = static_cast<const int16_t*>(src);
+                    for (uint32_t i = 0; i < n; ++i) dst[i] = float(s16[i]) / 32768.0f;
+                } else if (st == ASIOSTInt24LSB) {
+                    const auto* b = static_cast<const uint8_t*>(src);
+                    for (uint32_t i = 0; i < n; ++i) {
+                        int32_t q = int32_t(uint32_t(b[i * 3]) | (uint32_t(b[i * 3 + 1]) << 8) |
+                                            (uint32_t(b[i * 3 + 2]) << 16));
+                        if (q & 0x800000) q -= 0x1000000;
+                        dst[i] = float(q) / 8388608.0f;
+                    }
                 } else {
                     const auto* s32 = static_cast<const int32_t*>(src);
                     for (uint32_t i = 0; i < n; ++i) dst[i] = float(double(s32[i]) / 2147483648.0);
@@ -415,12 +462,29 @@ private:
                 void* dst = buf_infos_[size_t(in_ch_ + c)].buffers[idx];
                 const float* src = scratch_out_[size_t(c)].data();
                 if (!dst) continue;
-                if (out_types_[size_t(c)] == ASIOSTFloat32LSB) {
+                const ASIOSampleType st = out_types_[size_t(c)];
+                if (st == ASIOSTFloat32LSB) {
                     std::memcpy(dst, src, n * sizeof(float));
+                } else if (st == ASIOSTInt16LSB) {
+                    auto* d16 = static_cast<int16_t*>(dst);
+                    for (uint32_t i = 0; i < n; ++i)
+                        d16[i] = int16_t(std::clamp<long>(std::lrint(std::clamp(double(src[i]), -1.0, 1.0) * 32767.0),
+                                                          -32768L, 32767L));
+                } else if (st == ASIOSTInt24LSB) {
+                    auto* b = static_cast<uint8_t*>(dst);
+                    for (uint32_t i = 0; i < n; ++i) {
+                        const int32_t q = int32_t(std::clamp<long long>(
+                            std::llround(std::clamp(double(src[i]), -1.0, 1.0) * 8388607.0), -8388608LL, 8388607LL));
+                        b[i * 3 + 0] = uint8_t(q & 0xFF);
+                        b[i * 3 + 1] = uint8_t((q >> 8) & 0xFF);
+                        b[i * 3 + 2] = uint8_t((q >> 16) & 0xFF);
+                    }
                 } else {
                     auto* d32 = static_cast<int32_t*>(dst);
                     for (uint32_t i = 0; i < n; ++i)
-                        d32[i] = int32_t(std::lrint(std::clamp(double(src[i]), -1.0, 1.0) * 2147483647.0));
+                        d32[i] = int32_t(std::clamp<long long>(
+                            std::llround(std::clamp(double(src[i]), -1.0, 1.0) * 2147483647.0),
+                            -2147483648LL, 2147483647LL));
                 }
             }
         }
@@ -485,7 +549,7 @@ private:
         }
 
         ASIOCallbacks cbs{&cb_bufferSwitch, &cb_rateChanged, &cb_message, &cb_switchTime};
-        s_active_ = this;
+        s_active_.store(this, std::memory_order_release);
         if (asio->createBuffers(buf_infos_.data(), in_ch_ + out_ch_, buf_size_, &cbs) == ASE_OK &&
             asio->start() == ASE_OK) {
             connected_.store(true, std::memory_order_release);
@@ -494,7 +558,8 @@ private:
             asio->disposeBuffers();
         }
         connected_.store(false, std::memory_order_release);
-        if (s_active_ == this) s_active_ = nullptr;
+        ExternalAsioSlotBackend* expected = this;
+        s_active_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
         asio->Release();
         if (need_uninit) CoUninitialize();
     }
@@ -708,10 +773,12 @@ private:
             float* d = static_cast<float*>(ab.mData);
             const UInt32 nc = ab.mNumberChannels;
             if (!d || nc == 0) continue;
-            const uint32_t frames = std::min<uint32_t>(n, ab.mDataByteSize / (sizeof(float) * nc));
+            const uint32_t actual = ab.mDataByteSize / (sizeof(float) * nc);
+            const uint32_t frames = std::min<uint32_t>(n, actual);
             for (UInt32 k = 0; k < nc; ++k, ++dev_ch) {
                 const float* src = dev_ch < ch_ ? a[dev_ch] : nullptr;
                 for (uint32_t i = 0; i < frames; ++i) d[size_t(i) * nc + k] = src ? src[i] : 0.0f;
+                for (uint32_t i = frames; i < actual; ++i) d[size_t(i) * nc + k] = 0.0f;
             }
         }
     }
@@ -866,14 +933,15 @@ struct MultiDeviceAudioMatrix::Impl {
         std::atomic<uint64_t> last_activity_us{0};
     };
 
+    mutable std::mutex lifecycle_mu;
+    mutable std::mutex mix_mu;
     mutable std::mutex mu;
     std::array<SlotState, kMatrixMaxSlots> slots{};
     std::vector<MatrixCrosspoint> crosspoints;
-    std::array<MidiSlotState, kMatrixMaxMidiSlots> midi_slots{};
     std::vector<MidiCrosspoint> midi_crosspoints;
     MidiOutSinkFn midi_sink;
     bool feedback_guard = true;
-    int buffer_size = 256;
+    std::atomic<int> buffer_size{256};
 
     NetworkPushFn net_push;
     NetworkPopFn net_pop;
@@ -887,6 +955,9 @@ struct MultiDeviceAudioMatrix::Impl {
     // Scratch buffers owned exclusively by mixer thread (or process_block_sync)
     std::array<std::vector<std::vector<float>>, kMatrixMaxSlots> src_bufs;
     std::array<std::vector<std::vector<float>>, kMatrixMaxSlots> dst_bufs;
+
+    // Declared last so any active MIDI callback ports close before mu/midi_crosspoints/midi_sink are destroyed.
+    std::array<MidiSlotState, kMatrixMaxMidiSlots> midi_slots{};
 
     void ensure_scratch(uint32_t frames) {
         for (int s = 0; s < kMatrixMaxSlots; ++s) {
@@ -912,21 +983,22 @@ struct MultiDeviceAudioMatrix::Impl {
         }
 #endif
 #if defined(_WIN32)
+        const uint32_t mblk = uint32_t(buffer_size.load(std::memory_order_relaxed));
         if (st.cfg.type == MatrixSlotType::kSystemAudio) {
             st.wasapi = std::make_unique<WasapiSlotBackend>();
             st.wasapi->start(st.cfg.role, st.cfg.device_index, st.cfg.device_id, st.cfg.channels,
-                             &st.in_ring, &st.out_ring, uint32_t(buffer_size));
+                             &st.in_ring, &st.out_ring, mblk);
         } else if (st.cfg.type == MatrixSlotType::kExternalAsio) {
             st.asio = std::make_unique<ExternalAsioSlotBackend>();
             st.asio->start(st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size, &st.in_ring, &st.out_ring,
-                           uint32_t(buffer_size));
+                           mblk);
         }
 #endif
 #if LV_MATRIX_COREAUDIO
         if (st.cfg.type == MatrixSlotType::kSystemAudio) {
             st.coreaudio = std::make_unique<CoreAudioSlotBackend>();
             st.coreaudio->start(st.cfg.role, st.cfg.device_id, st.cfg.channels, st.cfg.buffer_size,
-                                &st.in_ring, &st.out_ring, uint32_t(buffer_size));
+                                &st.in_ring, &st.out_ring, uint32_t(buffer_size.load(std::memory_order_relaxed)));
         }
 #endif
     }
@@ -959,6 +1031,7 @@ struct MultiDeviceAudioMatrix::Impl {
     }
 
     void process_block(uint32_t frames) {
+        std::lock_guard<std::mutex> mlk(mix_mu);
         ensure_scratch(frames);
 
         // Snapshot routing + active slots briefly under lock
@@ -1075,9 +1148,13 @@ struct MultiDeviceAudioMatrix::Impl {
 };
 
 MultiDeviceAudioMatrix::MultiDeviceAudioMatrix() : impl_(std::make_unique<Impl>()) {}
-MultiDeviceAudioMatrix::~MultiDeviceAudioMatrix() { stop(); }
+MultiDeviceAudioMatrix::~MultiDeviceAudioMatrix() {
+    stop();
+    clear_midi_slots();
+}
 
 int MultiDeviceAudioMatrix::add_slot(const MatrixSlotConfig& cfg) {
+    std::lock_guard<std::mutex> mlk(impl_->mix_mu);
     std::lock_guard<std::mutex> lk(impl_->mu);
     int target = -1;
     if (cfg.id >= 0 && cfg.id < kMatrixMaxSlots && !impl_->slots[cfg.id].used) {
@@ -1104,6 +1181,7 @@ int MultiDeviceAudioMatrix::add_slot(const MatrixSlotConfig& cfg) {
 
 bool MultiDeviceAudioMatrix::update_slot(int slot_id, const MatrixSlotConfig& cfg) {
     if (slot_id < 0 || slot_id >= kMatrixMaxSlots) return false;
+    std::lock_guard<std::mutex> mlk(impl_->mix_mu);
     std::lock_guard<std::mutex> lk(impl_->mu);
     auto& st = impl_->slots[slot_id];
     if (!st.used) return false;
@@ -1121,6 +1199,7 @@ bool MultiDeviceAudioMatrix::update_slot(int slot_id, const MatrixSlotConfig& cf
 
 bool MultiDeviceAudioMatrix::remove_slot(int slot_id) {
     if (slot_id < 0 || slot_id >= kMatrixMaxSlots) return false;
+    std::lock_guard<std::mutex> mlk(impl_->mix_mu);
     std::lock_guard<std::mutex> lk(impl_->mu);
     auto& st = impl_->slots[slot_id];
     if (!st.used) return false;
@@ -1135,6 +1214,7 @@ bool MultiDeviceAudioMatrix::remove_slot(int slot_id) {
 }
 
 void MultiDeviceAudioMatrix::clear_slots() {
+    std::lock_guard<std::mutex> mlk(impl_->mix_mu);
     std::lock_guard<std::mutex> lk(impl_->mu);
     for (int i = 0; i < kMatrixMaxSlots; ++i) {
         if (impl_->slots[i].used) {
@@ -1351,28 +1431,30 @@ void MultiDeviceAudioMatrix::set_network_io(NetworkPushFn push_tx, NetworkPopFn 
 }
 
 void MultiDeviceAudioMatrix::set_buffer_size(int frames) {
+    const int bs = (frames <= 128) ? 128 : (frames <= 256 ? 256 : 512);
+    impl_->buffer_size.store(bs, std::memory_order_release);
     std::lock_guard<std::mutex> lk(impl_->mu);
-    impl_->buffer_size = (frames <= 128) ? 128 : (frames <= 256 ? 256 : 512);
     for (auto& st : impl_->slots) {  // device drift loops steer around the new block
 #if LV_MATRIX_COREAUDIO
-        if (st.coreaudio) st.coreaudio->set_mix_block(uint32_t(impl_->buffer_size));
+        if (st.coreaudio) st.coreaudio->set_mix_block(uint32_t(bs));
 #endif
 #if defined(_WIN32)
-        if (st.wasapi) st.wasapi->set_mix_block(uint32_t(impl_->buffer_size));
-        if (st.asio) st.asio->set_mix_block(uint32_t(impl_->buffer_size));
+        if (st.wasapi) st.wasapi->set_mix_block(uint32_t(bs));
+        if (st.asio) st.asio->set_mix_block(uint32_t(bs));
 #endif
         (void)st;
     }
 }
 
 int MultiDeviceAudioMatrix::buffer_size() const {
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    return impl_->buffer_size;
+    return impl_->buffer_size.load(std::memory_order_acquire);
 }
 
 bool MultiDeviceAudioMatrix::start() {
+    std::lock_guard<std::mutex> llk(impl_->lifecycle_mu);
     if (impl_->running.load(std::memory_order_acquire)) return true;
     {
+        std::lock_guard<std::mutex> mlk(impl_->mix_mu);
         std::lock_guard<std::mutex> lk(impl_->mu);
         for (int i = 0; i < kMatrixMaxSlots; ++i) {
             if (impl_->slots[i].used && impl_->slots[i].cfg.active) {
@@ -1416,9 +1498,11 @@ bool MultiDeviceAudioMatrix::start() {
 }
 
 void MultiDeviceAudioMatrix::stop() {
+    std::lock_guard<std::mutex> llk(impl_->lifecycle_mu);
     impl_->stop_flag.store(true, std::memory_order_release);
     if (impl_->mix_thread.joinable()) impl_->mix_thread.join();
     impl_->running.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> mlk(impl_->mix_mu);
     std::lock_guard<std::mutex> lk(impl_->mu);
     for (int i = 0; i < kMatrixMaxSlots; ++i) {
         if (impl_->slots[i].used) impl_->stop_slot_backend(impl_->slots[i]);
@@ -1542,30 +1626,51 @@ int MultiDeviceAudioMatrix::add_midi_slot(const MidiSlotConfig& cfg) {
 
 bool MultiDeviceAudioMatrix::update_midi_slot(int slot_id, const MidiSlotConfig& cfg) {
     if (slot_id < 0 || slot_id >= kMatrixMaxMidiSlots) return false;
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    auto& st = impl_->midi_slots[slot_id];
-    if (!st.used) return false;
-    st.in_port.reset();
-    st.out_port.reset();
-    st.virt_port.reset();
-    st.cfg = cfg;
-    st.cfg.id = slot_id;
-    if (st.cfg.active) {
-        if (st.cfg.type == MidiSlotType::kMidiInput) {
-            st.in_port = std::make_unique<MidiInputPort>();
-            st.in_port->open(st.cfg.device_index, st.cfg.device_name,
-                             [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
-                                 inject_midi_event(slot_id, s, d1, d2, ts);
-                             });
-        } else if (st.cfg.type == MidiSlotType::kMidiOutput) {
-            st.out_port = std::make_unique<MidiOutputPort>();
-            st.out_port->open(st.cfg.device_index, st.cfg.device_name);
-        } else if (st.cfg.type == MidiSlotType::kVirtualDawMidi) {
-            st.virt_port = std::make_unique<VirtualMidiPort>();
-            st.virt_port->open(st.cfg.device_name.empty() ? "LanVid MIDI" : st.cfg.device_name,
-                               [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
-                                   inject_midi_event(slot_id, s, d1, d2, ts);
-                               });
+    std::unique_ptr<MidiInputPort> old_in;
+    std::unique_ptr<MidiOutputPort> old_out;
+    std::unique_ptr<VirtualMidiPort> old_virt;
+    MidiSlotConfig new_cfg{};
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        auto& st = impl_->midi_slots[slot_id];
+        if (!st.used) return false;
+        old_in = std::move(st.in_port);
+        old_out = std::move(st.out_port);
+        old_virt = std::move(st.virt_port);
+        st.cfg = cfg;
+        st.cfg.id = slot_id;
+        new_cfg = st.cfg;
+    }
+    // Destroy previous MIDI ports outside mu to avoid AB-BA deadlock with CoreMIDI/WinMM callbacks.
+    old_in.reset();
+    old_out.reset();
+    old_virt.reset();
+
+    if (new_cfg.active) {
+        std::unique_ptr<MidiInputPort> new_in;
+        std::unique_ptr<MidiOutputPort> new_out;
+        std::unique_ptr<VirtualMidiPort> new_virt;
+        if (new_cfg.type == MidiSlotType::kMidiInput) {
+            new_in = std::make_unique<MidiInputPort>();
+            new_in->open(new_cfg.device_index, new_cfg.device_name,
+                         [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                             inject_midi_event(slot_id, s, d1, d2, ts);
+                         });
+        } else if (new_cfg.type == MidiSlotType::kMidiOutput) {
+            new_out = std::make_unique<MidiOutputPort>();
+            new_out->open(new_cfg.device_index, new_cfg.device_name);
+        } else if (new_cfg.type == MidiSlotType::kVirtualDawMidi) {
+            new_virt = std::make_unique<VirtualMidiPort>();
+            new_virt->open(new_cfg.device_name.empty() ? "LanVid MIDI" : new_cfg.device_name,
+                           [this, slot_id](uint8_t s, uint8_t d1, uint8_t d2, uint64_t ts) {
+                               inject_midi_event(slot_id, s, d1, d2, ts);
+                           });
+        }
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->midi_slots[slot_id].used) {
+            impl_->midi_slots[slot_id].in_port = std::move(new_in);
+            impl_->midi_slots[slot_id].out_port = std::move(new_out);
+            impl_->midi_slots[slot_id].virt_port = std::move(new_virt);
         }
     }
     return true;
@@ -1573,30 +1678,40 @@ bool MultiDeviceAudioMatrix::update_midi_slot(int slot_id, const MidiSlotConfig&
 
 bool MultiDeviceAudioMatrix::remove_midi_slot(int slot_id) {
     if (slot_id < 0 || slot_id >= kMatrixMaxMidiSlots) return false;
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    auto& st = impl_->midi_slots[slot_id];
-    if (!st.used) return false;
-    st.in_port.reset();
-    st.out_port.reset();
-    st.virt_port.reset();
-    st.used = false;
-    auto& cps = impl_->midi_crosspoints;
-    cps.erase(std::remove_if(cps.begin(), cps.end(), [slot_id](const MidiCrosspoint& c) {
-                  return c.src_slot == slot_id || c.dst_slot == slot_id;
-              }),
-              cps.end());
+    std::unique_ptr<MidiInputPort> old_in;
+    std::unique_ptr<MidiOutputPort> old_out;
+    std::unique_ptr<VirtualMidiPort> old_virt;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        auto& st = impl_->midi_slots[slot_id];
+        if (!st.used) return false;
+        old_in = std::move(st.in_port);
+        old_out = std::move(st.out_port);
+        old_virt = std::move(st.virt_port);
+        st.used = false;
+        auto& cps = impl_->midi_crosspoints;
+        cps.erase(std::remove_if(cps.begin(), cps.end(), [slot_id](const MidiCrosspoint& c) {
+                      return c.src_slot == slot_id || c.dst_slot == slot_id;
+                  }),
+                  cps.end());
+    }
     return true;
 }
 
 void MultiDeviceAudioMatrix::clear_midi_slots() {
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    for (auto& st : impl_->midi_slots) {
-        st.in_port.reset();
-        st.out_port.reset();
-        st.virt_port.reset();
-        st.used = false;
+    std::vector<std::unique_ptr<MidiInputPort>> old_in;
+    std::vector<std::unique_ptr<MidiOutputPort>> old_out;
+    std::vector<std::unique_ptr<VirtualMidiPort>> old_virt;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        for (auto& st : impl_->midi_slots) {
+            if (st.in_port) old_in.push_back(std::move(st.in_port));
+            if (st.out_port) old_out.push_back(std::move(st.out_port));
+            if (st.virt_port) old_virt.push_back(std::move(st.virt_port));
+            st.used = false;
+        }
+        impl_->midi_crosspoints.clear();
     }
-    impl_->midi_crosspoints.clear();
 }
 
 std::vector<MidiSlotConfig> MultiDeviceAudioMatrix::midi_slots() const {

@@ -43,6 +43,7 @@ void VideoPlayoutBuffer::reset() {
     std::lock_guard<std::mutex> lk(mu_);
     queue_.clear();
     clock_init_ = false;
+    has_media_ts_ = false;
     last_raw_ts32_ = 0;
     unwrapped_media_us_ = 0;
     clock_offset_us_ = 0;
@@ -56,29 +57,30 @@ void VideoPlayoutBuffer::reset() {
 
 uint64_t VideoPlayoutBuffer::unwrap_media_ts_locked(uint32_t raw_ts_us32, uint64_t arrival_us, bool& reanchored) {
     reanchored = false;
-    if (raw_ts_us32 == 0) {
-        // Sender did not stamp media_ts_us: fall back to monotonic arrival timestamp
-        if (!clock_init_) {
-            clock_init_ = true;
-            last_raw_ts32_ = 0;
-            unwrapped_media_us_ = arrival_us;
-            clock_offset_us_ = 0;
-            last_arrival_us_ = arrival_us;
-            reanchored = true;
-        } else {
-            unwrapped_media_us_ = std::max(unwrapped_media_us_ + 1, arrival_us);
-        }
-        return unwrapped_media_us_;
-    }
-
     if (!clock_init_) {
         clock_init_ = true;
+        has_media_ts_ = (raw_ts_us32 != 0);
         last_raw_ts32_ = raw_ts_us32;
-        unwrapped_media_us_ = raw_ts_us32;
+        unwrapped_media_us_ = has_media_ts_ ? uint64_t(raw_ts_us32) : arrival_us;
         clock_offset_us_ = int64_t(arrival_us) - int64_t(unwrapped_media_us_);
         last_arrival_us_ = arrival_us;
         last_decay_us_ = arrival_us;
         reanchored = true;
+        return unwrapped_media_us_;
+    }
+
+    if (!has_media_ts_) {
+        if (raw_ts_us32 != 0) {
+            // Sender started stamping media_ts_us after initial unstamped frames: re-anchor cleanly.
+            has_media_ts_ = true;
+            last_raw_ts32_ = raw_ts_us32;
+            unwrapped_media_us_ = uint64_t(raw_ts_us32);
+            clock_offset_us_ = int64_t(arrival_us) - int64_t(unwrapped_media_us_);
+            last_arrival_us_ = arrival_us;
+            reanchored = true;
+            return unwrapped_media_us_;
+        }
+        unwrapped_media_us_ = std::max(unwrapped_media_us_ + 1, arrival_us);
         return unwrapped_media_us_;
     }
 
@@ -94,14 +96,15 @@ uint64_t VideoPlayoutBuffer::unwrap_media_ts_locked(uint32_t raw_ts_us32, uint64
         return unwrapped_media_us_;
     }
 
-    last_raw_ts32_ = raw_ts_us32;
     if (delta >= 0) {
+        last_raw_ts32_ = raw_ts_us32;
         unwrapped_media_us_ += uint64_t(delta);
-    } else if (unwrapped_media_us_ >= uint64_t(-int64_t(delta))) {
-        // Slight out-of-order timestamp
-        return unwrapped_media_us_ - uint64_t(-int64_t(delta));
+        return unwrapped_media_us_;
     }
-    return unwrapped_media_us_;
+    // Slight out-of-order timestamp: do NOT move `last_raw_ts32_` backwards so the next in-order frame
+    // does not double-count `|delta|` and permanently drift the playout clock forward.
+    const uint64_t back = uint64_t(-int64_t(delta));
+    return unwrapped_media_us_ >= back ? (unwrapped_media_us_ - back) : 0;
 }
 
 void VideoPlayoutBuffer::request_idr_if_due_locked(uint64_t now_us, std::function<void()>& out_cb) {

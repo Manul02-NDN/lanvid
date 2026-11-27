@@ -20,6 +20,14 @@ struct Image {
     std::vector<uint8_t> data;
 
     void allocate(int w, int h, PixelOrder ord = PixelOrder::kRGBA) {
+        if (w <= 0 || h <= 0) {
+            width = 0;
+            height = 0;
+            stride = 0;
+            order = ord;
+            data.clear();
+            return;
+        }
         width = w;
         height = h;
         order = ord;

@@ -55,7 +55,7 @@ public:
     }
 
     bool encode_image(const Image& img, EncodedVideoPacket& out) override {
-        if (!ctx_ || !frame_ || img.width != width_ || img.height != height_) return false;
+        if (!ctx_ || !frame_ || (img.width & ~1) != width_ || (img.height & ~1) != height_) return false;
         if (av_frame_make_writable(frame_) < 0) return false;
         if (ctx_->pix_fmt == AV_PIX_FMT_NV12) {
             packed_rgb_to_nv12(img, frame_->data[0], frame_->linesize[0], frame_->data[1],
@@ -73,7 +73,7 @@ public:
 
     bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                        EncodedVideoPacket& out) override {
-        if (!ctx_ || !frame_ || width != width_ || height != height_) return false;
+        if (!ctx_ || !frame_ || (width & ~1) != width_ || (height & ~1) != height_) return false;
         if (av_frame_make_writable(frame_) < 0) return false;
         if (ctx_->pix_fmt == AV_PIX_FMT_NV12) {
             yuv420_to_nv12(yuv, width_, height_, frame_->data[0], frame_->linesize[0],
@@ -255,18 +255,29 @@ public:
     }
 
     bool decode(const uint8_t* data, size_t size, PixelOrder output_order, Image& out_image) override {
-        if (!ctx_ || !data || size == 0) return false;
-        pkt_->data = const_cast<uint8_t*>(data);
-        pkt_->size = int(size);
-        if (avcodec_send_packet(ctx_, pkt_) < 0) return false;
+        if (!ctx_ || !pkt_ || !frame_ || !data || size == 0 || size > size_t(INT32_MAX - AV_INPUT_BUFFER_PADDING_SIZE)) {
+            return false;
+        }
+        av_packet_unref(pkt_);
+        if (av_new_packet(pkt_, int(size)) < 0) return false;
+        std::memcpy(pkt_->data, data, size);
+        const int send_rc = avcodec_send_packet(ctx_, pkt_);
+        av_packet_unref(pkt_);
+        if (send_rc < 0) return false;
         if (avcodec_receive_frame(ctx_, frame_) < 0) return false;
 
         const int w = frame_->width;
         const int h = frame_->height;
-        if (frame_->format == AV_PIX_FMT_NV12) {
+        bool ok = false;
+        if (w > 0 && h > 0 && frame_->format == AV_PIX_FMT_NV12 &&
+            frame_->data[0] && frame_->data[1] && frame_->linesize[0] >= w && frame_->linesize[1] >= w) {
             nv12_to_packed_rgb(frame_->data[0], frame_->linesize[0], frame_->data[1],
                                frame_->linesize[1], w, h, output_order, out_image);
-        } else {
+            ok = true;
+        } else if (w > 0 && h > 0 &&
+                   (frame_->format == AV_PIX_FMT_YUV420P || frame_->format == AV_PIX_FMT_YUVJ420P) &&
+                   frame_->data[0] && frame_->data[1] && frame_->data[2] &&
+                   frame_->linesize[0] >= w && frame_->linesize[1] >= (w >> 1) && frame_->linesize[2] >= (w >> 1)) {
             // Interleave I420 U/V into scratch NV12 UV plane and reuse fast studio conversion
             const size_t uv_sz = size_t(w) * size_t((h + 1) / 2);
             if (uv_tmp_.size() < uv_sz) uv_tmp_.resize(uv_sz);
@@ -282,9 +293,10 @@ public:
             }
             nv12_to_packed_rgb(frame_->data[0], frame_->linesize[0], uv_tmp_.data(), w, w, h,
                                output_order, out_image);
+            ok = true;
         }
         av_frame_unref(frame_);
-        return true;
+        return ok;
     }
 
     void reset() override {

@@ -33,9 +33,12 @@ bool MidiTxEngine::flush(uint64_t base_media_ts_us, uint32_t wallclock_us, bool 
         std::lock_guard<std::mutex> lk(mu_);
         const bool have_new = !pending_.empty();
 
-        // 1. Add recent history events that still have redundancy repeats left (or on heartbeat)
+        // 1. Add recent history events that still have redundancy repeats left (or on heartbeat),
+        //    leaving room for new pending events so Note Offs are never starved or dropped.
+        const size_t new_budget = std::min<size_t>(pending_.size(), kMaxMidiEventsPerPacket);
+        const size_t red_cap = kMaxMidiEventsPerPacket - new_budget;
         bool added_redundant = false;
-        for (size_t i = 0; i < kRedundancyRingSize && count < kMaxMidiEventsPerPacket; ++i) {
+        for (size_t i = 0; i < kRedundancyRingSize && count < red_cap; ++i) {
             auto& he = history_[i];
             if (!he.valid) continue;
             if (!heartbeat && he.repeats_left == 0) continue;
@@ -55,9 +58,10 @@ bool MidiTxEngine::flush(uint64_t base_media_ts_us, uint32_t wallclock_us, bool 
         }
         if (added_redundant) flags |= kMidiFlagRedundant;
 
-        // 2. Append newly queued events and record them into the 16-event redundancy ring
-        for (const auto& ev : pending_) {
-            if (count >= kMaxMidiEventsPerPacket) break;
+        // 2. Append newly queued events (erasing only those actually packed) into the redundancy ring
+        size_t consumed = 0;
+        for (; consumed < pending_.size() && count < kMaxMidiEventsPerPacket; ++consumed) {
+            const auto& ev = pending_[consumed];
             const int64_t delta = int64_t(ev.media_ts_us) - int64_t(base_media_ts_us);
             MidiEventPacket p{};
             p.event_seq = ev.event_seq;
@@ -71,7 +75,9 @@ bool MidiTxEngine::flush(uint64_t base_media_ts_us, uint32_t wallclock_us, bool 
             history_[hist_head_] = {ev, kRedundantRepeats, true};
             hist_head_ = (hist_head_ + 1) % kRedundancyRingSize;
         }
-        pending_.clear();
+        if (consumed > 0) {
+            pending_.erase(pending_.begin(), pending_.begin() + ptrdiff_t(consumed));
+        }
 
         if (count == 0 && !have_new && !heartbeat) return false;
         batch_seq = next_batch_seq_++;
@@ -128,8 +134,17 @@ void MidiRxEngine::reset() {
 bool MidiRxEngine::is_duplicate_and_mark(uint32_t seq) {
     if (has_seq_) {
         const int32_t diff = int32_t(seq - highest_seq_);
-        if (diff <= -int32_t(kDedupWindow)) return true;  // too old
-        if (diff > 0) highest_seq_ = seq;
+        if (diff <= -int32_t(kDedupWindow)) {
+            if (seq < 64u) {
+                // Sender restarted a new sequence epoch: clear dedup history and resync
+                for (uint32_t i = 0; i < kDedupWindow; ++i) seen_valid_[i] = false;
+                highest_seq_ = seq;
+            } else {
+                return true;  // too old
+            }
+        } else if (diff > 0) {
+            highest_seq_ = seq;
+        }
     } else {
         has_seq_ = true;
         highest_seq_ = seq;
@@ -166,8 +181,12 @@ bool MidiRxEngine::on_packet_with_cb(const PacketHeader& h, const uint8_t* paylo
             }
             TimedMidiEvent te{};
             te.event_seq = e.event_seq;
-            const int64_t ts = int64_t(mh.base_media_ts_us) + int64_t(e.offset_us);
-            te.media_ts_us = ts > 0 ? uint64_t(ts) : 0;
+            if (e.offset_us >= 0) {
+                te.media_ts_us = mh.base_media_ts_us + uint64_t(e.offset_us);
+            } else {
+                const uint64_t neg = uint64_t(-int64_t(e.offset_us));
+                te.media_ts_us = (mh.base_media_ts_us > neg) ? (mh.base_media_ts_us - neg) : 0ull;
+            }
             te.status = e.status;
             te.data1 = e.data1;
             te.data2 = e.data2;

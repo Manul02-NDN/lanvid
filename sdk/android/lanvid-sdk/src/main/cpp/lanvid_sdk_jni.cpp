@@ -8,10 +8,12 @@
 #include <jni.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <string>
 
 #include "lanvid/lanvid_sdk.h"
@@ -24,8 +26,36 @@ struct SdkReceiverCtx {
     ANativeWindow* window = nullptr;
     int win_w = 0;
     int win_h = 0;
+    std::mutex audio_mu;
     AAudioStream* audio = nullptr;
+    std::atomic<bool> audio_active{false};
 };
+
+std::string json_escape(const char* s, size_t max_len) {
+    std::string out;
+    if (!s) return out;
+    out.reserve(max_len);
+    for (size_t i = 0; i < max_len && s[i] != '\0'; ++i) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x", unsigned(c));
+                    out += esc;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+                break;
+        }
+    }
+    return out;
+}
 
 aaudio_data_callback_result_t aaudio_cb(AAudioStream*, void* ud, void* data, int32_t num_frames) {
     auto* rx = static_cast<LvReceiverHandle*>(ud);
@@ -35,9 +65,15 @@ aaudio_data_callback_result_t aaudio_cb(AAudioStream*, void* ud, void* data, int
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+void aaudio_err_cb(AAudioStream*, void* ud, aaudio_result_t err) {
+    auto* ctx = static_cast<SdkReceiverCtx*>(ud);
+    if (ctx) ctx->audio_active.store(false, std::memory_order_release);
+    __android_log_print(ANDROID_LOG_ERROR, "LanVidSdkJNI", "AAudio error %d", int(err));
+}
+
 void on_video_cb(const LV_VideoFrameView* f, void* ud) {
     auto* ctx = static_cast<SdkReceiverCtx*>(ud);
-    if (!ctx || !f || !f->data || f->width <= 0 || f->height <= 0) return;
+    if (!ctx || !f || !f->data || f->width <= 0 || f->height <= 0 || f->stride < f->width * 4) return;
 
     std::lock_guard<std::mutex> lk(ctx->surf_mu);
     if (!ctx->window) return;
@@ -61,7 +97,9 @@ void on_video_cb(const LV_VideoFrameView* f, void* ud) {
 }
 
 void start_aaudio(SdkReceiverCtx* ctx) {
-    if (!ctx || ctx->audio || !ctx->rx) return;
+    if (!ctx || !ctx->rx) return;
+    std::lock_guard<std::mutex> alk(ctx->audio_mu);
+    if (ctx->audio) return;
     AAudioStreamBuilder* b = nullptr;
     if (AAudio_createStreamBuilder(&b) != AAUDIO_OK || !b) return;
     AAudioStreamBuilder_setDirection(b, AAUDIO_DIRECTION_OUTPUT);
@@ -71,16 +109,24 @@ void start_aaudio(SdkReceiverCtx* ctx) {
     AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setDataCallback(b, aaudio_cb, ctx->rx);
+    AAudioStreamBuilder_setErrorCallback(b, aaudio_err_cb, ctx);
     AAudioStream* st = nullptr;
     if (AAudioStreamBuilder_openStream(b, &st) == AAUDIO_OK && st) {
-        if (AAudioStream_requestStart(st) == AAUDIO_OK) ctx->audio = st;
-        else AAudioStream_close(st);
+        if (AAudioStream_requestStart(st) == AAUDIO_OK) {
+            ctx->audio = st;
+            ctx->audio_active.store(true, std::memory_order_release);
+        } else {
+            AAudioStream_close(st);
+        }
     }
     AAudioStreamBuilder_delete(b);
 }
 
 void stop_aaudio(SdkReceiverCtx* ctx) {
-    if (!ctx || !ctx->audio) return;
+    if (!ctx) return;
+    std::lock_guard<std::mutex> alk(ctx->audio_mu);
+    ctx->audio_active.store(false, std::memory_order_release);
+    if (!ctx->audio) return;
     AAudioStream_requestStop(ctx->audio);
     AAudioStream_close(ctx->audio);
     ctx->audio = nullptr;
@@ -92,6 +138,22 @@ std::string to_str(JNIEnv* env, jstring s) {
     std::string out(p ? p : "");
     if (p) env->ReleaseStringUTFChars(s, p);
     return out;
+}
+
+bool validate_yuv_caps(JNIEnv* env, jobject y_buf, jobject u_buf, jobject v_buf,
+                       jint width, jint height, jint y_stride, jint u_stride, jint v_stride,
+                       jint uv_pix) {
+    if (width <= 0 || height <= 0 || y_stride < width || u_stride <= 0 || v_stride <= 0 || uv_pix <= 0)
+        return false;
+    const jlong y_cap = env->GetDirectBufferCapacity(y_buf);
+    const jlong u_cap = env->GetDirectBufferCapacity(u_buf);
+    const jlong v_cap = env->GetDirectBufferCapacity(v_buf);
+    const jlong y_need = jlong(height - 1) * jlong(y_stride) + jlong(width);
+    const jlong uv_h = jlong((height + 1) / 2);
+    const jlong uv_w = jlong((width + 1) / 2);
+    const jlong u_need = (uv_h - 1) * jlong(u_stride) + (uv_w - 1) * jlong(uv_pix) + 1;
+    const jlong v_need = (uv_h - 1) * jlong(v_stride) + (uv_w - 1) * jlong(uv_pix) + 1;
+    return y_cap >= y_need && u_cap >= u_need && v_cap >= v_need;
 }
 
 }  // namespace
@@ -151,7 +213,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderStart(
     cfg.fec_group_size = std::max(0, int(fec_group));
     cfg.adaptive_quality = adaptive ? 1 : 0;
     cfg.codec = std::clamp(int(codec), 0, 2);
-    cfg.bitrate_kbps = uint32_t(std::max(250, int(bitrate_kbps)));
+    cfg.bitrate_kbps = uint32_t(std::clamp(int(bitrate_kbps), 250, 150000));
     return lv_sdk_sender_start(reinterpret_cast<LvSenderHandle*>(ptr), &cfg);
 }
 
@@ -164,6 +226,9 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushYuv42
     JNIEnv* env, jclass, jlong ptr, jobject y_buf, jobject u_buf, jobject v_buf, jint width,
     jint height, jint y_stride, jint u_stride, jint v_stride, jint uv_pixel_stride) {
     if (!ptr || !y_buf || !u_buf || !v_buf) return LV_ERR_INVALID_ARG;
+    const int uv_pix = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    if (!validate_yuv_caps(env, y_buf, u_buf, v_buf, width, height, y_stride, u_stride, v_stride, uv_pix))
+        return LV_ERR_INVALID_ARG;
     LV_YuvPlanes yp{};
     yp.plane_y = static_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
     yp.plane_u = static_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
@@ -172,7 +237,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushYuv42
     yp.y_stride = y_stride;
     yp.u_stride = u_stride;
     yp.v_stride = v_stride;
-    yp.uv_pixel_stride = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    yp.uv_pixel_stride = uv_pix;
     yp.pixel_format = (yp.uv_pixel_stride == 2) ? LV_PIXEL_FORMAT_NV12 : LV_PIXEL_FORMAT_I420;
     return lv_sender_push_yuv_planes(reinterpret_cast<LvSenderHandle*>(ptr), &yp, width, height, 0);
 }
@@ -182,6 +247,9 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushYuv42
     jint height, jint y_stride, jint u_stride, jint v_stride, jint uv_pixel_stride,
     jint rotation_deg, jboolean mirror_h) {
     if (!ptr || !y_buf || !u_buf || !v_buf) return LV_ERR_INVALID_ARG;
+    const int uv_pix = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    if (!validate_yuv_caps(env, y_buf, u_buf, v_buf, width, height, y_stride, u_stride, v_stride, uv_pix))
+        return LV_ERR_INVALID_ARG;
     LV_YuvPlanes yp{};
     yp.plane_y = static_cast<const uint8_t*>(env->GetDirectBufferAddress(y_buf));
     yp.plane_u = static_cast<const uint8_t*>(env->GetDirectBufferAddress(u_buf));
@@ -190,7 +258,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushYuv42
     yp.y_stride = y_stride;
     yp.u_stride = u_stride;
     yp.v_stride = v_stride;
-    yp.uv_pixel_stride = uv_pixel_stride > 0 ? uv_pixel_stride : 1;
+    yp.uv_pixel_stride = uv_pix;
     yp.pixel_format = (yp.uv_pixel_stride == 2) ? LV_PIXEL_FORMAT_NV12 : LV_PIXEL_FORMAT_I420;
     return lv_sender_push_yuv_planes_ex(reinterpret_cast<LvSenderHandle*>(ptr), &yp, width, height,
                                         rotation_deg, mirror_h ? 1 : 0, 0);
@@ -198,16 +266,22 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushYuv42
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushPacked(
     JNIEnv* env, jclass, jlong ptr, jobject buf, jint width, jint height, jint stride, jint fmt) {
-    if (!ptr || !buf) return LV_ERR_INVALID_ARG;
+    if (!ptr || !buf || width <= 0 || height <= 0 || stride < width * 4) return LV_ERR_INVALID_ARG;
+    const jlong cap = env->GetDirectBufferCapacity(buf);
+    const jlong need = jlong(height - 1) * jlong(stride) + jlong(width) * 4;
+    if (cap < need) return LV_ERR_INVALID_ARG;
     const auto* data = static_cast<const uint8_t*>(env->GetDirectBufferAddress(buf));
+    if (!data) return LV_ERR_INVALID_ARG;
     return lv_sender_push_packed_frame(reinterpret_cast<LvSenderHandle*>(ptr), data, width, height,
                                        stride, fmt, 0);
 }
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudioPcm16(
     JNIEnv* env, jclass, jlong ptr, jshortArray pcm, jint frames, jint rate, jint channels) {
-    if (!ptr || !pcm || frames <= 0) return LV_ERR_INVALID_ARG;
+    if (!ptr || !pcm || frames <= 0 || channels <= 0) return LV_ERR_INVALID_ARG;
+    if (jlong(frames) * jlong(channels) > env->GetArrayLength(pcm)) return LV_ERR_INVALID_ARG;
     jshort* p = env->GetShortArrayElements(pcm, nullptr);
+    if (!p) return LV_ERR_INTERNAL;
     const int rc = lv_sender_push_audio_chunk(reinterpret_cast<LvSenderHandle*>(ptr), p, frames,
                                               rate, channels, LV_AUDIO_FORMAT_PCM16, 0);
     env->ReleaseShortArrayElements(pcm, p, JNI_ABORT);
@@ -222,8 +296,9 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetQualit
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetBitrate(
     JNIEnv*, jclass, jlong ptr, jint bitrate_kbps) {
-    return ptr ? lv_sender_set_bitrate(reinterpret_cast<LvSenderHandle*>(ptr), uint32_t(bitrate_kbps))
-               : LV_ERR_INVALID_ARG;
+    if (!ptr || bitrate_kbps <= 0) return LV_ERR_INVALID_ARG;
+    return lv_sender_set_bitrate(reinterpret_cast<LvSenderHandle*>(ptr),
+                                 uint32_t(std::clamp(int(bitrate_kbps), 250, 150000)));
 }
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderForceKeyframe(
@@ -260,8 +335,13 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderStatsJ
 
 /* ---- Receiver ---- */
 JNIEXPORT jlong JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverCreate(JNIEnv*, jclass) {
-    auto* ctx = new SdkReceiverCtx();
+    auto* ctx = new (std::nothrow) SdkReceiverCtx();
+    if (!ctx) return 0;
     ctx->rx = lv_receiver_create();
+    if (!ctx->rx) {
+        delete ctx;
+        return 0;
+    }
     lv_receiver_set_video_callback(ctx->rx, on_video_cb, ctx);
     return reinterpret_cast<jlong>(ctx);
 }
@@ -275,10 +355,12 @@ JNIEXPORT void JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverDestroy
         lv_receiver_set_video_callback(ctx->rx, nullptr, nullptr);
         lv_receiver_destroy(ctx->rx);
     }
-    std::lock_guard<std::mutex> lk(ctx->surf_mu);
-    if (ctx->window) {
-        ANativeWindow_release(ctx->window);
-        ctx->window = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(ctx->surf_mu);
+        if (ctx->window) {
+            ANativeWindow_release(ctx->window);
+            ctx->window = nullptr;
+        }
     }
     delete ctx;
 }
@@ -288,7 +370,9 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverStart(
     jstring device_name) {
     if (!ptr) return LV_ERR_INVALID_ARG;
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
+    if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
     stop_aaudio(ctx);
+    lv_receiver_stop(ctx->rx);
     LV_ReceiverConfig cfg{};
     lv_sdk_receiver_config_default(&cfg);
     cfg.bind_port = uint16_t(std::clamp(int(port), 0, 65535));
@@ -340,7 +424,8 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverStat
         auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
         if (ctx->rx) lv_receiver_get_stream_stats(ctx->rx, &s);
     }
-    char buf[640];
+    const std::string backend_esc = json_escape(s.codec_backend, sizeof(s.codec_backend));
+    char buf[768];
     std::snprintf(buf, sizeof(buf),
                   "{\"state\":%d,\"width\":%d,\"height\":%d,\"q\":%d,\"fps\":%.1f,\"mbps\":%.2f,"
                   "\"lat_p50\":%.2f,\"lat_p99\":%.2f,\"loss\":%.2f,\"fec\":%llu,"
@@ -348,7 +433,7 @@ JNIEXPORT jstring JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverStat
                   s.state, s.width, s.height, s.active_quality, s.fps, s.bitrate_mbps,
                   s.latency_p50_ms, s.latency_p99_ms, s.packet_loss_pct,
                   static_cast<unsigned long long>(s.fec_recovered), s.audio_kbps, s.audio_buffer_ms,
-                  s.active_codec, s.codec_is_hardware, s.codec_backend);
+                  s.active_codec, s.codec_is_hardware, backend_esc.c_str());
     return env->NewStringUTF(buf);
 }
 
@@ -357,7 +442,7 @@ static uint64_t lv_jni_ts(jlong ts) { return ts < 0 ? LV_MEDIA_TS_AUTO : uint64_
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderConfigureAudioBus(
     JNIEnv*, jclass, jlong ptr, jint rate, jint latency) {
-    if (!ptr) return LV_ERR_INVALID_ARG;
+    if (!ptr || latency <= 0) return LV_ERR_INVALID_ARG;
     LV_AudioBusConfig bus;
     lv_audio_bus_config_default(&bus);
     bus.sample_rate = rate;
@@ -367,8 +452,11 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderConfigure
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudioChannelF32(
     JNIEnv* env, jclass, jlong ptr, jint ch, jfloatArray samples, jint count, jlong ts) {
-    if (!ptr || !samples || count <= 0 || count > env->GetArrayLength(samples)) return LV_ERR_INVALID_ARG;
+    if (!ptr || !samples || ch < 0 || ch >= LV_AUDIO_MAX_CHANNELS ||
+        count <= 0 || count > env->GetArrayLength(samples))
+        return LV_ERR_INVALID_ARG;
     jfloat* p = env->GetFloatArrayElements(samples, nullptr);
+    if (!p) return LV_ERR_INTERNAL;
     const int rc = lv_sender_push_audio_channel(reinterpret_cast<LvSenderHandle*>(ptr), uint16_t(ch), p,
                                                 uint32_t(count), LV_AUDIO_FORMAT_F32, lv_jni_ts(ts));
     env->ReleaseFloatArrayElements(samples, p, JNI_ABORT);
@@ -381,6 +469,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudio
         jlong(channels) * frames > env->GetArrayLength(data))
         return LV_ERR_INVALID_ARG;
     jfloat* p = env->GetFloatArrayElements(data, nullptr);
+    if (!p) return LV_ERR_INTERNAL;
     const int rc = lv_sender_push_audio_multichannel(reinterpret_cast<LvSenderHandle*>(ptr), p, uint16_t(channels),
                                                      uint32_t(frames), LV_AUDIO_FORMAT_F32,
                                                      LV_AUDIO_LAYOUT_INTERLEAVED, lv_jni_ts(ts));
@@ -390,8 +479,8 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderPushAudio
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderSetAudioLatency(
     JNIEnv*, jclass, jlong ptr, jint ms) {
-    return ptr ? lv_sender_set_audio_latency_ms(reinterpret_cast<LvSenderHandle*>(ptr), uint32_t(ms))
-               : LV_ERR_INVALID_ARG;
+    return (ptr && ms > 0) ? lv_sender_set_audio_latency_ms(reinterpret_cast<LvSenderHandle*>(ptr), uint32_t(ms))
+                           : LV_ERR_INVALID_ARG;
 }
 
 JNIEXPORT jlong JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderMasterClockSamples(
@@ -401,7 +490,7 @@ JNIEXPORT jlong JNICALL Java_com_lanvid_sdk_internal_NativeBridge_senderMasterCl
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverConfigureAudioBus(
     JNIEnv*, jclass, jlong ptr, jint rate, jint latency, jint channels, jint block) {
-    if (!ptr) return LV_ERR_INVALID_ARG;
+    if (!ptr || latency <= 0 || channels <= 0 || block <= 0) return LV_ERR_INVALID_ARG;
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
     if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
     LV_AudioBusConfig bus{rate, uint32_t(latency), channels, uint32_t(block)};
@@ -410,7 +499,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverConfigu
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverSetAudioLatency(
     JNIEnv*, jclass, jlong ptr, jint ms) {
-    if (!ptr) return LV_ERR_INVALID_ARG;
+    if (!ptr || ms <= 0) return LV_ERR_INVALID_ARG;
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
     return ctx->rx ? lv_receiver_set_audio_latency_ms(ctx->rx, uint32_t(ms)) : LV_ERR_NOT_INITIALIZED;
 }
@@ -436,6 +525,7 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverPopAudi
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
     if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
     jfloat* p = env->GetFloatArrayElements(out, nullptr);
+    if (!p) return LV_ERR_INTERNAL;
     const int rc = lv_receiver_pop_audio_multichannel(ctx->rx, p, uint16_t(channels), uint32_t(frames),
                                                       LV_AUDIO_LAYOUT_INTERLEAVED);
     env->ReleaseFloatArrayElements(out, p, 0);
@@ -444,7 +534,8 @@ JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverPopAudi
 
 JNIEXPORT jint JNICALL Java_com_lanvid_sdk_internal_NativeBridge_receiverChannelStats(
     JNIEnv* env, jclass, jlong ptr, jint ch, jlongArray out) {
-    if (!ptr || !out || env->GetArrayLength(out) < 10) return LV_ERR_INVALID_ARG;
+    if (!ptr || !out || ch < 0 || ch >= LV_AUDIO_MAX_CHANNELS || env->GetArrayLength(out) < 10)
+        return LV_ERR_INVALID_ARG;
     auto* ctx = reinterpret_cast<SdkReceiverCtx*>(ptr);
     if (!ctx->rx) return LV_ERR_NOT_INITIALIZED;
     LV_AudioChannelStats st{};

@@ -44,7 +44,7 @@ struct MacReceiverContentView: View {
         }
         .padding()
         .task {
-            while true {
+            while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 if let s = receiver?.stats, running {
                     hudText = String(format: "%dx%d | %.1f FPS | E2E %.2f ms | %.1f Mbps | FEC:%llu | Aud %.0f kbps",

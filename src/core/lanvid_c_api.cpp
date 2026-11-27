@@ -277,21 +277,22 @@ struct LvReceiverHandle {
     void start_mc_pump() {  // caller holds api_mu; receiver must be running
         stop_mc_pump();
         if (!mc_cb || !receiver) return;
+        const uint32_t frames = bus_cfg.block_frames ? uint32_t(bus_cfg.block_frames) : 240u;
+        const int ch = std::clamp(bus_cfg.num_channels, 1, 64);
+        const uint32_t rate = bus_cfg.sample_rate > 0 ? uint32_t(bus_cfg.sample_rate) : 48000u;
         mc_stop.store(false, std::memory_order_release);
         mc_active.store(true, std::memory_order_release);
-        mc_thread = std::thread([this]() {
-            lv::RealtimeThreadScope rt(uint32_t(uint64_t(bus_cfg.block_frames ? bus_cfg.block_frames : 240) * 1000000ull /
-                                                uint64_t(bus_cfg.sample_rate > 0 ? bus_cfg.sample_rate : 48000)));
-            const uint32_t frames = bus_cfg.block_frames ? bus_cfg.block_frames : 240;
-            const int ch = std::clamp(bus_cfg.num_channels, 1, 64);
-            const uint32_t rate = uint32_t(bus_cfg.sample_rate);
+        mc_thread = std::thread([this, frames, ch, rate]() {
+            lv::RealtimeThreadScope rt(uint32_t(uint64_t(frames) * 1000000ull / uint64_t(rate)));
             std::vector<float> buf(size_t(frames) * size_t(ch));
             const uint64_t period_us = uint64_t(frames) * 1000000ull / rate;
             uint64_t next = lv::now_us() + period_us;
             uint64_t index = 0;
             while (!mc_stop.load(std::memory_order_acquire)) {
                 lv::sleep_until_us(next, [] {});
+                const uint64_t now = lv::now_us();
                 next += period_us;
+                if (next + period_us * 4 < now) next = now + period_us;  // avoid catch-up storm after OS sleep
                 if (!receiver) break;
                 receiver->pop_audio_multichannel_interleaved(buf.data(), uint32_t(ch), frames);
                 LV_MultichannelAudioCallback cb;
@@ -726,7 +727,7 @@ void lv_sdk_receiver_config_default(LV_ReceiverConfig* cfg) {
 }
 
 /* ---- Sender API ---- */
-LvSenderHandle* lv_sender_create(void) { return new LvSenderHandle(); }
+LvSenderHandle* lv_sender_create(void) { return new (std::nothrow) LvSenderHandle(); }
 void lv_sender_destroy(LvSenderHandle* handle) { delete handle; }
 
 int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
@@ -824,6 +825,7 @@ int lv_sender_push_packed_frame(LvSenderHandle* handle, const uint8_t* data, int
         handle->ext_img.allocate(width, height, order);
     }
     const size_t row_bytes = size_t(width) * 4;
+    if (stride > 0 && size_t(stride) < row_bytes) return LV_ERR_INVALID_ARG;
     const size_t src_stride = stride > 0 ? size_t(stride) : row_bytes;
     if (src_stride == handle->ext_img.stride) {
         std::memcpy(handle->ext_img.data.data(), data, handle->ext_img.data.size());
@@ -855,8 +857,8 @@ int lv_sender_push_yuv_planes_ex(LvSenderHandle* handle, const LV_YuvPlanes* pla
                                  uint32_t timestamp_us) {
     if (!handle || !planes || !planes->plane_y || !planes->plane_u || width <= 0 || height <= 0) {
         return LV_ERR_INVALID_ARG;
-    LV_LIVE_LOCK(handle);
     }
+    LV_LIVE_LOCK(handle);
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
 
     lv::Yuv420View yuv{};
@@ -945,10 +947,33 @@ int lv_sender_push_cvpixelbuffer_planes(LvSenderHandle* handle, const uint8_t* p
     return LV_ERR_UNSUPPORTED;
 }
 
+int lv_sender_push_cvpixelbuffer(LvSenderHandle* handle, const void* cv_pixel_buffer_ref,
+                                 int width, int height, uint32_t timestamp_us) {
+    if (!handle || !cv_pixel_buffer_ref || width <= 0 || height <= 0) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
+    if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
+    if (handle->sender->active_codec() == lv::VideoCodecId::kLanVidDct) return LV_ERR_UNSUPPORTED;
+
+    std::lock_guard<std::mutex> plk(handle->push_mu);
+    handle->sender->service_control();
+
+    const int even_w = width & ~1;
+    const int even_h = height & ~1;
+    const uint32_t fid = handle->ext_frame_id.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t ts = timestamp_us ? timestamp_us : lv::now_us32();
+    const uint64_t t0 = lv::now_us();
+    const bool ok = handle->sender->send_frame_native(cv_pixel_buffer_ref, even_w, even_h, fid, ts);
+    const uint64_t t1 = lv::now_us();
+    if (!ok) return LV_ERR_CODEC;
+    handle->state.store(LV_STATE_CONNECTED, std::memory_order_relaxed);
+    handle->record_encode_sample(double(t1 - t0) / 1000.0, even_w, even_h);
+    return LV_OK;
+}
+
 int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, int num_frames,
                                int sample_rate, int channels, int audio_format,
                                uint32_t timestamp_us) {
-    if (!handle || !data || num_frames <= 0) return LV_ERR_INVALID_ARG;
+    if (!handle || !data || num_frames <= 0 || num_frames > 65535) return LV_ERR_INVALID_ARG;
     LV_LIVE_LOCK(handle);
     if (!handle->running.load(std::memory_order_acquire) || !handle->sender) return LV_ERR_NOT_RUNNING;
     const auto fmt = (audio_format == LV_AUDIO_FORMAT_F32) ? lv::AudioSampleFormat::kFloat32
@@ -1205,8 +1230,8 @@ int lv_receiver_get_channel_stats(LvReceiverHandle* handle, uint16_t channel_ind
 
 int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality) {
     if (!handle || quality < 1 || quality > 100) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     handle->override_quality.store(quality, std::memory_order_relaxed);
-    handle->codec_params.quality = quality;
     if (handle->sender) {
         handle->sender->force_keyframe();
         if (handle->adaptive_enabled.load(std::memory_order_relaxed)) {
@@ -1218,6 +1243,7 @@ int lv_sender_request_keyframe_quality(LvSenderHandle* handle, int quality) {
 
 int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps) {
     if (!handle || bitrate_kbps < 250u || bitrate_kbps > 100000u) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_ERR_NOT_RUNNING;
     handle->sender->set_bitrate_kbps(bitrate_kbps);
     return LV_OK;
@@ -1225,6 +1251,7 @@ int lv_sender_set_bitrate(LvSenderHandle* handle, uint32_t bitrate_kbps) {
 
 int lv_sender_force_keyframe(LvSenderHandle* handle) {
     if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_ERR_NOT_RUNNING;
     handle->sender->force_keyframe();
     return LV_OK;
@@ -1232,6 +1259,7 @@ int lv_sender_force_keyframe(LvSenderHandle* handle) {
 
 int lv_sender_set_fec_group(LvSenderHandle* handle, int fec_group_size) {
     if (!handle || fec_group_size < 0 || fec_group_size > 64) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_ERR_NOT_RUNNING;
     handle->sender->set_fec_group_size(uint16_t(fec_group_size));
     return LV_OK;
@@ -1239,6 +1267,7 @@ int lv_sender_set_fec_group(LvSenderHandle* handle, int fec_group_size) {
 
 int lv_sender_set_adaptive_quality(LvSenderHandle* handle, int enabled, int q_min, int q_max) {
     if (!handle || q_min < 1 || q_max > 100 || q_min > q_max) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     handle->adaptive_enabled.store(enabled != 0, std::memory_order_relaxed);
     if (handle->sender) {
         handle->sender->set_adaptive_quality(enabled != 0, q_min, q_max, handle->resolve_quality());
@@ -1250,6 +1279,7 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
     if (!handle || !out) return LV_ERR_INVALID_ARG;
     std::memset(out, 0, sizeof(*out));
     out->state = handle->state.load(std::memory_order_acquire);
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_OK;
 
     const lv::SenderStats st = handle->sender->stats();
@@ -1298,7 +1328,7 @@ int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out) {
 }
 
 /* ---- Receiver SDK API ---- */
-LvReceiverHandle* lv_receiver_create(void) { return new LvReceiverHandle(); }
+LvReceiverHandle* lv_receiver_create(void) { return new (std::nothrow) LvReceiverHandle(); }
 void lv_receiver_destroy(LvReceiverHandle* handle) { delete handle; }
 
 void lv_receiver_set_video_callback(LvReceiverHandle* handle, LV_VideoFrameCallback cb, void* user_data) {
@@ -1353,7 +1383,9 @@ void lv_receiver_stop(LvReceiverHandle* handle) {
 }
 
 uint16_t lv_receiver_get_local_port(LvReceiverHandle* handle) {
-    if (!handle || !handle->receiver) return 0;
+    if (!handle) return 0;
+    LV_LIVE_LOCK(handle);
+    if (!handle->receiver) return 0;
     return handle->receiver->local_port();
 }
 
@@ -1384,12 +1416,16 @@ int lv_receiver_pop_audio_pcm16(LvReceiverHandle* handle, int16_t* out_stereo, i
 
 void lv_receiver_set_volume(LvReceiverHandle* handle, float volume) {
     if (!handle) return;
-    handle->volume.store(std::clamp(volume, 0.0f, 2.0f), std::memory_order_relaxed);
-    if (handle->receiver) handle->receiver->audio_buffer().set_volume(volume);
+    const float clamped = std::clamp(volume, 0.0f, 2.0f);
+    handle->volume.store(clamped, std::memory_order_relaxed);
+    LV_LIVE_LOCK(handle);
+    if (handle->receiver) handle->receiver->audio_buffer().set_volume(clamped);
 }
 
 void lv_receiver_set_concealment(LvReceiverHandle* handle, int mode) {
-    if (!handle || !handle->receiver) return;
+    if (!handle) return;
+    LV_LIVE_LOCK(handle);
+    if (!handle->receiver) return;
     handle->receiver->set_conceal_mode(mode == 0 ? lv::ConcealMode::kGray : lv::ConcealMode::kPrev);
 }
 
@@ -1408,6 +1444,7 @@ int lv_receiver_get_stream_stats(LvReceiverHandle* handle, LV_StreamStats* out) 
     if (!handle || !out) return LV_ERR_INVALID_ARG;
     std::memset(out, 0, sizeof(*out));
     out->state = handle->state.load(std::memory_order_acquire);
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_OK;
 
     const auto ast = handle->receiver->assembler_stats();
@@ -1603,7 +1640,8 @@ int lv_duplex_start(LvDuplexHandle* h, const LV_DuplexConfig* cfg) {
         outp.resize(ch);
         for (uint32_t c = 0; c < ch; ++c) outp[c] = buf.data() + size_t(c) * n;
         self->tx_patch.process(p, outp.data(), ch, n);
-        const uint64_t ts = disc ? lv_sender_get_master_clock_samples(self->tx) - n : LV_MEDIA_TS_AUTO;
+        const uint64_t mc = disc ? lv_sender_get_master_clock_samples(self->tx) : 0;
+        const uint64_t ts = disc ? (mc >= n ? mc - n : 0) : LV_MEDIA_TS_AUTO;
         lv_sender_push_audio_multichannel(self->tx, outp.data(), uint16_t(ch), n, LV_AUDIO_FORMAT_F32,
                                           LV_AUDIO_LAYOUT_PLANAR, ts);
     }, nullptr);
@@ -1676,6 +1714,7 @@ int lv_receiver_get_stream_epoch_info(LvReceiverHandle* handle, uint64_t* epoch_
 int lv_duplex_send_midi(LvDuplexHandle* h, uint8_t status, uint8_t data1, uint8_t data2, uint8_t port,
                         uint64_t media_ts_us) {
     if (!h) return LV_ERR_INVALID_ARG;
+    std::lock_guard<std::mutex> lk(h->api_mu);
     if (!h->running.load(std::memory_order_acquire) || !h->tx) return LV_ERR_NOT_RUNNING;
     return lv_sender_push_midi(h->tx, status, data1, data2, port, media_ts_us);
 }
@@ -1691,6 +1730,7 @@ void lv_duplex_set_midi_callback(LvDuplexHandle* h, LV_MidiEventCallback cb, voi
 int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitterStats* out) {
     if (!handle || !out) return LV_ERR_INVALID_ARG;
     *out = {};
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
     const auto st = handle->receiver->midi_dejitter_stats();
     out->target_buffer_ms = st.target_buffer_ms;
@@ -1709,12 +1749,14 @@ int lv_receiver_get_midi_dejitter_stats(LvReceiverHandle* handle, LV_MidiDejitte
 int lv_duplex_get_midi_dejitter_stats(LvDuplexHandle* h, LV_MidiDejitterStats* out) {
     if (!h || !out) return LV_ERR_INVALID_ARG;
     *out = {};
+    std::lock_guard<std::mutex> lk(h->api_mu);
     if (!h->running.load(std::memory_order_acquire) || !h->rx) return LV_ERR_NOT_RUNNING;
     return lv_receiver_get_midi_dejitter_stats(h->rx, out);
 }
 
 int lv_sender_set_midi_only(LvSenderHandle* handle, int enabled) {
     if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->sender) return LV_ERR_NOT_RUNNING;
     handle->sender->set_midi_only(enabled != 0);
     return LV_OK;
@@ -1722,6 +1764,7 @@ int lv_sender_set_midi_only(LvSenderHandle* handle, int enabled) {
 
 int lv_receiver_set_midi_only(LvReceiverHandle* handle, int enabled) {
     if (!handle) return LV_ERR_INVALID_ARG;
+    LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
     handle->receiver->set_midi_only(enabled != 0);
     return LV_OK;
@@ -2237,27 +2280,9 @@ int lv_sender_send_control_sync(LvSenderHandle* handle, const LV_ControlSyncStat
 
 void lv_sender_set_control_sync_callback(LvSenderHandle* handle, LV_ControlSyncCallback cb, void* user_data) {
     if (!handle) return;
-    {
-        std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
-        handle->cs_cb = cb;
-        handle->cs_ud = user_data;
-    }
-    if (handle->sender) {
-        handle->sender->set_control_sync_callback([handle](const lv::ControlSyncPayload& cs) {
-            LV_ControlSyncCallback f = nullptr;
-            void* ud = nullptr;
-            {
-                std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
-                f = handle->cs_cb;
-                ud = handle->cs_ud;
-            }
-            if (!f) return;
-            LV_ControlSyncState st{cs.revision, cs.origin_id, cs.audio_channels, cs.audio_bitrate_kbps,
-                                   cs.target_buffer_ms, cs.latency_mode, cs.audio_only, cs.active_preset_id,
-                                   cs.flags, cs.master_gain_cb, cs.audio_codec};
-            f(&st, ud);
-        });
-    }
+    std::lock_guard<std::mutex> lk(handle->cs_cb_mu);
+    handle->cs_cb = cb;
+    handle->cs_ud = user_data;
 }
 
 int lv_receiver_send_control_sync(LvReceiverHandle* handle, const LV_ControlSyncState* state) {
@@ -2560,7 +2585,7 @@ int lv_sender_start(LvSenderHandle* handle, const LvSenderConfig* cfg) {
     }
     if (cfg->sim_loss_pct > 0.0 && handle->sender) handle->sender->set_sim_loss_pct(cfg->sim_loss_pct);
 
-    if (cfg->audio_mode == LV_AUDIO_LOOPBACK || cfg->audio_mode == LV_AUDIO_MIC) {
+    if ((cfg->audio_mode == LV_AUDIO_LOOPBACK || cfg->audio_mode == LV_AUDIO_MIC) && handle->sender) {
         auto ac = std::make_unique<lv::AudioCapture>();
         const auto mode = (cfg->audio_mode == LV_AUDIO_LOOPBACK) ? lv::AudioCaptureMode::kLoopback
                                                                  : lv::AudioCaptureMode::kMic;
@@ -2765,10 +2790,13 @@ int lv_sender_get_stats(LvSenderHandle* handle, LvSenderStats* out) {
     out->codec_is_hardware = st.codec_is_hardware;
     out->target_bitrate_kbps = st.target_bitrate_kbps;
     std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s", st.codec_backend);
-    if (handle->sender) {
-        const auto raw = handle->sender->stats();
-        out->send_errors = raw.send_errors;
-        out->rx_fec_pct = double(raw.last_rx_fec_permille) / 10.0;
+    {
+        LV_LIVE_LOCK(handle);
+        if (handle->sender) {
+            const auto raw = handle->sender->stats();
+            out->send_errors = raw.send_errors;
+            out->rx_fec_pct = double(raw.last_rx_fec_permille) / 10.0;
+        }
     }
     return 1;
 }
@@ -2826,11 +2854,14 @@ int lv_receiver_get_stats(LvReceiverHandle* handle, LvReceiverStats* out) {
     out->active_codec = st.active_codec;
     out->codec_is_hardware = st.codec_is_hardware;
     std::snprintf(out->codec_backend, sizeof(out->codec_backend), "%s", st.codec_backend);
-    if (handle->receiver) {
-        out->audio_packets_lost = handle->receiver->audio_stats().packets_lost;
-        out->pli_requests = handle->receiver->assembler_stats().pli_requests;
-        out->effective_latency_ms = handle->receiver->audio_effective_latency_ms();
-        out->effective_target_ms = handle->receiver->audio_effective_target_ms();
+    {
+        LV_LIVE_LOCK(handle);
+        if (handle->receiver) {
+            out->audio_packets_lost = handle->receiver->audio_stats().packets_lost;
+            out->pli_requests = handle->receiver->assembler_stats().pli_requests;
+            out->effective_latency_ms = handle->receiver->audio_effective_latency_ms();
+            out->effective_target_ms = handle->receiver->audio_effective_target_ms();
+        }
     }
     out->adaptive_jitter = handle->adaptive_jitter.load(std::memory_order_acquire);
     return 1;

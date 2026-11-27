@@ -5,13 +5,38 @@ import SwiftUI
 import UIKit
 
 /// Duplex Intercom audio controller (AVAudioSession playAndRecord @ 48 kHz, 5 ms buffer, background-safe).
+/// Resamples microphone input to 48 kHz mono Float32 for `lv_intercom_push_mic_pcm` and plays received
+/// director IFB voice via an `AVAudioSourceNode` pulling from `lv_intercom_pull_rx_pcm`.
 final class IntercomAudioController {
     private let audioEngine = AVAudioEngine()
+    private var sourceNode: AVAudioSourceNode?
     private var isRunning = false
+    private var shouldRun = false
+    private var observers: [NSObjectProtocol] = []
+
     var onMicFloat: ((UnsafePointer<Float>, Int) -> Void)?
     var onMicLevel: ((Float) -> Void)?
+    var onPullIfbFloat: ((UnsafeMutablePointer<Float>, Int) -> Bool)?
+    var onIfbLevel: ((Float) -> Void)?
+
+    init() {
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            self?.handleInterruption(note)
+        })
+        observers.append(nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.shouldRun else { return }
+            self.restart()
+        })
+    }
+
+    deinit {
+        for obs in observers { NotificationCenter.default.removeObserver(obs) }
+        stop()
+    }
 
     func start() {
+        shouldRun = true
         guard !isRunning else { return }
         let session = AVAudioSession.sharedInstance()
         do {
@@ -24,34 +49,122 @@ final class IntercomAudioController {
             try session.setPreferredIOBufferDuration(0.005)
             try session.setActive(true)
 
-            let input = audioEngine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            guard format.channelCount > 0 else { return }
-            input.installTap(onBus: 0, bufferSize: 480, format: format) { [weak self] buffer, _ in
-                guard let ch = buffer.floatChannelData?[0] else { return }
-                let count = Int(buffer.frameLength)
+            guard let targetFmt = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 48_000,
+                channels: 1,
+                interleaved: false
+            ) else { return }
+
+            // Attach IFB playback source node at 48 kHz mono Float32
+            let node = AVAudioSourceNode(format: targetFmt) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
+                let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
+                let count = Int(frameCount)
+                guard let dst = abl.first?.mData?.assumingMemoryBound(to: Float.self), count > 0 else {
+                    return noErr
+                }
+                let gotAudio = self?.onPullIfbFloat?(dst, count) ?? false
+                if !gotAudio {
+                    memset(dst, 0, count * MemoryLayout<Float>.size)
+                    self?.onIfbLevel?(-60.0)
+                    return noErr
+                }
                 var peak: Float = 0.00001
                 for i in 0..<count {
-                    let a = abs(ch[i])
+                    let a = abs(dst[i])
                     if a > peak { peak = a }
                 }
-                let dbfs = max(-60.0, 20.0 * log10(peak))
-                self?.onMicLevel?(dbfs)
-                self?.onMicFloat?(ch, count)
+                self?.onIfbLevel?(max(-60.0, 20.0 * log10(peak)))
+                return noErr
             }
+            audioEngine.attach(node)
+            audioEngine.connect(node, to: audioEngine.mainMixerNode, format: targetFmt)
+            sourceNode = node
+
+            let input = audioEngine.inputNode
+            let hwFormat = input.outputFormat(forBus: 0)
+            if hwFormat.channelCount > 0 && hwFormat.sampleRate > 0 {
+                let needsConvert = (hwFormat.sampleRate != 48_000.0 || hwFormat.channelCount != 1 || hwFormat.commonFormat != .pcmFormatFloat32)
+                let converter: AVAudioConverter? = needsConvert ? AVAudioConverter(from: hwFormat, to: targetFmt) : nil
+                let convBuf = needsConvert ? AVAudioPCMBuffer(pcmFormat: targetFmt, frameCapacity: 2048) : nil
+
+                input.installTap(onBus: 0, bufferSize: 480, format: hwFormat) { [weak self] buffer, _ in
+                    guard let self else { return }
+                    let outPtr: UnsafePointer<Float>
+                    let outCount: Int
+
+                    if let converter, let convBuf {
+                        let ratio = 48_000.0 / max(1.0, hwFormat.sampleRate)
+                        let estFrames = AVAudioFrameCount(min(Double(convBuf.frameCapacity), ceil(Double(buffer.frameLength) * ratio) + 16))
+                        convBuf.frameLength = estFrames
+                        var provided = false
+                        var err: NSError?
+                        converter.convert(to: convBuf, error: &err) { _, outStatus in
+                            if provided {
+                                outStatus.pointee = .noDataNow
+                                return nil
+                            }
+                            provided = true
+                            outStatus.pointee = .haveData
+                            return buffer
+                        }
+                        guard err == nil, convBuf.frameLength > 0, let ch = convBuf.floatChannelData?[0] else { return }
+                        outPtr = UnsafePointer(ch)
+                        outCount = Int(convBuf.frameLength)
+                    } else {
+                        guard let ch = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+                        outPtr = UnsafePointer(ch)
+                        outCount = Int(buffer.frameLength)
+                    }
+
+                    var peak: Float = 0.00001
+                    for i in 0..<outCount {
+                        let a = abs(outPtr[i])
+                        if a > peak { peak = a }
+                    }
+                    self.onMicLevel?(max(-60.0, 20.0 * log10(peak)))
+                    self.onMicFloat?(outPtr, outCount)
+                }
+            }
+
             audioEngine.prepare()
             try audioEngine.start()
             isRunning = true
         } catch {
-            // Hardware audio session unavailable (e.g. Simulator)
+            cleanupEngine()
         }
     }
 
     func stop() {
-        guard isRunning else { return }
-        audioEngine.inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
-        isRunning = false
+        shouldRun = false
+        cleanupEngine()
+    }
+
+    private func cleanupEngine() {
+        if isRunning {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            audioEngine.stop()
+            isRunning = false
+        }
+        if let node = sourceNode {
+            audioEngine.detach(node)
+            sourceNode = nil
+        }
+    }
+
+    private func restart() {
+        cleanupEngine()
+        if shouldRun { start() }
+    }
+
+    private func handleInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        if type == .began {
+            cleanupEngine()
+        } else if type == .ended && shouldRun {
+            start()
+        }
     }
 }
 
@@ -99,7 +212,7 @@ final class CameraEngine: NSObject, ObservableObject {
     @Published var pttActive = false { didSet { syncIntercomState() } }
     @Published var latchActive = false {
         didSet {
-            if latchActive { pttActive = true }
+            pttActive = latchActive
             syncIntercomState()
         }
     }
@@ -129,23 +242,41 @@ final class CameraEngine: NSObject, ObservableObject {
 
     // MARK: - Encoder & Stream Profile
     @Published var resolution: CineResolution = .fhd1080 {
-        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+        didSet {
+            guard oldValue != resolution else { return }
+            if !isApplyingRemoteSync {
+                sendLocalConfigSyncToStudio()
+                if isStreaming && !isDemoMode { reconfigureVideoSenderOnly() }
+            }
+        }
     }
     @Published var fps: Int = 60 {
-        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+        didSet {
+            guard oldValue != fps else { return }
+            if !isApplyingRemoteSync {
+                sendLocalConfigSyncToStudio()
+                if isStreaming && !isDemoMode { reconfigureVideoSenderOnly() }
+            }
+        }
     }
     @Published var codec: CineCodec = .hevc {
-        didSet { if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() } }
+        didSet {
+            guard oldValue != codec else { return }
+            if !isApplyingRemoteSync {
+                sendLocalConfigSyncToStudio()
+                if isStreaming && !isDemoMode { reconfigureVideoSenderOnly() }
+            }
+        }
     }
     @Published var bitrateMbps: Double = 35.0 {
         didSet {
             if isStreaming && !isDemoMode {
                 senderLock.lock()
                 let s = senderHandle
-                senderLock.unlock()
                 if let s {
                     lv_sender_set_bitrate(s, UInt32(max(2000, Int(bitrateMbps * 1000.0))))
                 }
+                senderLock.unlock()
             }
             if !isApplyingRemoteSync { sendLocalConfigSyncToStudio() }
         }
@@ -172,15 +303,24 @@ final class CameraEngine: NSObject, ObservableObject {
     private let captureQueue = DispatchQueue(label: "com.manul02.lanvid.camera.capture", qos: .userInteractive)
     private var primaryDevice: AVCaptureDevice?
     private var secondaryDevice: AVCaptureDevice?
+    private var sessionObservers: [NSObjectProtocol] = []
 
-    // MARK: - LanVidCore C ABI Handles
+    // MARK: - LanVidCore C ABI Handles (all cross-thread access guarded by locks)
     private let senderLock = NSLock()
     private nonisolated(unsafe) var senderHandle: OpaquePointer?
-    private var tallyHandle: OpaquePointer?
+
+    private let tallyLock = NSLock()
+    private nonisolated(unsafe) var tallyHandle: OpaquePointer?
+    private nonisolated(unsafe) var isMicTalkOpen: Bool = false
+    private nonisolated(unsafe) var isIfbListenOpen: Bool = true
+    private let tallyPollQueue = DispatchQueue(label: "com.manul02.lanvid.camera.tally", qos: .userInteractive)
+    private var tallyPollTimer: DispatchSourceTimer?
+
     private let intercomAudio = IntercomAudioController()
     private var tickTimer: Timer?
-    private var frameCounter: Int = 0
-    private let cameraId: UInt32 = UInt32.random(in: 1000...999999)
+    private var streamStartWallTime: CFTimeInterval = CACurrentMediaTime()
+    private var demoPhaseCounter: Int = 0
+    private let cameraId: UInt32
 
     override init() {
         let ud = UserDefaults.standard
@@ -192,12 +332,41 @@ final class CameraEngine: NSObject, ObservableObject {
         self.cameraLabel = ud.string(forKey: "cam_label") ?? "CAM A"
         self.assignedCamNumber = ud.integer(forKey: "cam_assigned_number")
         self.assignedCamTag = ud.string(forKey: "cam_assigned_tag") ?? ""
+        let storedId = ud.integer(forKey: "cam_unique_id")
+        if storedId > 0 {
+            self.cameraId = UInt32(storedId)
+        } else {
+            let newId = UInt32.random(in: 1000...999_999)
+            ud.set(Int(newId), forKey: "cam_unique_id")
+            self.cameraId = newId
+        }
         super.init()
 
         lv_init()
         UIDevice.current.isBatteryMonitoringEnabled = true
+        updateThermalTemperature()
         let simd = lv_get_cpu_simd_info().map { String(cString: $0) } ?? "NEON"
         self.statusText = tr("Готово • ", "Ready • ") + simd
+
+        let nc = NotificationCenter.default
+        sessionObservers.append(nc.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.updateThermalTemperature() }
+        })
+        sessionObservers.append(nc.addObserver(forName: AVCaptureSession.wasInterruptedNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isStreaming, !self.isDemoMode else { return }
+                self.statusText = tr("Камеру призупинено системою", "Camera session interrupted")
+            }
+        })
+        sessionObservers.append(nc.addObserver(forName: AVCaptureSession.interruptionEndedNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isStreaming, !self.isDemoMode else { return }
+                self.statusText = "\(self.resolution.rawValue) \(self.fps)p \(self.codec.shortName) → \(self.destIp):\(self.videoPort)"
+            }
+        })
+        sessionObservers.append(nc.addObserver(forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.syncCaptureConnectionOrientation() }
+        })
 
         browser.onRemoteDuoCommand = { [weak self] tally, focus, iso, shutter, wb, tc in
             guard let self else { return }
@@ -230,22 +399,48 @@ final class CameraEngine: NSObject, ObservableObject {
         intercomAudio.onMicLevel = { [weak self] dbfs in
             Task { @MainActor in self?.telemetry.micPeakDbfs = dbfs }
         }
+        intercomAudio.onIfbLevel = { [weak self] dbfs in
+            Task { @MainActor in self?.telemetry.ifbPeakDbfs = dbfs }
+        }
         intercomAudio.onMicFloat = { [weak self] ptr, count in
-            guard let self, let th = self.tallyHandle else { return }
-            if self.pttActive || self.latchActive {
+            guard let self else { return }
+            self.tallyLock.lock()
+            defer { self.tallyLock.unlock() }
+            if let th = self.tallyHandle, self.isMicTalkOpen {
                 lv_intercom_push_mic_pcm(th, ptr, Int32(count))
             }
+        }
+        intercomAudio.onPullIfbFloat = { [weak self] dst, count in
+            guard let self else { return false }
+            // Non-blocking try() on real-time audio render thread
+            guard self.tallyLock.try() else { return false }
+            defer { self.tallyLock.unlock() }
+            guard let th = self.tallyHandle, self.isIfbListenOpen else { return false }
+            return lv_intercom_pull_rx_pcm(th, dst, Int32(count)) > 0
         }
     }
 
     deinit {
+        for obs in sessionObservers { NotificationCenter.default.removeObserver(obs) }
         tickTimer?.invalidate()
+        tallyPollTimer?.cancel()
+        tallyPollTimer = nil
         intercomAudio.stop()
-        if let s = senderHandle {
+        if singleSession.isRunning { singleSession.stopRunning() }
+        if let mc = multiCamSession, mc.isRunning { mc.stopRunning() }
+        senderLock.lock()
+        let s = senderHandle
+        senderHandle = nil
+        senderLock.unlock()
+        if let s {
             lv_sender_stop(s)
             lv_sender_destroy(s)
         }
-        if let t = tallyHandle {
+        tallyLock.lock()
+        let t = tallyHandle
+        tallyHandle = nil
+        tallyLock.unlock()
+        if let t {
             lv_tally_intercom_destroy(t)
         }
     }
@@ -268,14 +463,18 @@ final class CameraEngine: NSObject, ObservableObject {
         stopStreaming()
         isDemoMode = true
         isStreaming = true
+        UIApplication.shared.isIdleTimerDisabled = true
+        streamStartWallTime = CACurrentMediaTime()
         duoMode = mode
         tallyState = tally
         remoteRec = (tally == .program)
         directorSpeaking = (tally == .program)
+        isApplyingRemoteSync = true
         resolution = .uhd4k
         fps = 60
         codec = .hevc
         bitrateMbps = 35.0
+        isApplyingRemoteSync = false
         shutterAngle = 180
         isoValue = 400
         wbKelvin = 5600
@@ -332,6 +531,36 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     func startLiveStreaming() {
+        if duoMode != .duoCompanion {
+            let vStatus = AVCaptureDevice.authorizationStatus(for: .video)
+            if vStatus == .notDetermined {
+                AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        if granted {
+                            self.startLiveStreamingAuthorized()
+                        } else {
+                            self.statusText = tr("Надайте доступ до камери в Налаштуваннях", "Enable Camera access in Settings")
+                        }
+                    }
+                }
+                return
+            } else if vStatus == .denied || vStatus == .restricted {
+                statusText = tr("Доступ до камери заборонено", "Camera access denied")
+                return
+            }
+        }
+        let aStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if aStatus == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                Task { @MainActor in self?.startLiveStreamingAuthorized() }
+            }
+            return
+        }
+        startLiveStreamingAuthorized()
+    }
+
+    private func startLiveStreamingAuthorized() {
         stopStreaming()
         isDemoMode = false
 
@@ -363,6 +592,9 @@ final class CameraEngine: NSObject, ObservableObject {
                 statusText = tr("Помилка запуску потоку (", "Stream start error (") + "\(rc))"
                 return
             }
+        } else {
+            statusText = tr("Не вдалося ініціалізувати відеопотік", "Failed to initialize sender")
+            return
         }
 
         // Start Tally & Duplex Intercom engine on port 5022
@@ -372,7 +604,6 @@ final class CameraEngine: NSObject, ObservableObject {
             }
         }
         if let th {
-            tallyHandle = th
             let ctx = Unmanaged.passUnretained(self).toOpaque()
             lv_camera_set_tally_callback(th, { statePtr, userData in
                 guard let statePtr, let userData else { return }
@@ -399,14 +630,21 @@ final class CameraEngine: NSObject, ObservableObject {
                     engine.applyRemoteVideoConfigSync(cfg)
                 }
             }, ctx)
+
+            tallyLock.lock()
+            tallyHandle = th
+            tallyLock.unlock()
             syncIntercomState()
+            startTallyPollTimer()
         }
 
         if duoMode != .duoCompanion {
             configureAndStartCapture()
         }
         intercomAudio.start()
+        streamStartWallTime = CACurrentMediaTime()
         isStreaming = true
+        UIApplication.shared.isIdleTimerDisabled = true
         statusText = "\(resolution.rawValue) \(fps)p \(codec.shortName) → \(destIp):\(videoPort)"
         startTelemetryTimer()
     }
@@ -414,11 +652,14 @@ final class CameraEngine: NSObject, ObservableObject {
     func stopStreaming() {
         tickTimer?.invalidate()
         tickTimer = nil
+        tallyPollTimer?.cancel()
+        tallyPollTimer = nil
         captureQueue.async { [singleSession, multiCamSession] in
             if singleSession.isRunning { singleSession.stopRunning() }
             if let mc = multiCamSession, mc.isRunning { mc.stopRunning() }
         }
         intercomAudio.stop()
+
         senderLock.lock()
         let oldSender = senderHandle
         senderHandle = nil
@@ -427,16 +668,47 @@ final class CameraEngine: NSObject, ObservableObject {
             lv_sender_stop(s)
             lv_sender_destroy(s)
         }
-        if let t = tallyHandle {
+
+        tallyLock.lock()
+        let oldTally = tallyHandle
+        tallyHandle = nil
+        isMicTalkOpen = false
+        tallyLock.unlock()
+        if let t = oldTally {
             lv_tally_intercom_destroy(t)
-            tallyHandle = nil
         }
+
         isStreaming = false
+        UIApplication.shared.isIdleTimerDisabled = false
         if !isDemoMode {
             tallyState = .standby
             remoteRec = false
             directorSpeaking = false
         }
+    }
+
+    private func startTallyPollTimer() {
+        tallyPollTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: tallyPollQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.tallyLock.lock()
+            var speaking = false
+            var duck: Float = 1.0
+            if let th = self.tallyHandle {
+                lv_tally_intercom_poll(th)
+                speaking = (lv_tally_intercom_is_director_speaking(th) != 0)
+                duck = lv_tally_intercom_ducking_gain(th)
+            }
+            self.tallyLock.unlock()
+            Task { @MainActor in
+                if self.directorSpeaking != speaking { self.directorSpeaking = speaking }
+                if abs(self.duckingGain - duck) > 0.01 { self.duckingGain = duck }
+            }
+        }
+        timer.resume()
+        tallyPollTimer = timer
     }
 
     // MARK: - iPhone Duo Mode Switching & Companion Remote Control
@@ -449,7 +721,14 @@ final class CameraEngine: NSObject, ObservableObject {
             duoRole = .camA
         }
         if isStreaming && !isDemoMode {
-            configureAndStartCapture()
+            if newMode == .duoCompanion {
+                captureQueue.async { [singleSession, multiCamSession] in
+                    if singleSession.isRunning { singleSession.stopRunning() }
+                    if let mc = multiCamSession, mc.isRunning { mc.stopRunning() }
+                }
+            } else {
+                configureAndStartCapture()
+            }
         }
         syncDuoStateToPeers()
     }
@@ -517,7 +796,8 @@ final class CameraEngine: NSObject, ObservableObject {
                     if sec.isExposureModeSupported(.continuousAutoExposure) {
                         sec.exposureMode = .continuousAutoExposure
                     }
-                    sec.setExposureTargetBias(secondaryExposureBias, completionHandler: nil)
+                    let clampedBias = max(sec.minExposureTargetBias, min(sec.maxExposureTargetBias, secondaryExposureBias))
+                    sec.setExposureTargetBias(clampedBias, completionHandler: nil)
                 }
                 sec.unlockForConfiguration()
             } catch {}
@@ -535,10 +815,13 @@ final class CameraEngine: NSObject, ObservableObject {
             if autoExp {
                 if dev.isExposureModeSupported(.continuousAutoExposure) { dev.exposureMode = .continuousAutoExposure }
             } else if dev.isExposureModeSupported(.custom) {
-                let denom = Double(fps) * (360.0 / Double(max(1, shutter)))
-                let dur = CMTime(value: 1, timescale: CMTimeScale(max(24, Int(denom))))
+                let denom = Double(max(1, fps)) * (360.0 / Double(max(1, shutter)))
+                let rawDur = CMTime(value: 1, timescale: CMTimeScale(max(24, Int(denom))))
+                let minDur = dev.activeFormat.minExposureDuration
+                let maxDur = dev.activeFormat.maxExposureDuration
+                let clampedDur = CMTimeMinimum(maxDur, CMTimeMaximum(minDur, rawDur))
                 let clampedIso = max(dev.activeFormat.minISO, min(dev.activeFormat.maxISO, iso))
-                dev.setExposureModeCustom(duration: dur, iso: clampedIso)
+                dev.setExposureModeCustom(duration: clampedDur, iso: clampedIso)
             }
             if autoWB {
                 if dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { dev.whiteBalanceMode = .continuousAutoWhiteBalance }
@@ -564,25 +847,59 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     private func applyRemoteStudioControl(_ ctrl: LV_CameraControl) {
-        switch ctrl.lens {
-        case 1: lens = .ultraWide
-        case 2: lens = .tele
-        case 3: lens = .front
-        default: lens = .wide
+        isApplyingRemoteSync = true
+        defer { isApplyingRemoteSync = false }
+
+        let targetLens: CineLens = {
+            switch ctrl.lens {
+            case 1: return .ultraWide
+            case 2: return .tele
+            case 3: return .front
+            default: return .wide
+            }
+        }()
+        if targetLens != lens {
+            selectLens(targetLens)
         }
+
+        let targetRes: CineResolution = {
+            switch ctrl.quality {
+            case 0, 1: return .hd720
+            case 3: return .uhd4k
+            default: return .fhd1080
+            }
+        }()
+        if targetRes != resolution {
+            resolution = targetRes
+            if isStreaming && !isDemoMode {
+                reconfigureVideoSenderOnly()
+            }
+        }
+
         autoFocus = (ctrl.focus_auto != 0)
         if !autoFocus {
             focusPosition = Float(min(1000, ctrl.focus_pos)) / 1000.0
         }
         applyManualCameraControls()
+
+        if ctrl.zoom_x100 >= 100, let dev = primaryDevice {
+            let requestedZoom = CGFloat(ctrl.zoom_x100) / 100.0
+            let maxZoom = min(dev.activeFormat.videoMaxZoomFactor, 10.0)
+            let clampedZoom = max(1.0, min(maxZoom, requestedZoom))
+            do {
+                try dev.lockForConfiguration()
+                dev.videoZoomFactor = clampedZoom
+                dev.unlockForConfiguration()
+            } catch {}
+        }
     }
 
     private func applyRemoteVideoConfigSync(_ cfg: LV_VideoConfigSync) {
         if (cfg.flags & 0x01) != 0 {
             senderLock.lock()
             let s = senderHandle
-            senderLock.unlock()
             if let s { lv_sender_force_keyframe(s) }
+            senderLock.unlock()
         }
 
         isApplyingRemoteSync = true
@@ -639,7 +956,7 @@ final class CameraEngine: NSObject, ObservableObject {
         resolution = targetRes
         codec = targetCodec
         fps = targetFps
-        bitrateMbps = min(150.0, max(5.0, targetMbps))
+        bitrateMbps = min(100.0, max(5.0, targetMbps))
 
         if needLensSwitch {
             selectLens(targetLens)
@@ -649,8 +966,8 @@ final class CameraEngine: NSObject, ObservableObject {
         } else if isStreaming && !isDemoMode {
             senderLock.lock()
             let s = senderHandle
-            senderLock.unlock()
             if let s { lv_sender_set_bitrate(s, UInt32(max(2000, Int(bitrateMbps * 1000.0)))) }
+            senderLock.unlock()
         }
     }
 
@@ -692,7 +1009,6 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     func sendLocalConfigSyncToStudio() {
-        guard let th = tallyHandle else { return }
         localConfigSyncRev &+= 1
         var cfg = LV_VideoConfigSync()
         cfg.config_revision = localConfigSyncRev
@@ -724,20 +1040,80 @@ final class CameraEngine: NSObject, ObservableObject {
             raw.initializeMemory(as: UInt8.self, repeating: 0)
             for (i, b) in tagBytes.enumerated() { raw[i] = b }
         }
-        _ = lv_tally_intercom_send_video_config_sync(th, &cfg)
+        tallyLock.lock()
+        if let th = tallyHandle {
+            _ = lv_tally_intercom_send_video_config_sync(th, &cfg)
+        }
+        tallyLock.unlock()
     }
 
     private func syncIntercomState() {
-        guard let th = tallyHandle else { return }
-        lv_intercom_set_state(th, (pttActive || latchActive) ? 1 : 0, ifbEnabled ? 0 : 1, ifbVolume, 0.0)
+        let talkOpen = pttActive || latchActive
+        let listenOpen = ifbEnabled
+        let vol = ifbVolume
+        tallyLock.lock()
+        isMicTalkOpen = talkOpen
+        isIfbListenOpen = listenOpen
+        if let th = tallyHandle {
+            lv_intercom_set_state(th, talkOpen ? 1 : 0, listenOpen ? 0 : 1, vol, 0.0)
+        }
+        tallyLock.unlock()
     }
 
     // MARK: - AVFoundation Capture Setup (Single + AVCaptureMultiCamSession)
+
+    private func currentVideoOrientation() -> AVCaptureVideoOrientation {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive })
+            ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
+        switch scene?.interfaceOrientation {
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        case .portraitUpsideDown: return .portraitUpsideDown
+        default: return .portrait
+        }
+    }
+
+    private func syncCaptureConnectionOrientation() {
+        let orient = currentVideoOrientation()
+        captureQueue.async { [singleSession, multiCamSession] in
+            for out in singleSession.outputs {
+                if let conn = out.connection(with: .video), conn.isVideoOrientationSupported {
+                    conn.videoOrientation = orient
+                }
+            }
+            if let mc = multiCamSession {
+                for out in mc.outputs {
+                    if let conn = out.connection(with: .video), conn.isVideoOrientationSupported {
+                        conn.videoOrientation = orient
+                    }
+                }
+            }
+        }
+    }
+
+    private nonisolated static func applyFrameRate(_ targetFps: Int, to dev: AVCaptureDevice) {
+        let desired = Double(max(15, targetFps))
+        let supported = dev.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= desired && desired <= $0.maxFrameRate
+        }
+        guard supported else { return }
+        let dur = CMTime(value: 1, timescale: CMTimeScale(targetFps))
+        do {
+            try dev.lockForConfiguration()
+            dev.activeVideoMinFrameDuration = dur
+            dev.activeVideoMaxFrameDuration = dur
+            dev.unlockForConfiguration()
+        } catch {}
+    }
 
     private func configureAndStartCapture() {
         let wantMultiCam = duoMode.isMultiCam && multiCamSession != nil
         let targetRes = resolution
         let targetLens = lens
+        let targetFps = fps
+        let targetOrientation = currentVideoOrientation()
 
         captureQueue.async { [weak self] in
             guard let self else { return }
@@ -759,6 +1135,7 @@ final class CameraEngine: NSObject, ObservableObject {
                         mc.addOutputWithNoConnections(out)
                         if let port = bIn.ports(for: .video, sourceDeviceType: backCam.deviceType, sourceDevicePosition: .back).first {
                             let conn = AVCaptureConnection(inputPorts: [port], output: out)
+                            if conn.isVideoOrientationSupported { conn.videoOrientation = targetOrientation }
                             if mc.canAddConnection(conn) { mc.addConnection(conn) }
                         }
                     }
@@ -767,6 +1144,7 @@ final class CameraEngine: NSObject, ObservableObject {
                     mc.addInputWithNoConnections(fIn)
                 }
                 mc.commitConfiguration()
+                if let backCam { Self.applyFrameRate(min(targetFps, 30), to: backCam) }
                 mc.startRunning()
                 Task { @MainActor in
                     self.primaryDevice = backCam
@@ -776,11 +1154,6 @@ final class CameraEngine: NSObject, ObservableObject {
             } else {
                 if let mc = self.multiCamSession, mc.isRunning { mc.stopRunning() }
                 self.singleSession.beginConfiguration()
-                switch targetRes {
-                case .uhd4k: self.singleSession.sessionPreset = .hd4K3840x2160
-                case .fhd1080: self.singleSession.sessionPreset = .hd1920x1080
-                case .hd720: self.singleSession.sessionPreset = .hd1280x720
-                }
                 for i in self.singleSession.inputs { self.singleSession.removeInput(i) }
                 let pos: AVCaptureDevice.Position = (targetLens == .front) ? .front : .back
                 let devType: AVCaptureDevice.DeviceType = {
@@ -795,6 +1168,20 @@ final class CameraEngine: NSObject, ObservableObject {
                 if let cam, let input = try? AVCaptureDeviceInput(device: cam), self.singleSession.canAddInput(input) {
                     self.singleSession.addInput(input)
                 }
+                let desiredPreset: AVCaptureSession.Preset = {
+                    switch targetRes {
+                    case .uhd4k: return .hd4K3840x2160
+                    case .fhd1080: return .hd1920x1080
+                    case .hd720: return .hd1280x720
+                    }
+                }()
+                if self.singleSession.canSetSessionPreset(desiredPreset) {
+                    self.singleSession.sessionPreset = desiredPreset
+                } else if self.singleSession.canSetSessionPreset(.hd1920x1080) {
+                    self.singleSession.sessionPreset = .hd1920x1080
+                } else if self.singleSession.canSetSessionPreset(.hd1280x720) {
+                    self.singleSession.sessionPreset = .hd1280x720
+                }
                 if self.singleSession.outputs.isEmpty {
                     let out = AVCaptureVideoDataOutput()
                     out.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
@@ -802,7 +1189,13 @@ final class CameraEngine: NSObject, ObservableObject {
                     out.setSampleBufferDelegate(self, queue: self.captureQueue)
                     if self.singleSession.canAddOutput(out) { self.singleSession.addOutput(out) }
                 }
+                for out in self.singleSession.outputs {
+                    if let conn = out.connection(with: .video), conn.isVideoOrientationSupported {
+                        conn.videoOrientation = targetOrientation
+                    }
+                }
                 self.singleSession.commitConfiguration()
+                if let cam { Self.applyFrameRate(targetFps, to: cam) }
                 self.singleSession.startRunning()
                 Task { @MainActor in
                     self.primaryDevice = cam
@@ -813,7 +1206,17 @@ final class CameraEngine: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Telemetry & Tally Polling Timer
+    private func updateThermalTemperature() {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: telemetry.tempC = 34
+        case .fair: telemetry.tempC = 40
+        case .serious: telemetry.tempC = 46
+        case .critical: telemetry.tempC = 52
+        @unknown default: telemetry.tempC = 36
+        }
+    }
+
+    // MARK: - Telemetry Timer
 
     private func startTelemetryTimer() {
         tickTimer?.invalidate()
@@ -823,19 +1226,22 @@ final class CameraEngine: NSObject, ObservableObject {
     }
 
     private func onTelemetryTick() {
-        frameCounter += 6 // 10 Hz tick at 60 fps
-        let totalSecs = 3600 + frameCounter / max(1, fps)
-        let hh = (totalSecs / 3600) % 24
-        let mm = (totalSecs / 60) % 60
-        let ss = totalSecs % 60
-        let ff = frameCounter % max(1, fps)
+        let elapsed = max(0.0, CACurrentMediaTime() - streamStartWallTime)
+        let wholeSecs = Int(elapsed) + 3600
+        let hh = (wholeSecs / 3600) % 24
+        let mm = (wholeSecs / 60) % 60
+        let ss = wholeSecs % 60
+        let frac = elapsed - floor(elapsed)
+        let ff = min(max(0, fps - 1), Int(frac * Double(max(1, fps))))
         telemetry.timecode = String(format: "%02d:%02d:%02d:%02d", hh, mm, ss, ff)
 
         let rawBat = UIDevice.current.batteryLevel
         telemetry.batteryPct = rawBat >= 0 ? Int(rawBat * 100) : 92
+        updateThermalTemperature()
 
         if isDemoMode {
-            let phase = Double(frameCounter) * 0.04
+            demoPhaseCounter += 1
+            let phase = Double(demoPhaseCounter) * 0.24
             telemetry.bitrateMbps = bitrateMbps + sin(phase) * 0.8
             telemetry.latencyMs = 7.4 + cos(phase * 0.7) * 0.6
             telemetry.actualFps = Double(fps)
@@ -851,46 +1257,52 @@ final class CameraEngine: NSObject, ObservableObject {
         }
 
         senderLock.lock()
-        let activeSender = senderHandle
+        var st = LV_StreamStats()
+        var gotStats = false
+        if let s = senderHandle {
+            gotStats = (lv_sender_get_stream_stats(s, &st) == LV_OK.rawValue)
+        }
         senderLock.unlock()
-        if let s = activeSender {
-            var st = LV_StreamStats()
-            if lv_sender_get_stream_stats(s, &st) == LV_OK.rawValue {
-                telemetry.bitrateMbps = st.bitrate_mbps
-                telemetry.latencyMs = st.encode_ms
-                telemetry.actualFps = st.fps
-                telemetry.codecBackend = withUnsafePointer(to: st.codec_backend) {
-                    $0.withMemoryRebound(to: CChar.self, capacity: 64) { String(cString: $0) }
-                }
+
+        if gotStats {
+            telemetry.bitrateMbps = st.bitrate_mbps
+            telemetry.latencyMs = st.encode_ms
+            telemetry.actualFps = st.fps
+            telemetry.codecBackend = withUnsafePointer(to: st.codec_backend) {
+                $0.withMemoryRebound(to: CChar.self, capacity: 64) { String(cString: $0) }
             }
         }
+
+        tallyLock.lock()
         if let th = tallyHandle {
-            lv_tally_intercom_poll(th)
-            directorSpeaking = (lv_tally_intercom_is_director_speaking(th) != 0)
-            duckingGain = lv_tally_intercom_ducking_gain(th)
             lv_tally_intercom_update_camera_telemetry(th, UInt8(clamping: telemetry.batteryPct), Int8(clamping: telemetry.tempC))
         }
+        tallyLock.unlock()
     }
 }
 
 extension CameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-
         let w = Int32(CVPixelBufferGetWidth(pb))
         let h = Int32(CVPixelBufferGetHeight(pb))
-        guard let p0 = CVPixelBufferGetBaseAddressOfPlane(pb, 0)?.assumingMemoryBound(to: UInt8.self),
-              let p1 = CVPixelBufferGetBaseAddressOfPlane(pb, 1)?.assumingMemoryBound(to: UInt8.self) else { return }
-        let s0 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 0))
-        let s1 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 1))
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let tsUs = UInt32(max(0, Int64(CMTimeGetSeconds(pts) * 1_000_000.0)) & 0xFFFFFFFF)
 
         senderLock.lock()
         defer { senderLock.unlock() }
         guard let s = senderHandle else { return }
-        _ = lv_sender_push_cvpixelbuffer_planes(s, p0, s0, p1, s1, w, h, Int32(LV_PIXEL_FORMAT_NV12.rawValue), tsUs)
+
+        // Prefer true zero-copy IOSurface CVPixelBufferRef path into VideoToolbox (H.264/H.265).
+        let nativeRc = lv_sender_push_cvpixelbuffer(s, Unmanaged.passUnretained(pb).toOpaque(), w, h, tsUs)
+        if nativeRc == LV_ERR_UNSUPPORTED.rawValue {
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+            guard let p0 = CVPixelBufferGetBaseAddressOfPlane(pb, 0)?.assumingMemoryBound(to: UInt8.self),
+                  let p1 = CVPixelBufferGetBaseAddressOfPlane(pb, 1)?.assumingMemoryBound(to: UInt8.self) else { return }
+            let s0 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 0))
+            let s1 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 1))
+            _ = lv_sender_push_cvpixelbuffer_planes(s, p0, s0, p1, s1, w, h, Int32(LV_PIXEL_FORMAT_NV12.rawValue), tsUs)
+        }
     }
 }

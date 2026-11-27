@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -71,6 +72,7 @@ private:
     Config cfg_;
     PushFn tx_;
     PopFn rx_;
+    mutable std::mutex bus_mu_;
     ShmAudioBus bus_;
     std::thread thread_;
     std::atomic<bool> stop_{false};

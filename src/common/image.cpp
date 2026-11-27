@@ -85,7 +85,7 @@ void swap_rb_inplace(Image& img) {
 }
 
 double psnr_rgb(const Image& a, const Image& b) {
-    if (a.width != b.width || a.height != b.height) return 0.0;
+    if (a.width <= 0 || a.height <= 0 || a.width != b.width || a.height != b.height) return 0.0;
     const int ar = (a.order == PixelOrder::kBGRA) ? 2 : 0;
     const int ab = 2 - ar;
     const int br = (b.order == PixelOrder::kBGRA) ? 2 : 0;
@@ -106,7 +106,7 @@ double psnr_rgb(const Image& a, const Image& b) {
 }
 
 double psnr_luma(const Image& a, const Image& b) {
-    if (a.width != b.width || a.height != b.height) return 0.0;
+    if (a.width <= 0 || a.height <= 0 || a.width != b.width || a.height != b.height) return 0.0;
     const int ar = (a.order == PixelOrder::kBGRA) ? 2 : 0;
     const int ab = 2 - ar;
     const int br = (b.order == PixelOrder::kBGRA) ? 2 : 0;
@@ -126,23 +126,24 @@ double psnr_luma(const Image& a, const Image& b) {
 }
 
 bool write_ppm(const char* path, const Image& img) {
+    if (!path || img.width <= 0 || img.height <= 0 || img.data.size() < size_t(img.height) * img.stride) return false;
     FILE* f = std::fopen(path, "wb");
     if (!f) return false;
-    std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height);
+    bool ok = std::fprintf(f, "P6\n%d %d\n255\n", img.width, img.height) > 0;
     const int r_idx = (img.order == PixelOrder::kBGRA) ? 2 : 0;
     const int b_idx = 2 - r_idx;
     std::vector<uint8_t> line(size_t(img.width) * 3);
-    for (int y = 0; y < img.height; ++y) {
+    for (int y = 0; y < img.height && ok; ++y) {
         const uint8_t* p = img.row(y);
         for (int x = 0; x < img.width; ++x) {
             line[size_t(x) * 3 + 0] = p[x * 4 + r_idx];
             line[size_t(x) * 3 + 1] = p[x * 4 + 1];
             line[size_t(x) * 3 + 2] = p[x * 4 + b_idx];
         }
-        std::fwrite(line.data(), 1, line.size(), f);
+        if (std::fwrite(line.data(), 1, line.size(), f) != line.size()) ok = false;
     }
-    std::fclose(f);
-    return true;
+    if (std::fclose(f) != 0) ok = false;
+    return ok;
 }
 
 }  // namespace lv

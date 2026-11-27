@@ -4,12 +4,13 @@ import Network
 import UIKit
 
 /// Discovers BOTH:
-/// 1) Desktop LanVid Video / Studio receivers (mDNS `_lanvid._udp` + unicast `/24` sweep on UDP :5023), and
+/// 1) Desktop LanVid Video / Studio receivers (mDNS `_lanvid._udp` + unicast `/24` sweep on UDP :5023 & :5099), and
 /// 2) Paired iPhone Duo `LanVid Camera` peers on the local Wi-Fi (UDP :5028), exchanging synchronized timecode,
 ///    shared CAM A / CAM B Tally state, and remote Director Companion focus/exposure commands.
 @MainActor
 final class DuoSyncBrowser: ObservableObject {
     static let videoDiscoveryPort: UInt16 = 5023
+    static let legacyDiscoveryPort: UInt16 = 5099
     static let duoSyncPort: UInt16 = 5028
 
     @Published private(set) var studios: [DiscoveredStudio] = []
@@ -25,11 +26,20 @@ final class DuoSyncBrowser: ObservableObject {
     private var sweepTask: Task<Void, Never>?
     private var localRole: DuoRole = .camA
     private var localLabel: String = "CAM A"
+    private var localServiceName: String = ""
+
+    deinit {
+        sweepTask?.cancel()
+        browser?.cancel()
+        listener?.cancel()
+        for c in resolving.values { c.cancel() }
+    }
 
     func start(localRole: DuoRole, localLabel: String, demoMode: Bool) {
         stop()
         self.localRole = localRole
         self.localLabel = localLabel
+        self.localServiceName = "\(localLabel) (\(UIDevice.current.name))"
 
         if demoMode || CommandLine.arguments.contains("-LVDemo") || CommandLine.arguments.contains("-LVFakePeers") {
             studios = [
@@ -79,10 +89,13 @@ final class DuoSyncBrowser: ObservableObject {
         guard let data = msg.data(using: .utf8) else { return }
         let conn = NWConnection(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: Self.duoSyncPort)!, using: .udp)
         conn.stateUpdateHandler = { state in
-            if case .ready = state {
+            switch state {
+            case .ready:
                 conn.send(content: data, completion: .contentProcessed { _ in conn.cancel() })
-            } else if case .failed = state {
+            case .failed, .waiting:
                 conn.cancel()
+            default:
+                break
             }
         }
         conn.start(queue: .global(qos: .userInitiated))
@@ -117,8 +130,10 @@ final class DuoSyncBrowser: ObservableObject {
     }
 
     private func handleBonjour(_ results: Set<NWBrowser.Result>) {
+        let ownIp = Self.primaryIPv4Address()
         for r in results {
             guard case let .service(name, _, _, _) = r.endpoint else { continue }
+            if name == localServiceName { continue }
             if resolving[name] != nil { continue }
             var roleTag = "video"
             if case let .bonjour(txt) = r.metadata, let rv = txt["role"] {
@@ -133,28 +148,52 @@ final class DuoSyncBrowser: ObservableObject {
             let c = NWConnection(to: r.endpoint, using: params)
             resolving[name] = c
             c.stateUpdateHandler = { [weak self, weak c] state in
-                guard case .ready = state, let c else { return }
-                if case let .hostPort(host, port) = c.currentPath?.remoteEndpoint {
-                    var h = "\(host)"
-                    if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
-                    let p = port.rawValue
-                    Task { @MainActor in
-                        guard let self else { return }
-                        if roleTag == "camera" || roleTag == "duo" {
-                            self.upsertDuoPeer(host: h, name: name, role: .camB, tally: .standby,
-                                               timecode: "01:00:00:00", focus: 0.5, iso: 400, shutter: 180, wb: 5600)
-                        } else {
-                            let ep = DiscoveredStudio(name: name, host: h, videoPort: p == 5022 ? 5006 : p, tallyPort: 5022)
-                            if !self.studios.contains(where: { $0.host == ep.host }) {
-                                self.studios.append(ep)
+                switch state {
+                case .ready:
+                    guard let c else { return }
+                    if case let .hostPort(host, port) = c.currentPath?.remoteEndpoint {
+                        var h = "\(host)"
+                        if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
+                        let p = port.rawValue
+                        Task { @MainActor in
+                            guard let self else { return }
+                            if h != ownIp && h != "127.0.0.1" {
+                                if roleTag == "camera" || roleTag == "duo" {
+                                    self.upsertDuoPeer(host: h, name: name, role: .camB, tally: .standby,
+                                                       timecode: "01:00:00:00", focus: 0.5, iso: 400, shutter: 180, wb: 5600)
+                                } else {
+                                    let ep = DiscoveredStudio(name: name, host: h, videoPort: p == 5022 ? 5006 : p, tallyPort: 5022)
+                                    if !self.studios.contains(where: { $0.host == ep.host }) {
+                                        self.studios.append(ep)
+                                    }
+                                }
                             }
+                            self.resolving[name]?.cancel()
+                            self.resolving[name] = nil
                         }
-                        self.resolving[name]?.cancel()
-                        self.resolving[name] = nil
+                    } else {
+                        Task { @MainActor in
+                            self?.resolving[name]?.cancel()
+                            self?.resolving[name] = nil
+                        }
                     }
+                case .failed, .waiting, .cancelled:
+                    Task { @MainActor in
+                        self?.resolving[name]?.cancel()
+                        self?.resolving[name] = nil
+                    }
+                default:
+                    break
                 }
             }
             c.start(queue: .main)
+            // Safety timeout to prevent leaked resolving entries
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, let pending = self.resolving[name], pending === c else { return }
+                pending.cancel()
+                self.resolving[name] = nil
+            }
         }
     }
 
@@ -166,7 +205,7 @@ final class DuoSyncBrowser: ObservableObject {
             params.allowLocalEndpointReuse = true
             let l = try NWListener(using: params, on: NWEndpoint.Port(rawValue: Self.duoSyncPort)!)
             l.service = NWListener.Service(
-                name: "\(localLabel) (\(UIDevice.current.name))",
+                name: localServiceName,
                 type: "_lanvid._udp",
                 txtRecord: NWTXTRecord(["role": "camera", "duo": localRole.rawValue])
             )
@@ -193,6 +232,7 @@ final class DuoSyncBrowser: ObservableObject {
     }
 
     private func handleDuoMessage(_ text: String, from host: String) {
+        if host == Self.primaryIPv4Address() || host == "127.0.0.1" { return }
         let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 10, parts[0] == "LV_DUO" else { return }
         let kind = parts[1]
@@ -245,10 +285,12 @@ final class DuoSyncBrowser: ObservableObject {
             let curFlags = fcntl(sock, F_GETFL, 0)
             _ = fcntl(sock, F_SETFL, curFlags | O_NONBLOCK)
 
-            let probe = Array("LANVID_DISCOVER_V2|video".utf8)
             let duoPing = Array("LV_DUO|SYNC|\(myRole.rawValue)|\(myLabel)|0|01:00:00:00|0.500|400|180|5600".utf8)
 
             while !Task.isCancelled {
+                let nonce = UInt32.random(in: 1...UInt32.max)
+                let probe = Array("LVDS_PRB|\(nonce)".utf8)
+
                 for h in 1...254 where h != selfHost {
                     if Task.isCancelled { break }
                     let ipStr = "\(prefix)\(h)"
@@ -257,11 +299,14 @@ final class DuoSyncBrowser: ObservableObject {
                     addr.sin_family = sa_family_t(AF_INET)
                     inet_pton(AF_INET, ipStr, &addr.sin_addr)
 
-                    addr.sin_port = Self.videoDiscoveryPort.bigEndian
-                    _ = probe.withUnsafeBytes { buf in
-                        withUnsafePointer(to: &addr) {
-                            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                                sendto(sock, buf.baseAddress, buf.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    // Probe both LanVid Video discovery port (:5023) and legacy discovery port (:5099)
+                    for port in [Self.videoDiscoveryPort, Self.legacyDiscoveryPort] {
+                        addr.sin_port = port.bigEndian
+                        _ = probe.withUnsafeBytes { buf in
+                            withUnsafePointer(to: &addr) {
+                                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                                    sendto(sock, buf.baseAddress, buf.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                                }
                             }
                         }
                     }
@@ -274,7 +319,7 @@ final class DuoSyncBrowser: ObservableObject {
                             }
                         }
                     }
-                    usleep(450)
+                    try? await Task.sleep(nanoseconds: 450_000)
                 }
 
                 // Collect replies for 600 ms
@@ -293,7 +338,9 @@ final class DuoSyncBrowser: ObservableObject {
                         var sinAddr = from.sin_addr
                         inet_ntop(AF_INET, &sinAddr, &ipC, socklen_t(INET_ADDRSTRLEN))
                         let host = String(cString: ipC)
-                        await self?.parseSweepReply(str, host: host)
+                        if host != localIp && host != "127.0.0.1" {
+                            await self?.parseSweepReply(str, host: host)
+                        }
                     } else {
                         try? await Task.sleep(nanoseconds: 25_000_000)
                     }
@@ -308,15 +355,18 @@ final class DuoSyncBrowser: ObservableObject {
             handleDuoMessage(text, from: host)
             return
         }
-        // LanVid Video responder format (contains port and name)
-        let parts = text.split(separator: "|").map(String.init)
-        if parts.count >= 3 {
-            let port = UInt16(parts[1]) ?? 5006
-            let name = parts.last ?? "LanVid Video"
-            let ep = DiscoveredStudio(name: name, host: host, videoPort: port, tallyPort: 5022)
-            if !studios.contains(where: { $0.host == host }) {
-                studios.append(ep)
-            }
+        // Standard LanVid DiscoveryResponder format:
+        // LVDS_RSP|<port>|<os>|<simd>|<device_name>[|AOIP=...][|ROLE=<role>]|<nonce>
+        guard text.hasPrefix("LVDS_RSP|") else { return }
+        let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 5, let port = UInt16(parts[1]), port > 0 else { return }
+        for extra in parts.dropFirst(5) {
+            if extra == "ROLE=audio" { return }
+        }
+        let name = parts[4].isEmpty ? "LanVid Video" : parts[4]
+        let ep = DiscoveredStudio(name: name, host: host, videoPort: port, tallyPort: 5022)
+        if !studios.contains(where: { $0.host == host && $0.videoPort == port }) {
+            studios.append(ep)
         }
     }
 

@@ -90,6 +90,7 @@ private:
 
     // Playout clock state
     bool clock_init_ = false;
+    bool has_media_ts_ = false;
     uint32_t last_raw_ts32_ = 0;
     uint64_t unwrapped_media_us_ = 0;
     int64_t clock_offset_us_ = 0;

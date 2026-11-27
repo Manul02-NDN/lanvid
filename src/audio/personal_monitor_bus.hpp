@@ -142,7 +142,8 @@ private:
     static constexpr uint32_t kLookahead = 48;     // 1 ms @ 48 kHz
     static constexpr uint32_t kLookaheadBuf = kLookahead;
     std::array<float, kLookaheadBuf> la_l_{}, la_r_{}, la_req_{}, la_env_{};
-    float la_env_sum_ = float(kLookahead);
+    double la_env_sum_ = double(kLookahead);
+    uint32_t la_recalc_cnt_ = 0;
     uint32_t la_pos_ = 0;
     float cur_master_gain_ = 1.0f;
     float tgt_master_gain_ = 1.0f;
@@ -297,7 +298,7 @@ private:
     void refresh_any_redundancy_locked();
     void apply_bitrate_locked(ClientSlot& s, uint16_t bitrate_kbps);
 
-    int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep);
+    int find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep, uint64_t now);
     void handle_control_packet(const PacketHeader& h, const uint8_t* payload, size_t len,
                                const Endpoint& src, uint64_t now);
     void send_meta_response(const Endpoint& dst, uint32_t client_id, int slot);
@@ -393,8 +394,8 @@ public:
 
     // Physical NIC selection (e.g. Wi-Fi en0/wlan0 + USB-C Ethernet en2/eth0 1+1)
     bool set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
-    std::string primary_nic_ip() const { return primary_nic_ip_; }
-    std::string secondary_nic_ip() const { return secondary_nic_ip_; }
+    std::string primary_nic_ip() const;
+    std::string secondary_nic_ip() const;
 
     MonitorDanteTelemetry dante_telemetry() const;
     uint64_t duplicates_recovered() const {
@@ -472,12 +473,14 @@ private:
     uint64_t flow_ow_last_us_ = 0;
     uint32_t flow_ow_samples_ = 0;
     double flow_ow_jitter_ema_ = 0.0;
+    uint64_t last_primary_flow_us_ = 0;
     std::array<void*, kMaxMonitorFlowChannels> flow_opus_dec_{};
     std::vector<float> flow_dec_scratch_;
 
     uint32_t sample_rate_ = 48000;
     uint32_t client_id_ = 0;
     std::atomic<bool> connected_{false};
+    mutable std::mutex sock_mu_;
     std::string primary_nic_ip_;
     std::string secondary_nic_ip_;
     UdpSocket sock_;

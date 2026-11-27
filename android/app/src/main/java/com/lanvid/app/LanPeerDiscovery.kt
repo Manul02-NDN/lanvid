@@ -12,16 +12,16 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.net.Inet4Address
+import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Bulletproof 3-layer LAN discovery for LanVid Camera:
  *   1. Acquires Android WifiManager.MulticastLock so Wi-Fi chips never drop broadcast/mDNS replies.
- *   2. Continuous mDNS / Bonjour (_lanvid._udp) via NsdManager (works even when routers block UDP broadcast).
+ *   2. Continuous mDNS / Bonjour (_lanvid._udp) via NsdManager (serialized resolve on API < 34,
+ *      tracked ServiceInfoCallback cleanup on API 34+).
  *   3. Continuous UDP Broadcast probe via LanVidNative.scanLanPeers (:5023 Video, :5021 Audio, :5099 Legacy).
- *
- * Results are merged, deduplicated (excluding loopback), and sorted with [VIDEO] studios first.
  */
 class LanPeerDiscovery(context: Context) {
     private val appCtx = context.applicationContext
@@ -33,16 +33,24 @@ class LanPeerDiscovery(context: Context) {
     private var lock: WifiManager.MulticastLock? = null
     private var listener: NsdManager.DiscoveryListener? = null
     private val running = AtomicBoolean(false)
+    private val released = AtomicBoolean(false)
 
     private val mdnsPeers = LinkedHashMap<String, LanPeer>()
     private val udpPeers = LinkedHashMap<String, LanPeer>()
     private val peersLock = Any()
+
+    // Track API 34+ callbacks for clean unregistration in stopMdns()
+    private val activeInfoCallbacks = LinkedHashSet<Any>()
+    // Serialize API < 34 resolveService() calls (NsdManager rejects concurrent resolves)
+    private val resolveQueue = ArrayDeque<NsdServiceInfo>()
+    private var resolveInFlight = false
 
     val peers = mutableStateListOf<LanPeer>()
     var scanning by mutableStateOf(false)
         private set
 
     fun start() {
+        if (released.get()) return
         if (!running.compareAndSet(false, true)) {
             triggerUdpScan()
             return
@@ -53,6 +61,7 @@ class LanPeerDiscovery(context: Context) {
     }
 
     fun refreshNow() {
+        if (released.get()) return
         if (!running.get()) {
             start()
             return
@@ -67,6 +76,12 @@ class LanPeerDiscovery(context: Context) {
         releaseMulticastLock()
     }
 
+    fun release() {
+        if (!released.compareAndSet(false, true)) return
+        stop()
+        io.shutdownNow()
+    }
+
     private val udpLoop = object : Runnable {
         override fun run() {
             if (!running.get()) return
@@ -76,19 +91,21 @@ class LanPeerDiscovery(context: Context) {
     }
 
     private fun triggerUdpScan() {
-        if (!running.get()) return
+        if (!running.get() || released.get()) return
         main.post { scanning = true }
-        io.execute {
-            val found = runCatching { LanVidNative.scanLanPeers(600) }.getOrDefault(emptyList())
-            synchronized(peersLock) {
-                udpPeers.clear()
-                for (p in found) {
-                    if (p.ip.isBlank() || p.ip == "127.0.0.1" || p.ip == "0.0.0.0") continue
-                    udpPeers["${p.ip}:${p.port}"] = p
+        runCatching {
+            io.execute {
+                val found = runCatching { LanVidNative.scanLanPeers(600) }.getOrDefault(emptyList())
+                synchronized(peersLock) {
+                    udpPeers.clear()
+                    for (p in found) {
+                        if (p.ip.isBlank() || p.ip == "127.0.0.1" || p.ip == "0.0.0.0") continue
+                        udpPeers["${p.ip}:${p.port}"] = p
+                    }
                 }
+                publishMerged()
+                main.post { scanning = false }
             }
-            publishMerged()
-            main.post { scanning = false }
         }
     }
 
@@ -119,67 +136,118 @@ class LanPeerDiscovery(context: Context) {
 
     private fun resolveService(mgr: NsdManager, info: NsdServiceInfo) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            runCatching {
-                mgr.registerServiceInfoCallback(info, io, object : NsdManager.ServiceInfoCallback {
-                    override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) = Unit
-                    override fun onServiceUpdated(s: NsdServiceInfo) {
-                        val ip = s.hostAddresses.firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
-                            ?: return
-                        if (s.port <= 0) return
-                        val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
-                        // Ignore pure audio-only monitor servers on port 5020 when advertising video targets
-                        val peer = LanPeer(
-                            ip = ip,
-                            port = s.port,
-                            name = s.serviceName ?: "LanVid PC",
-                            os = "lan",
-                            simd = "mDNS",
-                            rttMs = 1,
-                            role = role
-                        )
-                        synchronized(peersLock) {
-                            mdnsPeers["${peer.ip}:${peer.port}"] = peer
-                        }
-                        publishMerged()
-                        runCatching { mgr.unregisterServiceInfoCallback(this) }
+            if (released.get()) return
+            val cb = object : NsdManager.ServiceInfoCallback {
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    synchronized(peersLock) { activeInfoCallbacks.remove(this) }
+                }
+                override fun onServiceUpdated(s: NsdServiceInfo) {
+                    val ip = s.hostAddresses.firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
+                        ?: return
+                    if (s.port <= 0) return
+                    val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
+                    val peer = LanPeer(
+                        ip = ip,
+                        port = s.port,
+                        name = s.serviceName ?: "LanVid PC",
+                        os = "lan",
+                        simd = "mDNS",
+                        rttMs = 1,
+                        role = role
+                    )
+                    synchronized(peersLock) {
+                        mdnsPeers["${peer.ip}:${peer.port}"] = peer
+                        activeInfoCallbacks.remove(this)
                     }
-                    override fun onServiceLost() = Unit
-                    override fun onServiceInfoCallbackUnregistered() = Unit
-                })
+                    publishMerged()
+                    runCatching { mgr.unregisterServiceInfoCallback(this) }
+                }
+                override fun onServiceLost() = Unit
+                override fun onServiceInfoCallbackUnregistered() {
+                    synchronized(peersLock) { activeInfoCallbacks.remove(this) }
+                }
+            }
+            synchronized(peersLock) { activeInfoCallbacks.add(cb) }
+            val ok = runCatching { mgr.registerServiceInfoCallback(info, io, cb) }.isSuccess
+            if (!ok) {
+                synchronized(peersLock) { activeInfoCallbacks.remove(cb) }
             }
         } else {
-            @Suppress("DEPRECATION")
-            runCatching {
-                mgr.resolveService(info, object : NsdManager.ResolveListener {
-                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-                    override fun onServiceResolved(s: NsdServiceInfo) {
-                        val host = s.host as? Inet4Address ?: return
-                        if (host.isLoopbackAddress || s.port <= 0) return
-                        val ip = host.hostAddress ?: return
-                        val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
-                        val peer = LanPeer(
-                            ip = ip,
-                            port = s.port,
-                            name = s.serviceName ?: "LanVid PC",
-                            os = "lan",
-                            simd = "mDNS",
-                            rttMs = 1,
-                            role = role
-                        )
-                        synchronized(peersLock) {
-                            mdnsPeers["${peer.ip}:${peer.port}"] = peer
-                        }
-                        publishMerged()
-                    }
-                })
+            synchronized(peersLock) {
+                if (resolveQueue.size < 32) {
+                    resolveQueue.addLast(info)
+                }
+                if (!resolveInFlight) {
+                    resolveInFlight = true
+                    pumpNextLegacyResolveLocked(mgr)
+                }
             }
         }
     }
 
+    @Suppress("DEPRECATION")
+    private fun pumpNextLegacyResolveLocked(mgr: NsdManager) {
+        if (!running.get() || resolveQueue.isEmpty()) {
+            resolveInFlight = false
+            return
+        }
+        val next = resolveQueue.removeFirst()
+        val ok = runCatching {
+            mgr.resolveService(next, object : NsdManager.ResolveListener {
+                override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                    synchronized(peersLock) { pumpNextLegacyResolveLocked(mgr) }
+                }
+                override fun onServiceResolved(s: NsdServiceInfo) {
+                    val host = s.host as? Inet4Address
+                    if (host != null && !host.isLoopbackAddress && s.port > 0) {
+                        val ip = host.hostAddress
+                        if (ip != null) {
+                            val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
+                            val peer = LanPeer(
+                                ip = ip,
+                                port = s.port,
+                                name = s.serviceName ?: "LanVid PC",
+                                os = "lan",
+                                simd = "mDNS",
+                                rttMs = 1,
+                                role = role
+                            )
+                            synchronized(peersLock) {
+                                mdnsPeers["${peer.ip}:${peer.port}"] = peer
+                            }
+                            publishMerged()
+                        }
+                    }
+                    synchronized(peersLock) { pumpNextLegacyResolveLocked(mgr) }
+                }
+            })
+        }.isSuccess
+        if (!ok) {
+            pumpNextLegacyResolveLocked(mgr)
+        }
+    }
+
     private fun stopMdns() {
-        val l = listener ?: return
+        val l = listener
         listener = null
-        runCatching { nsd?.stopServiceDiscovery(l) }
+        if (l != null) {
+            runCatching { nsd?.stopServiceDiscovery(l) }
+        }
+        val callbacksCopy: List<Any>
+        synchronized(peersLock) {
+            resolveQueue.clear()
+            resolveInFlight = false
+            callbacksCopy = activeInfoCallbacks.toList()
+            activeInfoCallbacks.clear()
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val mgr = nsd ?: return
+            for (cb in callbacksCopy) {
+                (cb as? NsdManager.ServiceInfoCallback)?.let {
+                    runCatching { mgr.unregisterServiceInfoCallback(it) }
+                }
+            }
+        }
     }
 
     private fun acquireMulticastLock() {
@@ -208,7 +276,6 @@ class LanPeerDiscovery(context: Context) {
     private fun publishMerged() {
         val merged = synchronized(peersLock) {
             val map = LinkedHashMap<String, LanPeer>()
-            // UDP replies carry full OS/SIMD/RTT + exact stream port; mDNS fills in if broadcast is blocked
             for ((k, v) in mdnsPeers) map[k] = v
             for ((k, v) in udpPeers) map[k] = v
             map.values.sortedWith(compareBy<LanPeer>({ roleRank(it.role) }, { it.rttMs }, { it.name }))

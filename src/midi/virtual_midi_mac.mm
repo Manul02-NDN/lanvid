@@ -3,8 +3,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMIDI/CoreMIDI.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -62,7 +64,8 @@ void dispatch_event_list(const MIDIEventList* evtlist, const VirtualMidiPort::Ca
                     const uint32_t word2 = pkt->words[w + 1];
                     if (hi == 0x90u || hi == 0x80u) {
                         const uint8_t note = uint8_t((word >> 8) & 0x7Fu);
-                        const uint8_t vel = uint8_t((word2 >> 25) & 0x7Fu);
+                        uint8_t vel = uint8_t((word2 >> 25) & 0x7Fu);
+                        if (hi == 0x90u && (word2 >> 16) != 0 && vel == 0) vel = 1;  // preserve quiet Note On
                         cb(status, note, vel, ts);
                     } else if (hi == 0xB0u) {
                         const uint8_t cc = uint8_t((word >> 8) & 0x7Fu);
@@ -77,10 +80,12 @@ void dispatch_event_list(const MIDIEventList* evtlist, const VirtualMidiPort::Ca
                     }
                 }
                 w += 2;
-            } else if (mt == 0x3u || mt == 0x5u) {
-                w += (mt == 0x5u) ? 4 : 2;  // SysEx64 / SysEx128
+            } else if (mt == 0x5u || mt == 0xDu || mt == 0xFu) {
+                w += 4;  // 128-bit UMP (Data128 / Flex Data / UMP Stream)
+            } else if (mt == 0x3u || mt == 0x8u || mt == 0x9u || mt == 0xAu) {
+                w += 2;  // 64-bit UMP
             } else {
-                w += 1;
+                w += 1;  // 32-bit UMP
             }
         }
         pkt = MIDIEventPacketNext(pkt);
@@ -90,27 +95,37 @@ void dispatch_event_list(const MIDIEventList* evtlist, const VirtualMidiPort::Ca
 }  // namespace
 
 struct VirtualMidiPort::Impl {
+    struct CallbackState {
+        std::mutex mu;
+        std::atomic<bool> alive{false};
+        Callback cb;
+    };
+    struct CoreMidiHandles {
+        MIDIClientRef client = 0;
+        MIDIEndpointRef virt_source = 0;
+        MIDIEndpointRef virt_dest = 0;
+    };
+
     mutable std::mutex mu;
     VirtualMidiStatus st{};
-    Callback cb;
+    std::shared_ptr<CallbackState> cb_state = std::make_shared<CallbackState>();
     MIDIClientRef client = 0;
     MIDIEndpointRef virt_source = 0;  // DAW MIDI Input ("LanVid MIDI")
     MIDIEndpointRef virt_dest = 0;    // DAW MIDI Output ("LanVid MIDI")
 
-    void close_locked() {
-        if (virt_source) {
-            MIDIEndpointDispose(virt_source);
-            virt_source = 0;
-        }
-        if (virt_dest) {
-            MIDIEndpointDispose(virt_dest);
-            virt_dest = 0;
-        }
-        if (client) {
-            MIDIClientDispose(client);
-            client = 0;
-        }
+    CoreMidiHandles detach_locked() {
+        CoreMidiHandles h{client, virt_source, virt_dest};
+        client = 0;
+        virt_source = 0;
+        virt_dest = 0;
         st = VirtualMidiStatus{};
+        return h;
+    }
+
+    static void dispose_handles(const CoreMidiHandles& h) {
+        if (h.virt_source) MIDIEndpointDispose(h.virt_source);
+        if (h.virt_dest) MIDIEndpointDispose(h.virt_dest);
+        if (h.client) MIDIClientDispose(h.client);
     }
 };
 
@@ -118,48 +133,62 @@ VirtualMidiPort::VirtualMidiPort() : impl_(std::make_unique<Impl>()) {}
 VirtualMidiPort::~VirtualMidiPort() { close(); }
 
 bool VirtualMidiPort::open(const std::string& daw_port_name, Callback on_from_daw) {
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    impl_->close_locked();
-    impl_->cb = std::move(on_from_daw);
+    close();
     const std::string name = daw_port_name.empty() ? "LanVid MIDI" : daw_port_name;
+
+    auto new_cb_state = std::make_shared<Impl::CallbackState>();
+    new_cb_state->cb = std::move(on_from_daw);
+    new_cb_state->alive.store(true, std::memory_order_release);
 
     CFStringRef cf_name = CFStringCreateWithCString(kCFAllocatorDefault, name.c_str(), kCFStringEncodingUTF8);
     if (!cf_name) return false;
 
-    OSStatus err = MIDIClientCreateWithBlock(CFSTR("LanVid MIDI Client"), &impl_->client,
+    Impl::CoreMidiHandles h{};
+    OSStatus err = MIDIClientCreateWithBlock(CFSTR("LanVid MIDI Client"), &h.client,
                                              ^(const MIDINotification*) {});
     if (err != noErr) {
         CFRelease(cf_name);
-        impl_->close_locked();
+        Impl::dispose_handles(h);
         return false;
     }
 
-    // Virtual Source: events sent by LanVid Studio via MIDIReceivedEventList appear as DAW MIDI Input.
-    err = MIDISourceCreateWithProtocol(impl_->client, cf_name, kMIDIProtocol_1_0, &impl_->virt_source);
+    // Virtual Source: events sent by LanVid via MIDIReceivedEventList appear as DAW MIDI Input.
+    err = MIDISourceCreateWithProtocol(h.client, cf_name, kMIDIProtocol_1_0, &h.virt_source);
     if (err != noErr) {
         CFRelease(cf_name);
-        impl_->close_locked();
+        Impl::dispose_handles(h);
         return false;
     }
-    set_endpoint_properties(impl_->virt_source, cf_name, kLanVidMidiSourceUniqueId);
+    set_endpoint_properties(h.virt_source, cf_name, kLanVidMidiSourceUniqueId);
 
     // Virtual Destination: events sent by DAW to "LanVid MIDI" arrive in our non-blocking callback.
-    Impl* self = impl_.get();
+    std::shared_ptr<Impl::CallbackState> cb_ref = new_cb_state;
     err = MIDIDestinationCreateWithProtocol(
-        impl_->client, cf_name, kMIDIProtocol_1_0, &impl_->virt_dest,
+        h.client, cf_name, kMIDIProtocol_1_0, &h.virt_dest,
         ^(const MIDIEventList* evtlist, void*) {
-            if (self && self->cb) {
-                dispatch_event_list(evtlist, self->cb);
+            if (!cb_ref || !cb_ref->alive.load(std::memory_order_acquire)) return;
+            Callback fn;
+            {
+                std::lock_guard<std::mutex> clk(cb_ref->mu);
+                if (!cb_ref->alive.load(std::memory_order_relaxed) || !cb_ref->cb) return;
+                fn = cb_ref->cb;
             }
+            dispatch_event_list(evtlist, fn);
         });
     if (err != noErr) {
         CFRelease(cf_name);
-        impl_->close_locked();
+        new_cb_state->alive.store(false, std::memory_order_release);
+        Impl::dispose_handles(h);
         return false;
     }
-    set_endpoint_properties(impl_->virt_dest, cf_name, kLanVidMidiDestinationUniqueId);
+    set_endpoint_properties(h.virt_dest, cf_name, kLanVidMidiDestinationUniqueId);
     CFRelease(cf_name);
 
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    impl_->cb_state = std::move(new_cb_state);
+    impl_->client = h.client;
+    impl_->virt_source = h.virt_source;
+    impl_->virt_dest = h.virt_dest;
     impl_->st.open = true;
     impl_->st.backend = VirtualMidiBackend::kCoreMidi;
     impl_->st.daw_port_name = name;
@@ -171,8 +200,19 @@ bool VirtualMidiPort::open(const std::string& daw_port_name, Callback on_from_da
 
 void VirtualMidiPort::close() {
     if (!impl_) return;
-    std::lock_guard<std::mutex> lk(impl_->mu);
-    impl_->close_locked();
+    Impl::CoreMidiHandles h{};
+    std::shared_ptr<Impl::CallbackState> old_cb;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        h = impl_->detach_locked();
+        old_cb = impl_->cb_state;
+    }
+    if (old_cb) {
+        std::lock_guard<std::mutex> clk(old_cb->mu);
+        old_cb->alive.store(false, std::memory_order_release);
+        old_cb->cb = nullptr;
+    }
+    Impl::dispose_handles(h);
 }
 
 bool VirtualMidiPort::is_open() const {

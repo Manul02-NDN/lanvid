@@ -1,6 +1,8 @@
 #include "midi/midi_device_manager.hpp"
 
+#include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include "common/clock.hpp"
 
@@ -58,18 +60,26 @@ std::vector<MidiDeviceInfo> list_midi_outputs() {
 
 struct MidiInputPort::Impl {
     HMIDIIN handle = nullptr;
+    std::mutex cb_mu;
+    std::atomic<bool> alive{false};
     Callback cb;
 
     static void CALLBACK midi_in_proc(HMIDIIN, UINT msg, DWORD_PTR instance, DWORD_PTR param1, DWORD_PTR) {
         if (msg != MIM_DATA) return;
         auto* self = reinterpret_cast<Impl*>(instance);
-        if (!self || !self->cb) return;
+        if (!self || !self->alive.load(std::memory_order_acquire)) return;
+        Callback fn;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu);
+            if (!self->alive.load(std::memory_order_relaxed) || !self->cb) return;
+            fn = self->cb;
+        }
         const uint64_t ts = now_us();  // high-resolution QPC timestamp at arrival
         const uint32_t raw = uint32_t(param1);
         const uint8_t st = uint8_t(raw & 0xFFu);
         const uint8_t d1 = uint8_t((raw >> 8) & 0xFFu);
         const uint8_t d2 = uint8_t((raw >> 16) & 0xFFu);
-        self->cb(st, d1, d2, ts);
+        fn(st, d1, d2, ts);
     }
 };
 
@@ -86,22 +96,34 @@ bool MidiInputPort::open(int device_index, const std::string& device_name, Callb
         }
     }
     if (idx < 0 || idx >= int(devs.size())) return false;
-    impl_->cb = std::move(cb);
+    {
+        std::lock_guard<std::mutex> lk(impl_->cb_mu);
+        impl_->cb = std::move(cb);
+        impl_->alive.store(true, std::memory_order_release);
+    }
     if (midiInOpen(&impl_->handle, UINT(idx), reinterpret_cast<DWORD_PTR>(&Impl::midi_in_proc),
                    reinterpret_cast<DWORD_PTR>(impl_.get()), CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
         impl_->handle = nullptr;
+        std::lock_guard<std::mutex> lk(impl_->cb_mu);
+        impl_->alive.store(false, std::memory_order_release);
+        impl_->cb = nullptr;
         return false;
     }
     if (midiInStart(impl_->handle) != MMSYSERR_NOERROR) {
-        midiInClose(impl_->handle);
-        impl_->handle = nullptr;
+        close();
         return false;
     }
     return true;
 }
 
 void MidiInputPort::close() {
-    if (impl_ && impl_->handle) {
+    if (!impl_) return;
+    {
+        std::lock_guard<std::mutex> lk(impl_->cb_mu);
+        impl_->alive.store(false, std::memory_order_release);
+        impl_->cb = nullptr;
+    }
+    if (impl_->handle) {
         midiInStop(impl_->handle);
         midiInReset(impl_->handle);
         midiInClose(impl_->handle);
@@ -195,15 +217,23 @@ struct MidiInputPort::Impl {
     MIDIPortRef in_port = 0;
     MIDIEndpointRef virt_dest = 0;
     MIDIEndpointRef connected_src = 0;
+    std::mutex cb_mu;
+    std::atomic<bool> alive{false};
     Callback cb;
 
     static void read_proc(const MIDIPacketList* list, void* refcon, void*) {
         auto* self = static_cast<Impl*>(refcon);
-        if (!self || !self->cb || !list) return;
+        if (!self || !list || !self->alive.load(std::memory_order_acquire)) return;
+        Callback fn;
+        {
+            std::lock_guard<std::mutex> lk(self->cb_mu);
+            if (!self->alive.load(std::memory_order_relaxed) || !self->cb) return;
+            fn = self->cb;
+        }
         const uint64_t ts = now_us();
         const MIDIPacket* pkt = &list->packet[0];
         for (UInt32 i = 0; i < list->numPackets; ++i) {
-            self->parse_packet(pkt->data, pkt->length, ts);
+            parse_packet(fn, pkt->data, pkt->length, ts);
             pkt = MIDIPacketNext(pkt);
         }
     }
@@ -219,19 +249,24 @@ struct MidiInputPort::Impl {
         if (st == 0xF2) return 2;                // song position
         return 0;                                // F6 tune request, F8..FF real-time
     }
-    void parse_packet(const Byte* d, UInt16 len, uint64_t ts) {
+    static void parse_packet(const Callback& fn, const Byte* d, UInt16 len, uint64_t ts) {
         uint8_t running = 0;
-        UInt16 i = 0;
-        while (i < len) {
+        uint32_t i = 0;
+        const uint32_t nlen = len;
+        while (i < nlen) {
             const uint8_t b = d[i];
             if (b >= 0xF8) {  // real-time: single byte, may appear anywhere
-                cb(b, 0, 0, ts);
+                fn(b, 0, 0, ts);
                 ++i;
                 continue;
             }
-            if (b == 0xF0) {  // SysEx: not a short message -> skip to EOX
-                while (i < len && d[i] != 0xF7) ++i;
+            if (b == 0xF0) {  // SysEx: skip to EOX, still delivering interleaved real-time bytes
                 ++i;
+                while (i < nlen && d[i] != 0xF7) {
+                    if (d[i] >= 0xF8) fn(d[i], 0, 0, ts);
+                    ++i;
+                }
+                if (i < nlen) ++i;
                 running = 0;
                 continue;
             }
@@ -246,12 +281,12 @@ struct MidiInputPort::Impl {
                 ++i;  // stray data byte
                 continue;
             }
-            const int n = data_len(st);
-            if (i + n > len) break;
+            const uint32_t n = uint32_t(data_len(st));
+            if (i + n > nlen) break;
             const uint8_t d1 = n >= 1 ? d[i] : 0;
             const uint8_t d2 = n >= 2 ? d[i + 1] : 0;
-            cb(st, d1, d2, ts);
-            i = UInt16(i + n);
+            fn(st, d1, d2, ts);
+            i += n;
         }
     }
 };
@@ -261,9 +296,16 @@ MidiInputPort::~MidiInputPort() { close(); }
 
 bool MidiInputPort::open(int device_index, const std::string& device_name, Callback cb) {
     close();
-    impl_->cb = std::move(cb);
-    if (MIDIClientCreate(CFSTR("LanVidMIDIIn"), nullptr, nullptr, &impl_->client) != noErr) return false;
-    if (device_name == "LanVid Virtual MIDI In" || device_index < 0) {
+    {
+        std::lock_guard<std::mutex> lk(impl_->cb_mu);
+        impl_->cb = std::move(cb);
+        impl_->alive.store(true, std::memory_order_release);
+    }
+    if (MIDIClientCreate(CFSTR("LanVidMIDIIn"), nullptr, nullptr, &impl_->client) != noErr) {
+        close();
+        return false;
+    }
+    if (device_name == "LanVid Virtual MIDI In" || (device_index < 0 && device_name.empty())) {
         if (MIDIDestinationCreate(impl_->client, CFSTR("LanVid Virtual MIDI In"), &Impl::read_proc,
                                   impl_.get(), &impl_->virt_dest) != noErr) {
             close();
@@ -292,6 +334,11 @@ bool MidiInputPort::open(int device_index, const std::string& device_name, Callb
 
 void MidiInputPort::close() {
     if (!impl_) return;
+    {
+        std::lock_guard<std::mutex> lk(impl_->cb_mu);
+        impl_->alive.store(false, std::memory_order_release);
+        impl_->cb = nullptr;
+    }
     if (impl_->in_port && impl_->connected_src) MIDIPortDisconnectSource(impl_->in_port, impl_->connected_src);
     if (impl_->in_port) { MIDIPortDispose(impl_->in_port); impl_->in_port = 0; }
     if (impl_->virt_dest) { MIDIEndpointDispose(impl_->virt_dest); impl_->virt_dest = 0; }
@@ -314,7 +361,7 @@ MidiOutputPort::~MidiOutputPort() { close(); }
 bool MidiOutputPort::open(int device_index, const std::string& device_name) {
     close();
     if (MIDIClientCreate(CFSTR("LanVidMIDIOut"), nullptr, nullptr, &impl_->client) != noErr) return false;
-    if (device_name == "LanVid Virtual MIDI Out" || device_index < 0) {
+    if (device_name == "LanVid Virtual MIDI Out" || (device_index < 0 && device_name.empty())) {
         if (MIDISourceCreate(impl_->client, CFSTR("LanVid Virtual MIDI Out"), &impl_->virt_src) != noErr) {
             close();
             return false;
@@ -350,11 +397,13 @@ bool MidiOutputPort::is_open() const { return impl_ && (impl_->out_port != 0 || 
 
 bool MidiOutputPort::send_short(uint8_t status, uint8_t d1, uint8_t d2) {
     if (!is_open()) return false;
-    Byte buf[64];
+    alignas(MIDIPacketList) Byte buf[64];
     auto* list = reinterpret_cast<MIDIPacketList*>(buf);
     MIDIPacket* pkt = MIDIPacketListInit(list);
     Byte data[3] = {status, d1, d2};
-    const ByteCount len = ((status & 0xF0u) == 0xC0u || (status & 0xF0u) == 0xD0u) ? 2 : 3;
+    ByteCount len = 3;
+    if (status >= 0xF8u || status == 0xF6u) len = 1;
+    else if ((status & 0xF0u) == 0xC0u || (status & 0xF0u) == 0xD0u || status == 0xF1u || status == 0xF3u) len = 2;
     MIDIPacketListAdd(list, sizeof(buf), pkt, 0, len, data);
     if (impl_->virt_src) return MIDIReceived(impl_->virt_src, list) == noErr;
     return MIDISend(impl_->out_port, impl_->dest, list) == noErr;

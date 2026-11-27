@@ -67,7 +67,7 @@ public:
     void ingest_datagram(const uint8_t* data, size_t len, const Endpoint& src, uint64_t now);
     // Periodic housekeeping (assembler timeouts, NACK, MIDI, ping, feedback); step_once() calls it.
     void service(uint64_t now);
-    uint16_t local_port() const { return sock_.local_port(); }
+    uint16_t local_port() const { return ext_sock_ ? ext_sock_->local_port() : sock_.local_port(); }
 
     void step_once();
     void run(std::atomic<bool>& stop_flag);
@@ -75,11 +75,12 @@ public:
 
     double estimate_latency_ms(uint64_t recv_complete_us, uint32_t sender_ts_us) const;
 
-    const AssemblerStats& assembler_stats() const { return assembler_.stats(); }
+    AssemblerStats assembler_stats() const { return assembler_.stats(); }
     // Asks the sender for an IDR now (e.g. so an ISO recording starts immediately, not at the next GOP).
     void request_keyframe() { send_pli_now(now_us()); }
     // Current sender (set by the first datagram); false before anything arrived.
     bool sender_endpoint(Endpoint& out) const {
+        std::lock_guard<std::mutex> lk(sender_ep_mu_);
         if (!has_sender_) return false;
         out = sender_ep_;
         return true;
@@ -89,9 +90,9 @@ public:
     std::string decoder_backend_name() const { return assembler_.decoder_backend_name(); }
     bool decoder_is_hardware() const { return assembler_.decoder_is_hardware(); }
     ClockSyncInfo clock_sync() const { return sync_; }
-    uint64_t feedbacks_sent() const { return feedbacks_sent_; }
-    uint64_t plis_sent() const { return plis_sent_; }
-    uint64_t video_packets_ignored() const { return video_ignored_; }
+    uint64_t feedbacks_sent() const { return feedbacks_sent_.load(std::memory_order_relaxed); }
+    uint64_t plis_sent() const { return plis_sent_.load(std::memory_order_relaxed); }
+    uint64_t video_packets_ignored() const { return video_ignored_.load(std::memory_order_relaxed); }
     uint32_t jitter_us() const {
         std::lock_guard<std::mutex> lk(fb_mu_);
         return uint32_t(jitter_us_);
@@ -193,8 +194,16 @@ private:
     MasterClock mclock_;
     AudioRxEngine arx_;
 
+    mutable std::mutex sender_ep_mu_;
     Endpoint sender_ep_{};
     bool has_sender_ = false;
+    void remember_sender(const Endpoint& src) {
+        std::lock_guard<std::mutex> lk(sender_ep_mu_);
+        if (!has_sender_ || !(sender_ep_ == src)) {
+            sender_ep_ = src;
+            has_sender_ = true;
+        }
+    }
     uint64_t last_ping_us_ = 0;
     uint32_t ping_seq_ = 0;
     ClockSyncInfo sync_{};
@@ -213,9 +222,9 @@ private:
     double jitter_us_ = 0.0;
     uint64_t fb_dec_us_sum_ = 0;
     uint64_t fb_dec_cnt_ = 0;
-    uint64_t feedbacks_sent_ = 0;
-    uint64_t plis_sent_ = 0;
-    uint64_t video_ignored_ = 0;
+    std::atomic<uint64_t> feedbacks_sent_{0};
+    std::atomic<uint64_t> plis_sent_{0};
+    std::atomic<uint64_t> video_ignored_{0};
     std::atomic<uint64_t> audio2_bytes_rx_{0};
     std::atomic<uint64_t> audio2_packets_rx_{0};
 

@@ -117,11 +117,11 @@ public:
         ef.slices.resize(ns);
         size_t off = 4;
         for (uint32_t i = 0; i < ns; ++i) {
-            if (off + 4 > size) return false;
+            if (size - off < 4) return false;
             uint32_t sz = 0;
             std::memcpy(&sz, data + off, 4);
             off += 4;
-            if (off + sz > size) return false;
+            if (sz > size - off) return false;
             ef.slices[i].assign(data + off, data + off + sz);
             off += sz;
         }

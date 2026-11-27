@@ -38,7 +38,8 @@ bool make_current_thread_realtime(uint32_t period_us, uint32_t computation_us, u
     mach_timebase_info_data_t tb{};
     mach_timebase_info(&tb);
     auto us_to_ticks = [&](uint32_t us) -> uint32_t {
-        return uint32_t((uint64_t(us) * 1000ull * tb.denom) / tb.numer);
+        const uint64_t ticks = (uint64_t(us) * 1000ull * tb.denom) / (tb.numer ? tb.numer : 1u);
+        return uint32_t(std::min<uint64_t>(ticks, UINT32_MAX));
     };
     thread_time_constraint_policy_data_t pol{};
     pol.period = us_to_ticks(period_us);
@@ -88,13 +89,21 @@ RealtimeThreadScope::RealtimeThreadScope(uint32_t period_us)
 RealtimeThreadScope::RealtimeThreadScope(uint32_t period_us, uint32_t computation_us, uint32_t constraint_us) {
 #if defined(_WIN32)
     timer_ = timeBeginPeriod(1) == TIMERR_NOERROR;
+    const int p = GetThreadPriority(GetCurrentThread());
+    if (p != THREAD_PRIORITY_ERROR_RETURN) {
+        prev_prio_ = p;
+        has_prev_prio_ = true;
+    }
     DWORD task_index = 0;
     HANDLE h = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
     if (h) {
         AvSetMmThreadPriority(h, AVRT_PRIORITY_HIGH);
         mmcss_ = h;
+        active_ = true;
+        t_rt = true;
+    } else {
+        active_ = make_current_thread_realtime(period_us, computation_us, constraint_us);
     }
-    active_ = make_current_thread_realtime(period_us, computation_us, constraint_us) || h != nullptr;
 #else
     active_ = make_current_thread_realtime(period_us, computation_us, constraint_us);
 #endif
@@ -103,6 +112,7 @@ RealtimeThreadScope::RealtimeThreadScope(uint32_t period_us, uint32_t computatio
 RealtimeThreadScope::~RealtimeThreadScope() {
 #if defined(_WIN32)
     if (mmcss_) AvRevertMmThreadCharacteristics(static_cast<HANDLE>(mmcss_));
+    else if (has_prev_prio_) SetThreadPriority(GetCurrentThread(), prev_prio_);
     if (timer_) timeEndPeriod(1);
     t_rt = false;
 #endif

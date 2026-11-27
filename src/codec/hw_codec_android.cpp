@@ -60,6 +60,7 @@ public:
             shutdown();
             return false;
         }
+        started_ = true;
         // Query hardware encoder's aligned input stride & slice-height (critical for non-16-aligned
         // widths such as 1080x1920 where HW stride is 1088/1152 instead of 1080!).
         in_stride_ = width_;
@@ -84,7 +85,7 @@ public:
     }
 
     bool encode_image(const Image& img, EncodedVideoPacket& out) override {
-        if (!codec_obj_ || img.width != width_ || img.height != height_) return false;
+        if (!codec_obj_ || (img.width & ~1) != width_ || (img.height & ~1) != height_) return false;
         const size_t y_plane_sz = size_t(in_stride_) * size_t(in_slice_h_);
         const size_t uv_plane_sz = size_t(in_stride_) * size_t((height_ + 1) / 2);
         const size_t nv12_sz = y_plane_sz + uv_plane_sz;
@@ -95,7 +96,7 @@ public:
 
     bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                        EncodedVideoPacket& out) override {
-        if (!codec_obj_ || width != width_ || height != height_) return false;
+        if (!codec_obj_ || (width & ~1) != width_ || (height & ~1) != height_) return false;
         const size_t y_plane_sz = size_t(in_stride_) * size_t(in_slice_h_);
         const size_t uv_plane_sz = size_t(in_stride_) * size_t((height_ + 1) / 2);
         const size_t nv12_sz = y_plane_sz + uv_plane_sz;
@@ -143,7 +144,11 @@ private:
         if (in_idx < 0) return false;
         size_t in_cap = 0;
         uint8_t* in_buf = AMediaCodec_getInputBuffer(codec_obj_, size_t(in_idx), &in_cap);
-        if (!in_buf || in_cap < nv12_sz) return false;
+        if (!in_buf || in_cap < nv12_sz) {
+            // Return buffer index to MediaCodec so we never leak input buffers and freeze the pipeline.
+            AMediaCodec_queueInputBuffer(codec_obj_, size_t(in_idx), 0, 0, 0, 0);
+            return false;
+        }
         std::memcpy(in_buf, nv12, nv12_sz);
         const int64_t pts_us = int64_t(frame_index_++) * (1000000LL / int64_t(fps_));
         AMediaCodec_queueInputBuffer(codec_obj_, size_t(in_idx), 0, nv12_sz, uint64_t(pts_us), 0);
@@ -181,15 +186,17 @@ private:
 
     void shutdown() {
         if (codec_obj_) {
-            AMediaCodec_stop(codec_obj_);
+            if (started_) AMediaCodec_stop(codec_obj_);
             AMediaCodec_delete(codec_obj_);
             codec_obj_ = nullptr;
         }
+        started_ = false;
         cached_params_.clear();
     }
 
     VideoCodecId codec_;
     AMediaCodec* codec_obj_ = nullptr;
+    bool started_ = false;
     int width_ = 0;
     int height_ = 0;
     int in_stride_ = 0;
@@ -229,6 +236,8 @@ public:
             shutdown();
             return false;
         }
+        started_ = true;
+        color_format_ = 21;  // assume semi-planar NV12 until output format reports otherwise
         backend_name_ = std::string("Android MediaCodec ") +
                         (codec_ == VideoCodecId::kH265 ? "HEVC" : "H264") + " (HW)";
         return true;
@@ -240,7 +249,10 @@ public:
         if (in_idx < 0) return false;
         size_t in_cap = 0;
         uint8_t* in_buf = AMediaCodec_getInputBuffer(codec_obj_, size_t(in_idx), &in_cap);
-        if (!in_buf || in_cap < size) return false;
+        if (!in_buf || in_cap < size) {
+            AMediaCodec_queueInputBuffer(codec_obj_, size_t(in_idx), 0, 0, 0, 0);
+            return false;
+        }
         std::memcpy(in_buf, data, size);
         AMediaCodec_queueInputBuffer(codec_obj_, size_t(in_idx), 0, size, uint64_t(frame_index_++ * 16667), 0);
 
@@ -252,8 +264,13 @@ public:
                 if (ofmt) {
                     AMediaFormat_getInt32(ofmt, AMEDIAFORMAT_KEY_WIDTH, &width_);
                     AMediaFormat_getInt32(ofmt, AMEDIAFORMAT_KEY_HEIGHT, &height_);
-                    if (!AMediaFormat_getInt32(ofmt, "stride", &stride_)) stride_ = width_;
-                    if (!AMediaFormat_getInt32(ofmt, "slice-height", &slice_h_)) slice_h_ = height_;
+                    int32_t s = 0, sh = 0, cf = color_format_;
+                    AMediaFormat_getInt32(ofmt, "stride", &s);
+                    AMediaFormat_getInt32(ofmt, "slice-height", &sh);
+                    AMediaFormat_getInt32(ofmt, AMEDIAFORMAT_KEY_COLOR_FORMAT, &cf);
+                    stride_ = std::max(s, width_);
+                    slice_h_ = std::max(sh, height_);
+                    color_format_ = cf;
                     AMediaFormat_delete(ofmt);
                 }
                 continue;
@@ -262,11 +279,41 @@ public:
                 size_t out_cap = 0;
                 uint8_t* out_buf = AMediaCodec_getOutputBuffer(codec_obj_, size_t(out_idx), &out_cap);
                 bool ok = false;
-                if (out_buf && info.size > 0 && width_ > 0 && height_ > 0) {
-                    const uint8_t* y = out_buf + info.offset;
-                    const uint8_t* uv = y + size_t(stride_) * size_t(slice_h_);
-                    nv12_to_packed_rgb(y, stride_, uv, stride_, width_, height_, output_order, out_image);
-                    ok = true;
+                const int eff_stride = std::max(stride_, width_);
+                const int eff_slice_h = std::max(slice_h_, height_);
+                const size_t y_bytes = size_t(eff_stride) * size_t(eff_slice_h);
+                const size_t uv_bytes = size_t(eff_stride) * size_t((height_ + 1) / 2);
+                const size_t off = info.offset >= 0 ? size_t(info.offset) : 0;
+                if (out_buf && info.size > 0 && width_ > 0 && height_ > 0 &&
+                    off <= out_cap && y_bytes + uv_bytes <= out_cap - off) {
+                    const uint8_t* y = out_buf + off;
+                    if (color_format_ == 19) {  // COLOR_FormatYUV420Planar (I420)
+                        const int u_stride = eff_stride / 2;
+                        const size_t u_plane = size_t(u_stride) * size_t((eff_slice_h + 1) / 2);
+                        if (y_bytes + u_plane * 2 <= out_cap - off) {
+                            const uint8_t* u = y + y_bytes;
+                            const uint8_t* v = u + u_plane;
+                            const size_t dst_uv_sz = size_t(width_) * size_t((height_ + 1) / 2);
+                            if (uv_tmp_.size() < dst_uv_sz) uv_tmp_.resize(dst_uv_sz);
+                            const int cw = width_ >> 1, ch = height_ >> 1;
+                            for (int row = 0; row < ch; ++row) {
+                                const uint8_t* su = u + size_t(row) * size_t(u_stride);
+                                const uint8_t* sv = v + size_t(row) * size_t(u_stride);
+                                uint8_t* duv = uv_tmp_.data() + size_t(row) * size_t(width_);
+                                for (int x = 0; x < cw; ++x) {
+                                    duv[x * 2 + 0] = su[x];
+                                    duv[x * 2 + 1] = sv[x];
+                                }
+                            }
+                            nv12_to_packed_rgb(y, eff_stride, uv_tmp_.data(), width_, width_, height_,
+                                               output_order, out_image);
+                            ok = true;
+                        }
+                    } else {
+                        const uint8_t* uv = y + y_bytes;
+                        nv12_to_packed_rgb(y, eff_stride, uv, eff_stride, width_, height_, output_order, out_image);
+                        ok = true;
+                    }
                 }
                 AMediaCodec_releaseOutputBuffer(codec_obj_, size_t(out_idx), false);
                 return ok;
@@ -277,7 +324,7 @@ public:
     }
 
     void reset() override {
-        if (codec_obj_) AMediaCodec_flush(codec_obj_);
+        if (codec_obj_ && started_) AMediaCodec_flush(codec_obj_);
     }
 
     VideoCodecId codec_id() const override { return codec_; }
@@ -287,18 +334,22 @@ public:
 private:
     void shutdown() {
         if (codec_obj_) {
-            AMediaCodec_stop(codec_obj_);
+            if (started_) AMediaCodec_stop(codec_obj_);
             AMediaCodec_delete(codec_obj_);
             codec_obj_ = nullptr;
         }
+        started_ = false;
     }
 
     VideoCodecId codec_;
     AMediaCodec* codec_obj_ = nullptr;
+    bool started_ = false;
     int width_ = 0;
     int height_ = 0;
     int stride_ = 0;
     int slice_h_ = 0;
+    int color_format_ = 21;
+    std::vector<uint8_t> uv_tmp_;
     PixelOrder output_order_ = PixelOrder::kRGBA;
     uint64_t frame_index_ = 0;
     std::string backend_name_;

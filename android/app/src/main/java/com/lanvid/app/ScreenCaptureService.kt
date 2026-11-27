@@ -20,7 +20,7 @@ import android.os.IBinder
 
 /**
  * Foreground Service keeping MediaProjection screen capture + optional internal audio
- * alive even when LanVid is minimized in the background.
+ * alive even when LanVid Camera is minimized in the background.
  */
 class ScreenCaptureService : Service() {
     companion object {
@@ -40,6 +40,7 @@ class ScreenCaptureService : Service() {
             private set
     }
 
+    private val capLock = Any()
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -49,13 +50,16 @@ class ScreenCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent == null || intent.action == ACTION_STOP) {
             stopCapture()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val audioMode = intent?.getIntExtra(EXTRA_AUDIO_MODE, 0) ?: 0
+        // Release any previous capture session before starting a new one
+        stopCapture()
+
+        val audioMode = intent.getIntExtra(EXTRA_AUDIO_MODE, 0)
         val notif = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val hasMic = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
@@ -70,12 +74,12 @@ class ScreenCaptureService : Service() {
             startForeground(NOTIF_ID, notif)
         }
 
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, 0) ?: 0
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
         @Suppress("DEPRECATION")
-        val data: Intent? = intent?.getParcelableExtra(EXTRA_RESULT_DATA)
-        val width = (intent?.getIntExtra(EXTRA_WIDTH, 1280) ?: 1280) and 0x7FFE
-        val height = (intent?.getIntExtra(EXTRA_HEIGHT, 720) ?: 720) and 0x7FFE
-        val dpi = intent?.getIntExtra(EXTRA_DPI, 320) ?: 320
+        val data: Intent? = intent.getParcelableExtra(EXTRA_RESULT_DATA)
+        val width = (intent.getIntExtra(EXTRA_WIDTH, 1280) and 0x7FFE).coerceAtLeast(64)
+        val height = (intent.getIntExtra(EXTRA_HEIGHT, 720) and 0x7FFE).coerceAtLeast(64)
+        val dpi = intent.getIntExtra(EXTRA_DPI, 320).coerceAtLeast(72)
 
         if (data == null) {
             stopSelf()
@@ -87,50 +91,52 @@ class ScreenCaptureService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        projection = mp
 
-        val ht = HandlerThread("LanVidScreenCap").apply { start() }
-        handlerThread = ht
-        val handler = Handler(ht.looper)
+        synchronized(capLock) {
+            projection = mp
+            val ht = HandlerThread("LanVidScreenCap").apply { start() }
+            handlerThread = ht
+            val handler = Handler(ht.looper)
 
-        // Android 14+ (API 34+) requires registering a MediaProjection.Callback BEFORE createVirtualDisplay()
-        mp.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                stopCapture()
-                stopSelf()
+            // Android 14+ (API 34+) requires registering a MediaProjection.Callback BEFORE createVirtualDisplay()
+            mp.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    stopCapture()
+                    stopSelf()
+                }
+            }, handler)
+
+            val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            reader.setOnImageAvailableListener({ r ->
+                val img = try { r.acquireLatestImage() } catch (_: Exception) { null } ?: return@setOnImageAvailableListener
+                try {
+                    val plane = img.planes[0]
+                    LanVidNative.nativePushRgba(plane.buffer, img.width, img.height, plane.rowStride)
+                } finally {
+                    try { img.close() } catch (_: Exception) {}
+                }
+            }, handler)
+            imageReader = reader
+
+            virtualDisplay = mp.createVirtualDisplay(
+                "LanVidScreen",
+                width,
+                height,
+                dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface,
+                null,
+                handler
+            )
+
+            if (audioMode == 1 || audioMode == 2) {
+                audioStreamer = AudioInputStreamer().also {
+                    it.start(if (audioMode == 1) mp else null)
+                }
             }
-        }, handler)
-
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
-        reader.setOnImageAvailableListener({ r ->
-            val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-            try {
-                val plane = img.planes[0]
-                LanVidNative.nativePushRgba(plane.buffer, img.width, img.height, plane.rowStride)
-            } finally {
-                img.close()
-            }
-        }, handler)
-        imageReader = reader
-
-        virtualDisplay = mp.createVirtualDisplay(
-            "LanVidScreen",
-            width,
-            height,
-            dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface,
-            null,
-            handler
-        )
-
-        if (audioMode == 1 || audioMode == 2) {
-            audioStreamer = AudioInputStreamer().also {
-                it.start(if (audioMode == 1) mp else null)
-            }
+            isRunning = true
         }
-        isRunning = true
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun buildNotification(): Notification {
@@ -142,7 +148,7 @@ class ScreenCaptureService : Service() {
         )
         nm.createNotificationChannel(ch)
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("LanVid Studio")
+            .setContentTitle("LanVid Camera")
             .setContentText("Трансляція екрана в локальній мережі активна")
             .setSmallIcon(android.R.drawable.presence_video_online)
             .setOngoing(true)
@@ -150,18 +156,24 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCapture() {
-        isRunning = false
-        audioStreamer?.stop()
-        audioStreamer = null
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        projection?.stop()
-        projection = null
-        handlerThread?.quitSafely()
-        handlerThread = null
-        LanVidNative.nativeStopSender()
+        val wasRunning: Boolean
+        synchronized(capLock) {
+            wasRunning = isRunning || projection != null || virtualDisplay != null
+            isRunning = false
+            audioStreamer?.stop()
+            audioStreamer = null
+            try { virtualDisplay?.release() } catch (_: Exception) {}
+            virtualDisplay = null
+            try { imageReader?.close() } catch (_: Exception) {}
+            imageReader = null
+            try { projection?.stop() } catch (_: Exception) {}
+            projection = null
+            handlerThread?.quitSafely()
+            handlerThread = null
+        }
+        if (wasRunning) {
+            LanVidNative.nativeStopSender()
+        }
     }
 
     override fun onDestroy() {

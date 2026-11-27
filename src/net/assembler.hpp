@@ -35,9 +35,18 @@ public:
 
     void observe(uint16_t seq);
 
-    uint64_t received() const { return received_; }
-    uint64_t duplicates() const { return duplicates_; }
-    uint64_t reordered() const { return reordered_; }
+    uint64_t received() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return received_;
+    }
+    uint64_t duplicates() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return duplicates_;
+    }
+    uint64_t reordered() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return reordered_;
+    }
     uint64_t lost(int reorder_margin = 32) const;
     double loss_percent(int reorder_margin = 32) const;
     void reset();
@@ -45,7 +54,9 @@ public:
 private:
     bool get_bit(uint16_t seq) const;
     void set_bit(uint16_t seq, bool v);
+    uint64_t lost_locked(int reorder_margin) const;
 
+    mutable std::mutex mu_;
     bool initialized_ = false;
     uint16_t max_seq_ = 0;
     uint64_t span_ = 0;
@@ -127,10 +138,13 @@ public:
     void poll(uint64_t now_us);
     void flush(uint64_t now_us);
 
-    const AssemblerStats& stats() const { return stats_; }
+    AssemblerStats stats() const {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        return stats_;
+    }
     const SeqLossTracker& seq_tracker() const { return seq_; }
 
-    VideoCodecId active_codec() const { return active_codec_; }
+    VideoCodecId active_codec() const { return VideoCodecId(active_codec_.load(std::memory_order_acquire)); }
     std::string decoder_backend_name() const {
         std::lock_guard<std::mutex> lk(backend_mu_);
         return decoder_backend_;
@@ -138,7 +152,7 @@ public:
     bool decoder_is_hardware() const { return decoder_is_hw_.load(std::memory_order_relaxed); }
     // Stops the async decode worker (if any). Call before the frame callback's captures go away.
     void stop_decoder_worker();
-    bool awaiting_idr() const { return awaiting_idr_; }
+    bool awaiting_idr() const { return awaiting_idr_.load(std::memory_order_acquire); }
 
     void set_conceal_mode(ConcealMode m) { conceal_mode_.store(uint8_t(m), std::memory_order_relaxed); }
     ConcealMode conceal_mode() const { return ConcealMode(conceal_mode_.load(std::memory_order_relaxed)); }
@@ -210,13 +224,15 @@ private:
         std::atomic<uint64_t> decode_us_sum{0};
         std::unique_ptr<SliceSlot[]> slices;
         size_t slices_cap = 0;
+        std::vector<uint8_t> row_claimed;
         Image frame;
     };
 
     void init_slot(FrameSlot& slot, const PacketHeader& h, uint64_t now_us);
     void ensure_slice_initialized(SliceSlot& ss, uint16_t frag_count);
     void insert_data_fragment(FrameSlot& slot, SliceSlot& ss, uint16_t slice_id, uint16_t fi,
-                              const uint8_t* payload, uint16_t payload_size, uint64_t now_us);
+                              const uint8_t* payload, uint16_t payload_size, uint64_t now_us,
+                              bool run_fec = true);
     void try_fec_recover(FrameSlot& slot, SliceSlot& ss, uint16_t slice_id, uint64_t now_us);
     void dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id);
     void finalize_slot(FrameSlot& slot, uint64_t now_us);
@@ -263,7 +279,7 @@ private:
 
     // Inter-frame (H.264 / H.265) decoder & PLI recovery state
     std::unique_ptr<IVideoDecoder> video_decoder_;  // owned by the worker thread in async mode
-    VideoCodecId active_codec_ = VideoCodecId::kLanVidDct;
+    std::atomic<uint8_t> active_codec_{uint8_t(VideoCodecId::kLanVidDct)};
     mutable std::mutex backend_mu_;
     std::string decoder_backend_ = "LanVid DCT";
     std::atomic<bool> decoder_is_hw_{false};
@@ -286,12 +302,13 @@ private:
     uint64_t vdec_ok_seen_ = 0, vdec_fail_seen_ = 0, vdec_skipped_seen_ = 0;
     bool has_submitted_inter_ = false;         // ingest thread: frame-gap tracking in async mode
     uint32_t last_submitted_fid_ = 0;
-    bool awaiting_idr_ = false;
+    std::atomic<bool> awaiting_idr_{false};
     bool has_decoded_inter_frame_ = false;
     uint32_t last_decoded_inter_fid_ = 0;
     uint64_t last_pli_us_ = 0;
 
     SeqLossTracker seq_;
+    mutable std::mutex stats_mu_;
     AssemblerStats stats_;
 };
 

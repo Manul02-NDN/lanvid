@@ -117,8 +117,7 @@ LV_AudioChannelStats st; lv_receiver_get_channel_stats(rx, 17, &st); /* dBFS, в
 
 `LV_MEDIA_TS_AUTO` прив'язує перший push до Master Clock відправника і далі веде позицію безперервно; для DAW
 передавайте власну позицію в семплах (`lv_sender_get_master_clock_samples()`). Колбек і pull-режим
-взаємовиключні (`pop` повертає `LV_ERR_UNSUPPORTED`, поки колбек зареєстровано). Нові функції лише додані —
-`LV_SDK_ABI_VERSION` = 1 без змін, існуючі структури не змінено.
+взаємовиключні (`pop` повертає `LV_ERR_UNSUPPORTED`, поки колбек зареєстровано). Поточна версія бінарного контракту: `LV_SDK_ABI_VERSION` = 2 (`v2.7.0`).
 
 ---
 

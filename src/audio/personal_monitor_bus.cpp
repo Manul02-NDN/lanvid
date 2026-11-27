@@ -32,8 +32,12 @@ inline float soft_sat(float x) {
 }
 
 inline float db_to_lin(float db) {
-    if (db <= -60.0f) return 0.0f;
+    if (!std::isfinite(db) || db <= -60.0f) return 0.0f;
     return std::pow(10.0f, db / 20.0f);
+}
+
+inline float finite_clamp(float v, float lo, float hi, float def) {
+    return std::isfinite(v) ? std::clamp(v, lo, hi) : def;
 }
 
 inline int8_t lin_to_dbfs_i8(float peak) {
@@ -126,7 +130,8 @@ void PersonalMonitorBus::reset() {
     comp_env_ = 0.0f;
     lim_gain_ = 1.0f;
     la_l_.fill(0.0f); la_r_.fill(0.0f); la_req_.fill(1.0f); la_env_.fill(1.0f);
-    la_env_sum_ = float(kLookahead);
+    la_env_sum_ = double(kLookahead);
+    la_recalc_cnt_ = 0;
     la_pos_ = 0;
     initialized_ = false;
     recompute_targets_locked();
@@ -189,8 +194,8 @@ void PersonalMonitorBus::set_channel_mix(int ch, const PersonalMonitorChannelMix
     if (ch < 0 || ch >= kMonitorMaxInputChannels) return;
     std::lock_guard<std::mutex> lk(mu_);
     ch_mix_[ch] = mix;
-    ch_mix_[ch].gain_db = std::clamp(mix.gain_db, -60.0f, 12.0f);
-    ch_mix_[ch].pan = std::clamp(mix.pan, -1.0f, 1.0f);
+    ch_mix_[ch].gain_db = finite_clamp(mix.gain_db, -60.0f, 12.0f, 0.0f);
+    ch_mix_[ch].pan = finite_clamp(mix.pan, -1.0f, 1.0f, 0.0f);
     recompute_targets_locked();
 }
 
@@ -203,17 +208,17 @@ PersonalMonitorChannelMix PersonalMonitorBus::channel_mix(int ch) const {
 void PersonalMonitorBus::set_dsp(const PersonalMonitorDspParams& dsp) {
     std::lock_guard<std::mutex> lk(mu_);
     dsp_ = dsp;
-    dsp_.hpf_hz = std::clamp(dsp.hpf_hz, 20.0f, 250.0f);
-    dsp_.eq_low_db = std::clamp(dsp.eq_low_db, -12.0f, 12.0f);
-    dsp_.eq_mid_hz = std::clamp(dsp.eq_mid_hz, 300.0f, 5000.0f);
-    dsp_.eq_mid_db = std::clamp(dsp.eq_mid_db, -12.0f, 12.0f);
-    dsp_.eq_high_db = std::clamp(dsp.eq_high_db, -12.0f, 12.0f);
-    dsp_.comp_thresh_db = std::clamp(dsp.comp_thresh_db, -40.0f, 0.0f);
-    dsp_.comp_ratio = std::clamp(dsp.comp_ratio, 1.0f, 10.0f);
-    dsp_.comp_attack_ms = std::clamp(dsp.comp_attack_ms, 0.5f, 50.0f);
-    dsp_.comp_release_ms = std::clamp(dsp.comp_release_ms, 10.0f, 500.0f);
-    dsp_.comp_makeup_db = std::clamp(dsp.comp_makeup_db, 0.0f, 18.0f);
-    dsp_.master_volume_db = std::clamp(dsp.master_volume_db, -60.0f, 12.0f);
+    dsp_.hpf_hz = finite_clamp(dsp.hpf_hz, 20.0f, 250.0f, 80.0f);
+    dsp_.eq_low_db = finite_clamp(dsp.eq_low_db, -12.0f, 12.0f, 0.0f);
+    dsp_.eq_mid_hz = finite_clamp(dsp.eq_mid_hz, 300.0f, 5000.0f, 1200.0f);
+    dsp_.eq_mid_db = finite_clamp(dsp.eq_mid_db, -12.0f, 12.0f, 0.0f);
+    dsp_.eq_high_db = finite_clamp(dsp.eq_high_db, -12.0f, 12.0f, 0.0f);
+    dsp_.comp_thresh_db = finite_clamp(dsp.comp_thresh_db, -40.0f, 0.0f, -18.0f);
+    dsp_.comp_ratio = finite_clamp(dsp.comp_ratio, 1.0f, 10.0f, 3.0f);
+    dsp_.comp_attack_ms = finite_clamp(dsp.comp_attack_ms, 0.5f, 50.0f, 5.0f);
+    dsp_.comp_release_ms = finite_clamp(dsp.comp_release_ms, 10.0f, 500.0f, 80.0f);
+    dsp_.comp_makeup_db = finite_clamp(dsp.comp_makeup_db, 0.0f, 18.0f, 0.0f);
+    dsp_.master_volume_db = finite_clamp(dsp.master_volume_db, -60.0f, 12.0f, 0.0f);
     recompute_targets_locked();
 }
 
@@ -317,10 +322,16 @@ void PersonalMonitorBus::process_block(const float* const* in_planes, int num_in
         // Instant-down / slow-up release envelope, never above the sliding minimum.
         const float rise = lim_rel * lim_gain_ + (1.0f - lim_rel);
         lim_gain_ = std::min(m, rise);
-        // Boxcar smoothing of the envelope (running sum) turns the instant drop into a kLookahead-sample ramp.
-        la_env_sum_ += lim_gain_ - la_env_[wp];
+        // Boxcar smoothing of the envelope (running sum in double + periodic resync to prevent drift).
+        la_env_sum_ += double(lim_gain_) - double(la_env_[wp]);
         la_env_[wp] = lim_gain_;
-        const float g = la_env_sum_ / float(kLookahead);
+        if (++la_recalc_cnt_ >= 4096u) {
+            la_recalc_cnt_ = 0;
+            double ssum = 0.0;
+            for (float ev : la_env_) ssum += double(ev);
+            la_env_sum_ = ssum;
+        }
+        const float g = std::clamp(float(la_env_sum_ / double(kLookahead)), 0.0f, 1.0f);
         const uint32_t rp = (wp + kLookaheadBuf - (kLookahead - 1)) % kLookaheadBuf;
         l = std::clamp(la_l_[rp] * g, -kBrickwallCeiling, kBrickwallCeiling);
         r = std::clamp(la_r_[rp] * g, -kBrickwallCeiling, kBrickwallCeiling);
@@ -582,13 +593,15 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
     uint16_t ch_lens[kMaxMonitorFlowChannels]{};
     uint8_t packed_count = 0;
 
-    for (uint8_t c = 0; c < flow_ch; ++c) {
-        if (((send_mask >> c) & 1u) == 0u) continue;
-        const float* src = s.flow_stage[c].data();
-        auto& out = enc_bufs[packed_count];
-        bool ok_opus = false;
+    // Encode uniformly across all active channels in this packet so wire_fmt is never mixed mid-packet.
+    bool all_opus_ok = false;
 #ifdef LV_HAVE_OPUS
-        if (use_opus) {
+    if (use_opus) {
+        all_opus_ok = true;
+        for (uint8_t c = 0; c < flow_ch; ++c) {
+            if (((send_mask >> c) & 1u) == 0u) continue;
+            const float* src = s.flow_stage[c].data();
+            auto& out = enc_bufs[packed_count];
             auto*& enc = s.flow_opus[c];
             if (!enc) {
                 int err = OPUS_OK;
@@ -604,28 +617,44 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
                     enc = oe;
                 }
             }
-            if (enc) {
-                auto* oe = reinterpret_cast<OpusEncoder*>(enc);
-                if (s.flow_opus_bps != target_bps_per_ch) {
-                    for (uint8_t j = 0; j < kMaxMonitorFlowChannels; ++j) {
-                        if (s.flow_opus[j])
-                            opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(s.flow_opus[j]),
-                                             OPUS_SET_BITRATE(target_bps_per_ch));
-                    }
-                    s.flow_opus_bps = target_bps_per_ch;
-                }
-                out.resize(256);
-                const int nb = opus_encode_float(oe, src, int(samples), out.data(), int(out.size()));
-                if (nb > 0) {
-                    out.resize(size_t(nb));
-                    ok_opus = true;
-                }
+            if (!enc) {
+                all_opus_ok = false;
+                break;
             }
+            auto* oe = reinterpret_cast<OpusEncoder*>(enc);
+            if (s.flow_opus_bps != target_bps_per_ch) {
+                for (uint8_t j = 0; j < kMaxMonitorFlowChannels; ++j) {
+                    if (s.flow_opus[j])
+                        opus_encoder_ctl(reinterpret_cast<OpusEncoder*>(s.flow_opus[j]),
+                                         OPUS_SET_BITRATE(target_bps_per_ch));
+                }
+                s.flow_opus_bps = target_bps_per_ch;
+            }
+            out.resize(256);
+            const int nb = opus_encode_float(oe, src, int(samples), out.data(), int(out.size()));
+            if (nb <= 0) {
+                all_opus_ok = false;
+                break;
+            }
+            out.resize(size_t(nb));
+            ch_ptrs[packed_count] = out.data();
+            ch_lens[packed_count] = uint16_t(out.size());
+            ++packed_count;
         }
+        if (all_opus_ok) {
+            wire_fmt = AudioFormat2::kOpus;
+        } else {
+            packed_count = 0;
+        }
+    }
 #endif
-        if (!ok_opus) {
+    if (!all_opus_ok) {
+        wire_fmt = lossless ? AudioFormat2::kPcm24Packed : AudioFormat2::kPcm16;
+        for (uint8_t c = 0; c < flow_ch; ++c) {
+            if (((send_mask >> c) & 1u) == 0u) continue;
+            const float* src = s.flow_stage[c].data();
+            auto& out = enc_bufs[packed_count];
             if (lossless) {
-                wire_fmt = AudioFormat2::kPcm24Packed;
                 out.resize(size_t(samples) * 3u);
                 for (uint32_t i = 0; i < samples; ++i) {
                     const float cl = std::clamp(src[i], -1.0f, 1.0f);
@@ -637,7 +666,6 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
                     out[3 * i + 2] = uint8_t((u >> 16) & 0xFFu);
                 }
             } else {
-                wire_fmt = AudioFormat2::kPcm16;
                 out.resize(size_t(samples) * 2u);
                 for (uint32_t i = 0; i < samples; ++i) {
                     const float cl = std::clamp(src[i], -1.0f, 1.0f);
@@ -647,10 +675,10 @@ void PersonalMonitorServer::emit_monitor_flow_locked(ClientSlot& s, int slot_idx
                     out[2 * i + 1] = uint8_t((q >> 8) & 0xFF);
                 }
             }
+            ch_ptrs[packed_count] = out.data();
+            ch_lens[packed_count] = uint16_t(out.size());
+            ++packed_count;
         }
-        ch_ptrs[packed_count] = out.data();
-        ch_lens[packed_count] = uint16_t(out.size());
-        ++packed_count;
     }
 
     if (packed_count == 0) return;
@@ -739,7 +767,17 @@ void PersonalMonitorServer::pace_tick_locked(double dt_us) {
 
     for (int slot_idx = 0; slot_idx < kMaxMonitorClients; ++slot_idx) {
         auto& s = slots_[slot_idx];
-        if (!s.active || !s.tx || s.ring_l.empty()) continue;
+        if (!s.active) continue;
+        if (s.last_seen_us != 0 && now > s.last_seen_us && (now - s.last_seen_us) >= 15'000'000ull) {
+            destroy_slot_flow_codecs_locked(s);
+            s.active = false;
+            s.client_wants_redundancy = false;
+            s.tx.reset();
+            s.bus.reset();
+            refresh_any_redundancy_locked();
+            continue;
+        }
+        if (!s.tx || s.ring_l.empty()) continue;
         uint64_t fill = s.ring_wr - s.ring_rd;
         if (!s.primed) {
             if (fill < block) continue;
@@ -759,7 +797,16 @@ void PersonalMonitorServer::pace_tick_locked(double dt_us) {
         }
 
         const bool use_flow = use_flow_global && s.client_supports_flow;
-        const uint8_t fch = (cfg_flow_ch > 2 && !s.flow_rings[0].empty()) ? cfg_flow_ch : uint8_t(2);
+        bool flow_rings_ready = cfg_flow_ch > 2;
+        if (flow_rings_ready) {
+            for (uint8_t c = 0; c < cfg_flow_ch; ++c) {
+                if (s.flow_rings[c].size() != kPaceRingFrames) {
+                    flow_rings_ready = false;
+                    break;
+                }
+            }
+        }
+        const uint8_t fch = flow_rings_ready ? cfg_flow_ch : uint8_t(2);
         const uint32_t flow_target = (s.bitrate_kbps == kMonitorBitrateLossless || s.latency_ms <= 10) ? 120u : 240u;
 
         for (uint32_t k = 0; k < steps; ++k) {
@@ -880,71 +927,91 @@ PersonalMonitorBus* PersonalMonitorServer::bus(int slot) {
     return slots_[slot].bus.get();
 }
 
-int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep) {
+int PersonalMonitorServer::find_or_alloc_slot_locked(uint32_t client_id, const Endpoint& ep, uint64_t now) {
     for (int i = 0; i < kMaxMonitorClients; ++i) {
         if (slots_[i].active &&
             ((client_id != 0 && slots_[i].client_id == client_id) || (slots_[i].ep == ep))) {
             return i;
         }
     }
+    int free_idx = -1;
     for (int i = 0; i < kMaxMonitorClients; ++i) {
         if (!slots_[i].active) {
-            auto& s = slots_[i];
-            s.active = true;
-            s.client_id = client_id ? client_id : uint32_t(i + 1);
-            s.name = "Phone " + std::to_string(i + 1);
-            s.ep = ep;
-            s.bitrate_kbps = 256;
-            s.latency_ms = 20;
-            s.server_muted = false;
-            s.client_supports_flow = false;
-            s.client_wants_redundancy = false;
-            s.active_channel_mask = ~0ull;
-            s.flow_seq = 0;
-            s.packets_tx = 0;
-            s.control_rx = 0;
-            s.media_sample = 0;
-            s.ring_l.assign(kPaceRingFrames, 0.0f);
-            s.ring_r.assign(kPaceRingFrames, 0.0f);
-            for (auto& fr : s.flow_rings) fr.clear();
-            destroy_slot_flow_codecs_locked(s);
-            s.ring_wr = s.ring_rd = 0;
-            s.credit = 0.0;
-            s.primed = false;
-            s.flow_stage_n = 0;
-            s.bus = std::make_unique<PersonalMonitorBus>(sample_rate_);
-            // Always read slots_[i].ep dynamically so phone reconnects on a new UDP port keep working!
-            s.tx = std::make_unique<AudioTxEngine>(
-                sample_rate_, kDefaultMtu,
-                [this, i](const uint8_t* d, size_t n) {
-                    if (primary_link_down_.load(std::memory_order_acquire)) return false;
-                    const Endpoint dst = slots_[i].ep;
-                    const bool ok = sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
-                    if (ok) {
-                        ++slots_[i].packets_tx;
-                        pri_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
-                    }
-                    return ok;
-                });
-            s.tx->set_latency_ms(20);
-            s.tx->set_codec_profile(audio_codec_profile_from_bitrate(128));  // 128 kbps/ch = 256 kbps stereo
-            s.tx->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire),
-                                      dup_stagger_us_.load(std::memory_order_relaxed));
-            s.tx->set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
-            if (sec_sock_active_.load(std::memory_order_acquire)) {
-                s.tx->set_secondary_send([this, i](const uint8_t* d, size_t n) {
-                    const Endpoint dst = slots_[i].ep;
-                    const bool ok = sec_sock_.is_open() &&
-                                    sec_sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
-                    if (ok) {
-                        sec_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
-                        ++slots_[i].packets_tx;
-                    }
-                    return ok;
-                });
-            }
-            return i;
+            free_idx = i;
+            break;
         }
+    }
+    if (free_idx < 0) {
+        for (int i = 0; i < kMaxMonitorClients; ++i) {
+            if (slots_[i].last_seen_us != 0 && now > slots_[i].last_seen_us &&
+                (now - slots_[i].last_seen_us) >= 15'000'000ull) {
+                destroy_slot_flow_codecs_locked(slots_[i]);
+                slots_[i].active = false;
+                slots_[i].client_wants_redundancy = false;
+                slots_[i].tx.reset();
+                slots_[i].bus.reset();
+                free_idx = i;
+                break;
+            }
+        }
+    }
+    if (free_idx >= 0) {
+        const int i = free_idx;
+        auto& s = slots_[i];
+        s.active = true;
+        s.client_id = client_id ? client_id : uint32_t(i + 1);
+        s.name = "Phone " + std::to_string(i + 1);
+        s.ep = ep;
+        s.bitrate_kbps = 256;
+        s.latency_ms = 20;
+        s.server_muted = false;
+        s.client_supports_flow = false;
+        s.client_wants_redundancy = false;
+        s.active_channel_mask = ~0ull;
+        s.flow_seq = 0;
+        s.packets_tx = 0;
+        s.control_rx = 0;
+        s.media_sample = 0;
+        s.ring_l.assign(kPaceRingFrames, 0.0f);
+        s.ring_r.assign(kPaceRingFrames, 0.0f);
+        for (auto& fr : s.flow_rings) fr.clear();
+        destroy_slot_flow_codecs_locked(s);
+        s.ring_wr = s.ring_rd = 0;
+        s.credit = 0.0;
+        s.primed = false;
+        s.flow_stage_n = 0;
+        s.bus = std::make_unique<PersonalMonitorBus>(sample_rate_);
+        // Always read slots_[i].ep dynamically so phone reconnects on a new UDP port keep working!
+        s.tx = std::make_unique<AudioTxEngine>(
+            sample_rate_, kDefaultMtu,
+            [this, i](const uint8_t* d, size_t n) {
+                if (primary_link_down_.load(std::memory_order_acquire)) return false;
+                const Endpoint dst = slots_[i].ep;
+                const bool ok = sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
+                if (ok) {
+                    ++slots_[i].packets_tx;
+                    pri_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
+                }
+                return ok;
+            });
+        s.tx->set_latency_ms(20);
+        s.tx->set_codec_profile(audio_codec_profile_from_bitrate(128));  // 128 kbps/ch = 256 kbps stereo
+        s.tx->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire),
+                                  dup_stagger_us_.load(std::memory_order_relaxed));
+        s.tx->set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
+        if (sec_sock_active_.load(std::memory_order_acquire)) {
+            s.tx->set_secondary_send([this, i](const uint8_t* d, size_t n) {
+                const Endpoint dst = slots_[i].ep;
+                const bool ok = sec_sock_.is_open() &&
+                                sec_sock_.send_to_qos(d, n, dst, QosTrafficClass::kAudio) == int(n);
+                if (ok) {
+                    sec_tx_bytes_.fetch_add(n, std::memory_order_relaxed);
+                    ++slots_[i].packets_tx;
+                }
+                return ok;
+            });
+        }
+        return i;
     }
     return -1;
 }
@@ -980,7 +1047,7 @@ void PersonalMonitorServer::handle_control_packet(const PacketHeader&, const uin
     if (!parse_monitor_control(payload, len, mc)) return;
 
     std::lock_guard<std::mutex> lk(mu_);
-    const int idx = find_or_alloc_slot_locked(mc.client_id, src);
+    const int idx = find_or_alloc_slot_locked(mc.client_id, src, now);
     if (idx < 0) return;
     auto& s = slots_[idx];
     s.ep = src;
@@ -1255,15 +1322,29 @@ PersonalMonitorClient::PersonalMonitorClient(uint32_t sample_rate)
       matrix_(sample_rate_),
       arx_(matrix_, mclock_, [this](const uint8_t* data, size_t len) {
           if (!connected_.load(std::memory_order_acquire)) return false;
-          return sock_.send_to_qos(data, len, server_ep_, QosTrafficClass::kSyncControl) == int(len);
+          std::lock_guard<std::mutex> lk(sock_mu_);
+          return sock_.is_open() &&
+                 sock_.send_to_qos(data, len, server_ep_, QosTrafficClass::kSyncControl) == int(len);
       }) {
-    client_id_ = uint32_t((now_us() ^ 0xA5A55A5Aull) & 0xFFFFFFFFu);
-    if (client_id_ == 0) client_id_ = 1;
+    static std::atomic<uint32_t> s_client_seq{1};
+    const uint32_t seq = s_client_seq.fetch_add(1, std::memory_order_relaxed);
+    client_id_ = uint32_t(((now_us() ^ 0xA5A55A5Aull) ^ (uint64_t(seq) * 2654435761ull)) & 0xFFFFFFFFu);
+    if (client_id_ == 0) client_id_ = seq ? seq : 1u;
 }
 
 PersonalMonitorClient::~PersonalMonitorClient() {
     disconnect();
     destroy_flow_decoders();
+}
+
+std::string PersonalMonitorClient::primary_nic_ip() const {
+    std::lock_guard<std::mutex> lk(sock_mu_);
+    return primary_nic_ip_;
+}
+
+std::string PersonalMonitorClient::secondary_nic_ip() const {
+    std::lock_guard<std::mutex> lk(sock_mu_);
+    return secondary_nic_ip_;
 }
 
 void PersonalMonitorClient::destroy_flow_decoders() {
@@ -1297,42 +1378,48 @@ bool PersonalMonitorClient::connect(const std::string& server_ip, uint16_t serve
     flow_ow_win_n_ = 0;
     flow_ow_samples_ = 0;
     flow_ow_jitter_ema_ = 0.0;
+    last_primary_flow_us_ = 0;
     clock_locked_.store(false, std::memory_order_relaxed);
     clock_jitter_us_.store(0, std::memory_order_relaxed);
     flow_dups_recovered_.store(0, std::memory_order_relaxed);
     last_rx_flow_mask_.store(0, std::memory_order_relaxed);
-    if (!sock_.open()) return false;
-    bool bound = false;
-    if (!primary_nic_ip_.empty() && primary_nic_ip_ != "0.0.0.0") {
-        NetworkInterfaceInfo info{};
-        const bool found = find_interface_by_ip(primary_nic_ip_, info);
-        bound = sock_.bind_to_interface(primary_nic_ip_, 0, found ? info.if_index : 0u,
-                                        found ? info.system_name : "");
-    }
-    if (!bound && !sock_.bind("0.0.0.0", 0)) {
-        sock_.close();
-        return false;
-    }
-    sock_.set_low_latency_qos();
-    sock_.set_nonblocking(true);
-    if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
-        if (sec_sock_.open()) {
-            NetworkInterfaceInfo sinfo{};
-            const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
-            if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
-                                            sf ? sinfo.system_name : "")) {
-                sec_sock_.set_low_latency_qos();
-                sec_sock_.set_nonblocking(true);
-                sec_sock_active_.store(true, std::memory_order_release);
-            } else {
-                sec_sock_.close();
-                sec_sock_active_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lk(sock_mu_);
+        if (!sock_.open()) return false;
+        bool bound = false;
+        if (!primary_nic_ip_.empty() && primary_nic_ip_ != "0.0.0.0") {
+            NetworkInterfaceInfo info{};
+            const bool found = find_interface_by_ip(primary_nic_ip_, info);
+            bound = sock_.bind_to_interface(primary_nic_ip_, 0, found ? info.if_index : 0u,
+                                            found ? info.system_name : "");
+        }
+        if (!bound && !sock_.bind("0.0.0.0", 0)) {
+            sock_.close();
+            return false;
+        }
+        sock_.set_low_latency_qos();
+        sock_.set_nonblocking(true);
+        if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
+            if (sec_sock_.open()) {
+                NetworkInterfaceInfo sinfo{};
+                const bool sf = find_interface_by_ip(secondary_nic_ip_, sinfo);
+                if (sec_sock_.bind_to_interface(secondary_nic_ip_, 0, sf ? sinfo.if_index : 0u,
+                                                sf ? sinfo.system_name : "")) {
+                    sec_sock_.set_low_latency_qos();
+                    sec_sock_.set_nonblocking(true);
+                    sec_sock_active_.store(true, std::memory_order_release);
+                } else {
+                    sec_sock_.close();
+                    sec_sock_active_.store(false, std::memory_order_release);
+                }
             }
         }
-    }
-    if (!Endpoint::parse(server_ip, server_port, server_ep_)) {
-        sock_.close();
-        return false;
+        if (!Endpoint::parse(server_ip, server_port, server_ep_)) {
+            sec_sock_.close();
+            sec_sock_active_.store(false, std::memory_order_release);
+            sock_.close();
+            return false;
+        }
     }
     arx_.set_latency_ms(latency_ms);
     // In-ear monitoring: the buffer the musician picks (5 / 10 / 15 / 20 ms) is the buffer they get.
@@ -1396,6 +1483,7 @@ void PersonalMonitorClient::set_wifi_redundancy(bool enabled) {
 
 bool PersonalMonitorClient::set_network_interfaces(const std::string& primary_ip,
                                                    const std::string& secondary_ip) {
+    std::lock_guard<std::mutex> lk(sock_mu_);
     primary_nic_ip_ = (primary_ip == "auto" || primary_ip == "0.0.0.0") ? std::string() : primary_ip;
     secondary_nic_ip_ = (secondary_ip == "auto" || secondary_ip == "0.0.0.0") ? std::string() : secondary_ip;
     if (!connected_.load(std::memory_order_acquire)) return true;
@@ -1441,6 +1529,7 @@ MonitorDanteTelemetry PersonalMonitorClient::dante_telemetry() const {
 }
 
 void PersonalMonitorClient::disconnect() {
+    std::lock_guard<std::mutex> lk(sock_mu_);
     if (connected_.exchange(false, std::memory_order_acq_rel)) {
         MonitorControlPayload bye{};
         bye.op = MonitorControlOp::kDisconnect;
@@ -1454,7 +1543,9 @@ void PersonalMonitorClient::disconnect() {
         ph.timestamp_us = now_us32();
         uint8_t dgram[kPacketHeaderSize + kMonitorControlSize];
         const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
-        if (dlen > 0) sock_.send_to_qos(dgram, dlen, server_ep_, QosTrafficClass::kSyncControl);
+        if (dlen > 0 && sock_.is_open()) {
+            sock_.send_to_qos(dgram, dlen, server_ep_, QosTrafficClass::kSyncControl);
+        }
     }
     sec_sock_.close();
     sec_sock_active_.store(false, std::memory_order_release);
@@ -1472,7 +1563,9 @@ bool PersonalMonitorClient::send_control(const MonitorControlPayload& mc) {
     uint8_t dgram[kPacketHeaderSize + kMonitorControlSize];
     const size_t dlen = write_packet(dgram, sizeof(dgram), ph, body, sizeof(body));
     last_tx_us_.store(now_us(), std::memory_order_relaxed);
-    return dlen > 0 && sock_.send_to_qos(dgram, dlen, server_ep_, QosTrafficClass::kSyncControl) == int(dlen);
+    std::lock_guard<std::mutex> lk(sock_mu_);
+    return dlen > 0 && sock_.is_open() &&
+           sock_.send_to_qos(dgram, dlen, server_ep_, QosTrafficClass::kSyncControl) == int(dlen);
 }
 
 bool PersonalMonitorClient::send_keepalive_ping(uint64_t now) {
@@ -1483,7 +1576,12 @@ bool PersonalMonitorClient::send_keepalive_ping(uint64_t now) {
     uint8_t ka_buf[kMonitorKeepAliveSize];
     const size_t ka_len = write_monitor_keepalive(ka_buf, sizeof(ka_buf), ka);
     if (ka_len == 0) return false;
-    const bool ok = sock_.send_to_qos(ka_buf, ka_len, server_ep_, QosTrafficClass::kSyncControl) == int(ka_len);
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lk(sock_mu_);
+        ok = sock_.is_open() &&
+             sock_.send_to_qos(ka_buf, ka_len, server_ep_, QosTrafficClass::kSyncControl) == int(ka_len);
+    }
     last_tx_us_.store(now, std::memory_order_relaxed);
     pings_.fetch_add(1, std::memory_order_relaxed);
     return ok;
@@ -1609,6 +1707,8 @@ void PersonalMonitorClient::flow_one_way_observe(double media_end_us, uint64_t n
 void PersonalMonitorClient::decode_flow_frame(const MonitorAudioFlowHeader& fh,
                                               const uint8_t* const ch_ptrs[kMaxMonitorFlowChannels],
                                               const uint16_t ch_lens[kMaxMonitorFlowChannels]) {
+    if (fh.num_samples == 0) return;
+    if (fh.sample_format == AudioFormat2::kOpus && fh.num_samples > 2880) return;
     if (flow_dec_scratch_.size() < fh.num_samples) flow_dec_scratch_.resize(fh.num_samples);
     uint8_t slot = 0;
     for (uint8_t c = 0; c < kMaxMonitorFlowChannels && slot < fh.channel_count; ++c) {
@@ -1799,8 +1899,13 @@ void PersonalMonitorClient::handle_flow_packet(const PacketHeader&, const uint8_
     audio_rx_pkts_.fetch_add(1, std::memory_order_relaxed);
     last_rx_flow_mask_.store(fh.channel_mask, std::memory_order_relaxed);
 
-    // Exclude +1.5 ms staggered redundant copies from the min-one-way-delay clock filter once locked
-    if (!flow_ow_have_ || !is_redundant) {
+    // Exclude occasional +1.5 ms staggered redundant copies from the min-one-way-delay clock filter
+    // while primary packets are flowing; if primary link has failed over (> 50 ms without primary),
+    // seamlessly promote the redundant/secondary stream to clock reference so clock tracking continues.
+    if (!is_redundant) last_primary_flow_us_ = now;
+    const bool primary_absent = (last_primary_flow_us_ == 0) ||
+                                (now > last_primary_flow_us_ && (now - last_primary_flow_us_) >= 50'000ull);
+    if (!flow_ow_have_ || !is_redundant || primary_absent) {
         const double media_end_us =
             double(fh.media_timestamp_samples + fh.num_samples) * 1e6 / double(fh.sample_rate);
         flow_one_way_observe(media_end_us, now);
@@ -1847,10 +1952,15 @@ void PersonalMonitorClient::poll() {
     if (now - last_tx_us_.load(std::memory_order_relaxed) >= kWakePingUs) {
         send_keepalive_ping(now);
     }
-    auto drain_socket = [&](const UdpSocket& s) {
-        if (!s.is_open()) return;
+    auto drain_socket = [&](bool secondary) {
         for (int i = 0; i < 128; ++i) {
-            const int n = s.recv_from(buf, sizeof(buf), src);
+            int n = 0;
+            {
+                std::lock_guard<std::mutex> lk(sock_mu_);
+                const UdpSocket& s = secondary ? sec_sock_ : sock_;
+                if (!s.is_open()) break;
+                n = s.recv_from(buf, sizeof(buf), src);
+            }
             if (n <= 0) break;
             PacketHeader h{};
             const uint8_t* payload = nullptr;
@@ -1874,8 +1984,8 @@ void PersonalMonitorClient::poll() {
             }
         }
     };
-    drain_socket(sock_);
-    if (sec_sock_active_.load(std::memory_order_acquire)) drain_socket(sec_sock_);
+    drain_socket(false);
+    if (sec_sock_active_.load(std::memory_order_acquire)) drain_socket(true);
     // Drive flow reorder timeout PLC and legacy AUDIO2 NACK/PLC!
     service_flow_reorder(now);
     arx_.service(now);

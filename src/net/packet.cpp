@@ -1,5 +1,6 @@
 #include "net/packet.hpp"
 
+#include <cmath>
 #include <cstring>
 
 #include "common/crc32c.hpp"
@@ -236,6 +237,7 @@ bool parse_midi_frame(const uint8_t* in, size_t len, MidiFrameHeader& hdr,
             out_events[i].port_index = ep[11];
             if (out_events[i].port_index >= kMaxMidiPorts) return false;
         }
+        hdr.event_count = n;
     }
     return true;
 }
@@ -384,6 +386,7 @@ bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload&
     } else if (mc.op == MonitorControlOp::kSetChannelMix) {
         mc.gain_db = load_f32_le(in + 12);
         mc.pan = load_f32_le(in + 16);
+        if (!std::isfinite(mc.gain_db) || !std::isfinite(mc.pan)) return false;
     } else if (mc.op == MonitorControlOp::kSetDsp) {
         mc.hpf_hz = load_f32_le(in + 12);
         mc.eq_low_db = load_f32_le(in + 16);
@@ -396,6 +399,13 @@ bool parse_monitor_control(const uint8_t* in, size_t len, MonitorControlPayload&
         mc.comp_release_ms = load_f32_le(in + 44);
         mc.comp_makeup_db = load_f32_le(in + 48);
         mc.master_volume_db = load_f32_le(in + 52);
+        if (!std::isfinite(mc.hpf_hz) || !std::isfinite(mc.eq_low_db) || !std::isfinite(mc.eq_mid_hz) ||
+            !std::isfinite(mc.eq_mid_db) || !std::isfinite(mc.eq_high_db) || !std::isfinite(mc.comp_thresh_db) ||
+            !std::isfinite(mc.comp_ratio) || !std::isfinite(mc.comp_attack_ms) ||
+            !std::isfinite(mc.comp_release_ms) || !std::isfinite(mc.comp_makeup_db) ||
+            !std::isfinite(mc.master_volume_db)) {
+            return false;
+        }
     }
     return true;
 }

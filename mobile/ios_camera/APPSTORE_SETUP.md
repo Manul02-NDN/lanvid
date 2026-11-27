@@ -14,8 +14,6 @@ Open <https://appstoreconnect.apple.com> → **Apps → + → New App**:
 - **SKU:** `lanvid-camera`
 
 ## 3. Add App Store Connect API Key to GitHub Secrets
-*(Skip if already added for LanVid Monitor — both workflows share the exact same 3 secrets.)*
-
 App Store Connect → **Users and Access → Integrations → App Store Connect API → Team Keys → +** (role **App Manager** or **Admin**), download the `.p8` file once, and add to GitHub **Settings → Secrets and variables → Actions**:
 - `APP_STORE_CONNECT_API_KEY_ID` — 10-character Key ID
 - `APP_STORE_CONNECT_ISSUER_ID` — Issuer UUID

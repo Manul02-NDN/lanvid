@@ -47,6 +47,7 @@ public final class LanVidMetalRenderer: NSObject, MTKViewDelegate {
 
         let image = CIImage(cvPixelBuffer: pb)
         let dSize = view.drawableSize
+        guard image.extent.width > 0, image.extent.height > 0, dSize.width > 0, dSize.height > 0 else { return }
         let sx = dSize.width / image.extent.width
         let sy = dSize.height / image.extent.height
         let scale = min(sx, sy)

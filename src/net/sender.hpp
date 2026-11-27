@@ -80,6 +80,10 @@ public:
     bool send_frame_yuv420(const Yuv420View& yuv, const CodecParams& params, uint32_t frame_id,
                            uint32_t capture_ts_us);
 
+    // True zero-copy path: passes platform hardware frame handle (e.g. CVPixelBufferRef) to VideoToolbox.
+    bool send_frame_native(const void* native_buf, int width, int height, uint32_t frame_id,
+                           uint32_t capture_ts_us);
+
     // Transmits one low-latency audio chunk (2.5-5 ms PCM16) over the same UDP socket.
     // Thread-safe (may be called directly from the WASAPI audio capture thread).
     bool send_audio(uint32_t audio_seq_id, uint32_t timestamp_us, const int16_t* pcm16,
@@ -109,7 +113,7 @@ public:
                     : audio_profile_for_latency(cfg_.audio_latency_ms, cfg_.audio_sample_rate, cfg_.mtu, AudioFormat2::kPcm16);
     }
     void set_audio_latency_ms(uint32_t ms);
-    uint32_t audio_latency_ms() const { return atx_ ? atx_->latency_ms() : cfg_.audio_latency_ms; }
+    uint32_t audio_latency_ms() const { return atx_ ? atx_->latency_ms() : audio_latency_ms_.load(std::memory_order_relaxed); }
     void set_wifi_redundancy(bool enabled, uint32_t stagger_us = 1500) {
         wifi_redundancy_.store(enabled, std::memory_order_release);
         if (atx_) atx_->set_wifi_redundancy(enabled, stagger_us);
@@ -131,13 +135,15 @@ public:
     void set_primary_link_down(bool down) { primary_link_down_.store(down, std::memory_order_release); }
     bool primary_link_down() const { return primary_link_down_.load(std::memory_order_acquire); }
     void set_audio_codec_profile(AudioCodecProfile p) {
-        audio_codec_ = p;
+        audio_codec_.store(uint8_t(p), std::memory_order_relaxed);
         if (atx_) atx_->set_codec_profile(p);
     }
     void set_audio_bitrate_kbps(int kbps_per_ch) {
         set_audio_codec_profile(audio_codec_profile_from_bitrate(kbps_per_ch));
     }
-    AudioCodecProfile audio_codec_profile() const { return atx_ ? atx_->codec_profile() : audio_codec_; }
+    AudioCodecProfile audio_codec_profile() const {
+        return atx_ ? atx_->codec_profile() : AudioCodecProfile(audio_codec_.load(std::memory_order_relaxed));
+    }
     void flush_audio();
     // Current master-clock position in samples (sender epoch = construction time).
     uint64_t master_samples_now() const;
@@ -175,7 +181,7 @@ public:
     // Same, but skips if another thread (an audio push) is already servicing the socket.
     void service_control_try() {
         std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
-        if (lk.owns_lock()) service_control();
+        if (lk.owns_lock()) service_control_locked();
     }
 
     void set_sim_loss_pct(double pct) { sim_loss_pct_.store(pct, std::memory_order_relaxed); }
@@ -190,7 +196,10 @@ public:
     void set_bitrate_kbps(uint32_t bitrate_kbps);
     void force_keyframe() { force_idr_.store(true, std::memory_order_release); }
 
-    int active_quality() const { return aq_.current_quality(); }
+    int active_quality() const {
+        std::lock_guard<std::mutex> lk(aq_mu_);
+        return aq_.current_quality();
+    }
     uint32_t active_bitrate_kbps() const { return target_bitrate_kbps_.load(std::memory_order_relaxed); }
     VideoCodecId active_codec() const { return cfg_.codec; }
     std::string encoder_backend_name() const;
@@ -200,6 +209,8 @@ public:
     SenderStats stats() const;
 
 private:
+    void service_control_locked();
+    int send_with_failover(const uint8_t* dgram, size_t len, QosTrafficClass qos);
     bool should_drop_sim();
     bool ensure_video_encoder(int width, int height);
     void pace_bytes(size_t bytes, std::unique_lock<std::mutex>& lk);
@@ -219,7 +230,8 @@ private:
     std::atomic<uint64_t> cs_rx_count_{0};
     std::mutex ctl_mu_;
     std::unique_ptr<AudioTxEngine> atx_;
-    AudioCodecProfile audio_codec_ = AudioCodecProfile::kPcm32F;
+    std::atomic<uint8_t> audio_codec_{uint8_t(AudioCodecProfile::kPcm32F)};
+    std::atomic<uint32_t> audio_latency_ms_{20};
     std::atomic<uint64_t> next_auto_ts_[kMaxAudioChannels]{};
     mutable std::atomic<uint64_t> auto_reanchors_{0};
     uint64_t resolve_auto_ts(uint64_t next, uint32_t num_samples) const;

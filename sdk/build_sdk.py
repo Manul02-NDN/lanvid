@@ -1,13 +1,13 @@
 """
 LanVidSDK Unified Cross-Platform Packager (sdk/build_sdk.py)
 
-Builds and installs a clean SDK distribution under `dist/LanVidSDK-v1.0.0/`:
+Builds and installs a clean SDK distribution under `dist/LanVidSDK-v2.7.0/`:
   - include/lanvid/       (C ABI headers + C++17 RAII lanvid.hpp)
   - bin/ & lib/           (lanvid_core.dll / liblanvid_core.so / liblanvid_core.dylib + static lib)
   - lib/cmake/LanVidSDK/  (LanVidSDKConfig.cmake, LanVidSDKTargets.cmake)
   - lib/pkgconfig/        (lanvid-sdk.pc)
   - apple/                (SwiftPM LanVidKit + XCFramework build script + SwiftUI examples)
-  - android/              (lanvid-sdk-1.0.0.aar + Gradle library module)
+  - android/              (lanvid-sdk-2.7.0.aar + Gradle library module)
   - cpp/                  (lanvid.hpp + find_package CMake consumer example)
   - python/               (lanvid_sdk.py ctypes + NumPy binding)
   - README.md
@@ -56,6 +56,14 @@ def run_cmake_windows(args_str: str) -> None:
         subprocess.run(f'"{cmake_exe}" {args_str}', check=True, shell=True)
 
 
+def cmake_generator_args() -> list[str]:
+    if shutil.which("ninja"):
+        return ["-G", "Ninja"]
+    if platform.system() != "Windows":
+        return ["-G", "Unix Makefiles"]
+    return []
+
+
 def build_host_sdk() -> None:
     if BUILD_SDK_DIR.exists():
         shutil.rmtree(BUILD_SDK_DIR)
@@ -63,8 +71,10 @@ def build_host_sdk() -> None:
         shutil.rmtree(DIST_DIR)
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
+    gen_args = cmake_generator_args()
+    gen_str = ("-G " + gen_args[1] + " ") if len(gen_args) == 2 else ""
     cfg_flags = (
-        f'-S "{ROOT}" -B "{BUILD_SDK_DIR}" -G Ninja '
+        f'-S "{ROOT}" -B "{BUILD_SDK_DIR}" {gen_str}'
         f'-DCMAKE_BUILD_TYPE=Release '
         f'-DLANVID_SDK_CORE_ONLY=ON '
         f'-DLANVID_BUILD_SHARED=ON '
@@ -72,11 +82,11 @@ def build_host_sdk() -> None:
     )
     if platform.system() == "Windows":
         run_cmake_windows(cfg_flags)
-        run_cmake_windows(f'--build "{BUILD_SDK_DIR}"')
-        run_cmake_windows(f'--install "{BUILD_SDK_DIR}" --prefix "{DIST_DIR}"')
+        run_cmake_windows(f'--build "{BUILD_SDK_DIR}" --config Release')
+        run_cmake_windows(f'--install "{BUILD_SDK_DIR}" --config Release --prefix "{DIST_DIR}"')
     else:
         cmake_exe = shutil.which("cmake") or "cmake"
-        run([cmake_exe, "-S", str(ROOT), "-B", str(BUILD_SDK_DIR), "-G", "Ninja",
+        run([cmake_exe, "-S", str(ROOT), "-B", str(BUILD_SDK_DIR), *gen_args,
              "-DCMAKE_BUILD_TYPE=Release", "-DLANVID_SDK_CORE_ONLY=ON",
              "-DLANVID_BUILD_SHARED=ON", "-DLANVID_BUILD_TESTS=OFF"])
         run([cmake_exe, "--build", str(BUILD_SDK_DIR)])
@@ -91,7 +101,7 @@ def copy_tree_clean(src: Path, dst: Path, ignore_names: set[str] | None = None) 
 
 
 def assemble_sdk_bundle() -> None:
-    # Copy language bindings & platform packages into dist/LanVidSDK-v1.0.0/
+    # Copy language bindings & platform packages into dist/LanVidSDK-v2.7.0/
     copy_tree_clean(ROOT / "sdk" / "apple", DIST_DIR / "apple")
     copy_tree_clean(ROOT / "sdk" / "cpp", DIST_DIR / "cpp")
     copy_tree_clean(ROOT / "sdk" / "examples", DIST_DIR / "examples")
@@ -107,6 +117,15 @@ def assemble_sdk_bundle() -> None:
     xcf = ROOT / "dist" / "apple" / "LanVidCore.xcframework"
     if xcf.is_dir():
         copy_tree_clean(xcf, DIST_DIR / "apple" / "LanVidCore.xcframework")
+        pkg_swift = DIST_DIR / "apple" / "Package.swift"
+        if pkg_swift.is_file():
+            pkg_swift.write_text(
+                pkg_swift.read_text(encoding="utf-8").replace(
+                    "../../dist/apple/LanVidCore.xcframework",
+                    "LanVidCore.xcframework",
+                ),
+                encoding="utf-8",
+            )
 
     for apple_art in [f"LanVidSDK-v{SDK_VERSION}-macOS.pkg", f"LanVidSDK-v{SDK_VERSION}-macOS.dmg"]:
         src_art = ROOT / "dist" / "apple" / apple_art
@@ -123,18 +142,23 @@ def verify_external_cpp_client() -> None:
     if client_build.exists():
         shutil.rmtree(client_build)
 
+    gen_args = cmake_generator_args()
+    gen_str = ("-G " + gen_args[1] + " ") if len(gen_args) == 2 else ""
     cfg = (
-        f'-S "{client_src}" -B "{client_build}" -G Ninja '
+        f'-S "{client_src}" -B "{client_build}" {gen_str}'
         f'-DCMAKE_BUILD_TYPE=Release '
         f'-DCMAKE_PREFIX_PATH="{DIST_DIR}"'
     )
     if platform.system() == "Windows":
         run_cmake_windows(cfg)
-        run_cmake_windows(f'--build "{client_build}"')
-        run([str(client_build / "my_app.exe")])
+        run_cmake_windows(f'--build "{client_build}" --config Release')
+        exe = client_build / "my_app.exe"
+        if not exe.is_file():
+            exe = client_build / "Release" / "my_app.exe"
+        run([str(exe)])
     else:
         cmake_exe = shutil.which("cmake") or "cmake"
-        run([cmake_exe, "-S", str(client_src), "-B", str(client_build), "-G", "Ninja",
+        run([cmake_exe, "-S", str(client_src), "-B", str(client_build), *gen_args,
              "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_PREFIX_PATH={DIST_DIR}"])
         run([cmake_exe, "--build", str(client_build)])
         run([str(client_build / "my_app")])

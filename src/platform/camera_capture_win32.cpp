@@ -195,22 +195,28 @@ bool CameraCapture::open(int device_index, int req_w, int req_h, int req_fps) {
 
         // Request RGB32 (BGRA8) output from MF video processor.
         IMFMediaType* out_mt = nullptr;
-        MFCreateMediaType(&out_mt);
-        out_mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        out_mt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-        if (best_w > 0 && best_h > 0) {
-            MFSetAttributeSize(out_mt, MF_MT_FRAME_SIZE, best_w, best_h);
-            MFSetAttributeRatio(out_mt, MF_MT_FRAME_RATE, best_fps_num, best_fps_den);
-        }
-        hr = reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, out_mt);
-        out_mt->Release();
-        if (FAILED(hr)) {
-            // Retry without explicit frame size (let MF keep default resolution).
-            MFCreateMediaType(&out_mt);
+        hr = MFCreateMediaType(&out_mt);
+        if (SUCCEEDED(hr) && out_mt) {
             out_mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
             out_mt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+            if (best_w > 0 && best_h > 0) {
+                MFSetAttributeSize(out_mt, MF_MT_FRAME_SIZE, best_w, best_h);
+                MFSetAttributeRatio(out_mt, MF_MT_FRAME_RATE, best_fps_num, best_fps_den);
+            }
             hr = reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, out_mt);
             out_mt->Release();
+            out_mt = nullptr;
+        }
+        if (FAILED(hr)) {
+            // Retry without explicit frame size (let MF keep default resolution).
+            hr = MFCreateMediaType(&out_mt);
+            if (SUCCEEDED(hr) && out_mt) {
+                out_mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+                out_mt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+                hr = reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, out_mt);
+                out_mt->Release();
+                out_mt = nullptr;
+            }
         }
         if (FAILED(hr)) {
             reader->Release();
@@ -279,28 +285,36 @@ bool CameraCapture::open(int device_index, int req_w, int req_h, int req_fps) {
                 }
 
                 if (data) {
-                    const uint8_t* top_row = data;
-                    ptrdiff_t step = ptrdiff_t(pitch);
-                    if (pitch < 0 && !locked_2d) {
-                        // Contiguous bottom-up DIB: last row in memory is top scanline.
-                        top_row = data + size_t(act_h - 1) * size_t(-pitch);
-                        step = ptrdiff_t(pitch);
-                    }
-                    for (int y = 0; y < int(act_h); ++y) {
-                        std::memcpy(scratch.row(y), top_row + ptrdiff_t(y) * step, size_t(act_w) * 4);
+                    const size_t abs_pitch = size_t(pitch < 0 ? -int64_t(pitch) : int64_t(pitch));
+                    const size_t row_bytes = size_t(act_w) * 4;
+                    const bool bounds_ok = abs_pitch >= row_bytes &&
+                                           (locked_2d || size_t(cur_len) >= size_t(act_h) * abs_pitch);
+                    if (bounds_ok) {
+                        const uint8_t* top_row = data;
+                        ptrdiff_t step = ptrdiff_t(pitch);
+                        if (pitch < 0 && !locked_2d) {
+                            // Contiguous bottom-up DIB: last row in memory is top scanline.
+                            top_row = data + size_t(act_h - 1) * abs_pitch;
+                            step = ptrdiff_t(pitch);
+                        }
+                        for (int y = 0; y < int(act_h); ++y) {
+                            std::memcpy(scratch.row(y), top_row + ptrdiff_t(y) * step, row_bytes);
+                        }
                     }
                     if (locked_2d) buf2d->Unlock2D();
                     else buf->Unlock();
 
-                    {
-                        std::lock_guard<std::mutex> lk(impl_->mu);
-                        std::swap(impl_->latest, scratch);
-                        if (scratch.width != int(act_w) || scratch.height != int(act_h)) {
-                            scratch.allocate(int(act_w), int(act_h), PixelOrder::kBGRA);
+                    if (bounds_ok) {
+                        {
+                            std::lock_guard<std::mutex> lk(impl_->mu);
+                            std::swap(impl_->latest, scratch);
+                            if (scratch.width != int(act_w) || scratch.height != int(act_h)) {
+                                scratch.allocate(int(act_w), int(act_h), PixelOrder::kBGRA);
+                            }
+                            impl_->has_frame = true;
                         }
-                        impl_->has_frame = true;
+                        impl_->cv.notify_all();
                     }
-                    impl_->cv.notify_all();
                 }
 
                 if (buf2d) buf2d->Release();

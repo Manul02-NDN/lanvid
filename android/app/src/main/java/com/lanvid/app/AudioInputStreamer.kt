@@ -15,8 +15,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * supporting both Microphone and Android 10+ internal system audio (AudioPlaybackCapture).
  */
 class AudioInputStreamer {
+    private val lock = Any()
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
+    @Volatile private var activeRecorder: AudioRecord? = null
 
     @SuppressLint("MissingPermission")
     fun start(mediaProjection: MediaProjection? = null): Boolean {
@@ -64,29 +66,58 @@ class AudioInputStreamer {
             return false
         }
 
-        running.set(true)
-        recorder.startRecording()
-        worker = Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-            val pcm = ShortArray(chunkFrames * channels)
-            while (running.get()) {
-                val read = recorder.read(pcm, 0, pcm.size)
-                if (read > 0) {
-                    val frames = read / channels
-                    if (frames > 0) {
-                        LanVidNative.nativePushAudioPcm16(pcm, frames, sampleRate, channels)
+        synchronized(lock) {
+            activeRecorder = recorder
+            running.set(true)
+            try {
+                recorder.startRecording()
+            } catch (_: Exception) {
+                running.set(false)
+                activeRecorder = null
+                recorder.release()
+                return false
+            }
+            worker = Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+                val pcm = ShortArray(chunkFrames * channels)
+                try {
+                    while (running.get()) {
+                        val read = recorder.read(pcm, 0, pcm.size)
+                        if (read < 0) {
+                            break // Error / stopped / device disconnected
+                        }
+                        if (read > 0) {
+                            val frames = read / channels
+                            if (frames > 0) {
+                                LanVidNative.nativePushAudioPcm16(pcm, frames, sampleRate, channels)
+                            }
+                        }
+                    }
+                } finally {
+                    try { recorder.stop() } catch (_: Exception) {}
+                    try { recorder.release() } catch (_: Exception) {}
+                    if (activeRecorder === recorder) {
+                        activeRecorder = null
                     }
                 }
-            }
-            try { recorder.stop() } catch (_: Exception) {}
-            recorder.release()
-        }, "LanVidAudioIn").apply { start() }
+            }, "LanVidAudioIn").apply { start() }
+        }
         return true
     }
 
     fun stop() {
         running.set(false)
-        worker?.join(400)
-        worker = null
+        val rec: AudioRecord?
+        val t: Thread?
+        synchronized(lock) {
+            rec = activeRecorder
+            t = worker
+            worker = null
+        }
+        // Unblock any blocking recorder.read() immediately
+        if (rec != null) {
+            try { rec.stop() } catch (_: Exception) {}
+        }
+        try { t?.join(500) } catch (_: InterruptedException) {}
     }
 }

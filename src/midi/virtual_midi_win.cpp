@@ -10,6 +10,7 @@
 #include <mmsystem.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -167,6 +168,19 @@ bool run_hidden_process(const std::wstring& cmdline, std::string* output, DWORD 
     return exit_code == 0;
 }
 
+std::string sanitize_cli_arg(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (unsigned char c : in) {
+        if (c < 0x20 || c == '"' || c == '\\' || c == '%' || c == '&' || c == '|' || c == '^' ||
+            c == '<' || c == '>') {
+            continue;
+        }
+        out.push_back(char(c));
+    }
+    return out.empty() ? std::string("LanVid MIDI") : out.substr(0, 64);
+}
+
 // Extracts `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}` from `midi loopback create` output.
 std::string parse_association_guid(const std::string& text) {
     const size_t pos = text.find("Association Id");
@@ -175,7 +189,12 @@ std::string parse_association_guid(const std::string& text) {
     if (lb == std::string::npos) return {};
     const size_t rb = text.find('}', lb);
     if (rb == std::string::npos || rb - lb < 32 || rb - lb > 48) return {};
-    return text.substr(lb, rb - lb + 1);
+    std::string guid = text.substr(lb, rb - lb + 1);
+    for (size_t i = 1; i + 1 < guid.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(guid[i]);
+        if (!std::isxdigit(c) && c != '-') return {};
+    }
+    return guid;
 }
 
 // Dynamic teVirtualMIDI64.dll ABI (Tobias Erichsen's virtual MIDI driver, optional fallback).
@@ -196,6 +215,8 @@ constexpr DWORD kTeVmFlagParseTx = 2;
 
 struct VirtualMidiPort::Impl {
     mutable std::mutex mu;
+    std::mutex cb_mu;
+    std::atomic<bool> alive{false};
     VirtualMidiStatus st{};
     Callback cb;
 
@@ -216,21 +237,34 @@ struct VirtualMidiPort::Impl {
                                        DWORD_PTR dwParam1, DWORD_PTR) {
         if (wMsg != MIM_DATA) return;
         auto* self = reinterpret_cast<Impl*>(dwInstance);
-        if (!self || !self->cb) return;
+        if (!self || !self->alive.load(std::memory_order_acquire)) return;
+        Callback fn;
+        {
+            std::lock_guard<std::mutex> clk(self->cb_mu);
+            if (!self->alive.load(std::memory_order_relaxed) || !self->cb) return;
+            fn = self->cb;
+        }
         const uint8_t status = uint8_t(dwParam1 & 0xFFu);
         const uint8_t d1 = uint8_t((dwParam1 >> 8) & 0xFFu);
         const uint8_t d2 = uint8_t((dwParam1 >> 16) & 0xFFu);
-        self->cb(status, d1, d2, now_us());
+        fn(status, d1, d2, now_us());
     }
 
     static void CALLBACK tevm_rx_proc(LPVM_MIDI_PORT, LPBYTE data, DWORD len, DWORD_PTR instance) {
         auto* self = reinterpret_cast<Impl*>(instance);
-        if (!self || !self->cb || !data || len == 0) return;
+        if (!self || !data || len == 0 || !self->alive.load(std::memory_order_acquire)) return;
+        if (data[0] == 0xF0u) return;  // SysEx is not a 3-byte short message
+        Callback fn;
+        {
+            std::lock_guard<std::mutex> clk(self->cb_mu);
+            if (!self->alive.load(std::memory_order_relaxed) || !self->cb) return;
+            fn = self->cb;
+        }
         const uint64_t ts = now_us();
         const uint8_t status = data[0];
         const uint8_t d1 = len >= 2 ? data[1] : 0;
         const uint8_t d2 = len >= 3 ? data[2] : 0;
-        self->cb(status, d1, d2, ts);
+        fn(status, d1, d2, ts);
     }
 
     bool open_winmm_pair(int in_idx, int out_idx) {
@@ -276,9 +310,11 @@ struct VirtualMidiPort::Impl {
         midi_cli_path = find_windows_midi_cli();
         if (midi_cli_path.empty()) return false;
 
+        const std::string safe_daw = sanitize_cli_arg(daw_name);
+        const std::string safe_internal = sanitize_cli_arg(internal_name);
         const std::wstring cmd = L"\"" + midi_cli_path + L"\" loopback create --name-a \"" +
-                                 utf8_to_wide(internal_name) + L"\" --name-b \"" +
-                                 utf8_to_wide(daw_name) + L"\"";
+                                 utf8_to_wide(safe_internal) + L"\" --name-b \"" +
+                                 utf8_to_wide(safe_daw) + L"\"";
         std::string cli_out;
         if (!run_hidden_process(cmd, &cli_out, 6000)) {
             return false;
@@ -315,8 +351,8 @@ struct VirtualMidiPort::Impl {
     }
 
     bool try_te_virtual_midi(const std::string& daw_name) {
-        tevm_dll = LoadLibraryW(L"teVirtualMIDI64.dll");
-        if (!tevm_dll) tevm_dll = LoadLibraryW(L"teVirtualMIDI.dll");
+        tevm_dll = LoadLibraryExW(L"teVirtualMIDI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!tevm_dll) tevm_dll = LoadLibraryExW(L"teVirtualMIDI.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!tevm_dll) return false;
 
         auto create_fn = reinterpret_cast<FnVmCreatePortEx2>(
@@ -392,6 +428,11 @@ struct VirtualMidiPort::Impl {
     }
 
     void close_locked() {
+        {
+            std::lock_guard<std::mutex> clk(cb_mu);
+            alive.store(false, std::memory_order_release);
+            cb = nullptr;
+        }
         if (h_in) {
             midiInStop(h_in);
             midiInReset(h_in);
@@ -424,13 +465,22 @@ VirtualMidiPort::~VirtualMidiPort() { close(); }
 bool VirtualMidiPort::open(const std::string& daw_port_name, Callback on_from_daw) {
     std::lock_guard<std::mutex> lk(impl_->mu);
     impl_->close_locked();
-    impl_->cb = std::move(on_from_daw);
-    const std::string name = daw_port_name.empty() ? "LanVid MIDI" : daw_port_name;
+    {
+        std::lock_guard<std::mutex> clk(impl_->cb_mu);
+        impl_->cb = std::move(on_from_daw);
+        impl_->alive.store(true, std::memory_order_release);
+    }
+    const std::string name = sanitize_cli_arg(daw_port_name.empty() ? "LanVid MIDI" : daw_port_name);
 
     if (impl_->try_windows_midi_services(name)) return true;
     if (impl_->try_te_virtual_midi(name)) return true;
     if (impl_->try_existing_winmm_loopback(name)) return true;
 
+    {
+        std::lock_guard<std::mutex> clk(impl_->cb_mu);
+        impl_->alive.store(false, std::memory_order_release);
+        impl_->cb = nullptr;
+    }
     impl_->st.open = false;
     impl_->st.backend = VirtualMidiBackend::kNone;
     impl_->st.daw_port_name = name;
@@ -462,7 +512,9 @@ bool VirtualMidiPort::send_to_daw(uint8_t status, uint8_t d1, uint8_t d2) {
     }
     if (impl_->tevm_port && impl_->tevm_send) {
         BYTE msg[3] = {status, d1, d2};
-        const DWORD len = ((status & 0xF0u) == 0xC0u || (status & 0xF0u) == 0xD0u) ? 2u : 3u;
+        DWORD len = 3u;
+        if (status >= 0xF8u || status == 0xF6u) len = 1u;
+        else if ((status & 0xF0u) == 0xC0u || (status & 0xF0u) == 0xD0u || status == 0xF1u || status == 0xF3u) len = 2u;
         return impl_->tevm_send(impl_->tevm_port, msg, len) != FALSE;
     }
     return false;

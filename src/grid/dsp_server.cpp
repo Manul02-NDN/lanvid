@@ -13,8 +13,12 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kBrickwallCeiling = 0.94406088f;  // -0.5 dBFS
 
 inline float db_to_lin(float db) {
-    if (db <= -60.0f) return 0.0f;
+    if (!std::isfinite(db) || db <= -60.0f) return 0.0f;
     return std::pow(10.0f, db / 20.0f);
+}
+
+inline float finite_clamp(float v, float lo, float hi, float def) {
+    return std::isfinite(v) ? std::clamp(v, lo, hi) : def;
 }
 
 }  // namespace
@@ -28,18 +32,23 @@ GridChannelDspStrip::GridChannelDspStrip(uint32_t sample_rate)
     rebuild_filters();
 }
 
+void GridChannelDspStrip::set_sample_rate(uint32_t sample_rate) {
+    sample_rate_ = sample_rate ? sample_rate : 48000;
+    rebuild_filters();
+}
+
 void GridChannelDspStrip::set_params(const L2DspParamPayload& p) {
     params_ = p;
-    params_.hpf_hz = std::clamp(p.hpf_hz, 20.0f, 300.0f);
-    params_.eq_low_db = std::clamp(p.eq_low_db, -15.0f, 15.0f);
-    params_.eq_mid_hz = std::clamp(p.eq_mid_hz, 200.0f, 8000.0f);
-    params_.eq_mid_db = std::clamp(p.eq_mid_db, -15.0f, 15.0f);
-    params_.eq_high_db = std::clamp(p.eq_high_db, -15.0f, 15.0f);
-    params_.comp_thresh_db = std::clamp(p.comp_thresh_db, -48.0f, 0.0f);
-    params_.comp_ratio = std::clamp(p.comp_ratio, 1.0f, 20.0f);
-    params_.comp_makeup_db = std::clamp(p.comp_makeup_db, 0.0f, 24.0f);
-    params_.gate_thresh_db = std::clamp(p.gate_thresh_db, -80.0f, -10.0f);
-    params_.output_gain_db = std::clamp(p.output_gain_db, -60.0f, 12.0f);
+    params_.hpf_hz = finite_clamp(p.hpf_hz, 20.0f, 300.0f, 80.0f);
+    params_.eq_low_db = finite_clamp(p.eq_low_db, -15.0f, 15.0f, 0.0f);
+    params_.eq_mid_hz = finite_clamp(p.eq_mid_hz, 200.0f, 8000.0f, 1200.0f);
+    params_.eq_mid_db = finite_clamp(p.eq_mid_db, -15.0f, 15.0f, 0.0f);
+    params_.eq_high_db = finite_clamp(p.eq_high_db, -15.0f, 15.0f, 0.0f);
+    params_.comp_thresh_db = finite_clamp(p.comp_thresh_db, -48.0f, 0.0f, -18.0f);
+    params_.comp_ratio = finite_clamp(p.comp_ratio, 1.0f, 20.0f, 3.0f);
+    params_.comp_makeup_db = finite_clamp(p.comp_makeup_db, 0.0f, 24.0f, 0.0f);
+    params_.gate_thresh_db = finite_clamp(p.gate_thresh_db, -80.0f, -10.0f, -50.0f);
+    params_.output_gain_db = finite_clamp(p.output_gain_db, -60.0f, 12.0f, 0.0f);
     rebuild_filters();
 }
 
@@ -69,7 +78,7 @@ void GridChannelDspStrip::rebuild_filters() {
         // Low shelf
         {
             const float A = std::pow(10.0f, params_.eq_low_db / 40.0f);
-            const float w0 = 2.0f * kPi * 100.0f / fs;
+            const float w0 = 2.0f * kPi * std::min(100.0f, fs * 0.45f) / fs;
             const float cs = std::cos(w0), sn = std::sin(w0);
             const float alpha = sn * 0.5f * std::sqrt(2.0f);
             const float two = 2.0f * std::sqrt(A) * alpha;
@@ -96,7 +105,7 @@ void GridChannelDspStrip::rebuild_filters() {
         // High shelf
         {
             const float A = std::pow(10.0f, params_.eq_high_db / 40.0f);
-            const float w0 = 2.0f * kPi * 8000.0f / fs;
+            const float w0 = 2.0f * kPi * std::min(8000.0f, fs * 0.45f) / fs;
             const float cs = std::cos(w0), sn = std::sin(w0);
             const float alpha = sn * 0.5f * std::sqrt(2.0f);
             const float two = 2.0f * std::sqrt(A) * alpha;
@@ -126,13 +135,16 @@ void GridChannelDspStrip::process_inplace(float* buf, uint32_t frames) {
 
     const float comp_att = std::exp(-1.0f / std::max(1.0f, 0.005f * fs));
     const float comp_rel = std::exp(-1.0f / std::max(1.0f, 0.080f * fs));
+    const float gate_att = std::exp(-1.0f / std::max(1.0f, 0.0002f * fs));
+    const float gate_rel = std::exp(-1.0f / std::max(1.0f, 0.004f * fs));
+    const float gate_smooth = 1.0f - std::exp(-1.0f / std::max(1.0f, 0.0004f * fs));
     const float comp_makeup = db_to_lin(params_.comp_makeup_db);
     const float out_gain = db_to_lin(params_.output_gain_db);
     const float lim_rel = std::exp(-1.0f / std::max(1.0f, 0.030f * fs));
 
     float worst_gr = 0.0f;
     for (uint32_t i = 0; i < frames; ++i) {
-        float x = buf[i];
+        float x = std::isfinite(buf[i]) ? buf[i] : 0.0f;
         if (hpf_on) x = hpf_.process(x);
         if (eq_on) {
             x = eq_low_.process(x);
@@ -141,10 +153,11 @@ void GridChannelDspStrip::process_inplace(float* buf, uint32_t frames) {
         }
         if (gate_on) {
             const float a = std::fabs(x);
-            gate_env_ = (a > gate_env_) ? (0.9f * gate_env_ + 0.1f * a) : (0.995f * gate_env_ + 0.005f * a);
+            const float gc = (a > gate_env_) ? gate_att : gate_rel;
+            gate_env_ = gc * gate_env_ + (1.0f - gc) * a;
             const float db = (gate_env_ > 1e-6f) ? (20.0f * std::log10(gate_env_)) : -120.0f;
             const float tgt = (db >= params_.gate_thresh_db) ? 1.0f : 0.0f;
-            gate_gain_ += (tgt - gate_gain_) * 0.05f;
+            gate_gain_ += (tgt - gate_gain_) * gate_smooth;
             x *= gate_gain_;
         }
         if (comp_on) {
@@ -182,6 +195,7 @@ GridDspServer::GridDspServer(std::unique_ptr<L2Transport> transport, const std::
       sample_rate_(sample_rate ? sample_rate : 48000),
       start_us_(now_us()) {
     for (uint16_t c = 0; c < kGridMaxChannels; ++c) {
+        strips_[c].set_sample_rate(sample_rate_);
         out_bufs_[c].resize(128, 0.0f);
         out_ptrs_[c] = out_bufs_[c].data();
     }
@@ -280,7 +294,8 @@ GridFailoverController::GridFailoverController(GridNode& host_node, const MacAdd
     : host_(host_node),
       primary_mac_(primary_mac),
       backup_mac_(backup_mac),
-      timeout_us_(failover_timeout_us ? failover_timeout_us : 8000) {}
+      timeout_us_(failover_timeout_us ? failover_timeout_us : 8000),
+      start_us_(now_us()) {}
 
 void GridFailoverController::send_dry_mirrored(uint16_t stream_id, const float* const* planes, uint16_t ch_start,
                                                uint16_t ch_count, uint16_t samples_per_ch, uint32_t media_ts_lo) {
@@ -301,14 +316,20 @@ void GridFailoverController::send_param_mirrored(const L2DspParamPayload& param)
 
 bool GridFailoverController::on_processed_return(const MacAddress& src_mac, uint64_t now_us_val) {
     std::lock_guard<std::mutex> lk(mu_);
+    if (start_us_ == 0 || now_us_val < start_us_) start_us_ = now_us_val;
     if (src_mac == primary_mac_) {
         last_primary_us_ = now_us_val;
+        if (using_backup_ && last_backup_us_ > 0 && now_us_val > last_backup_us_ &&
+            (now_us_val - last_backup_us_) > timeout_us_) {
+            using_backup_ = false;
+            ++failover_count_;
+        }
         return !using_backup_;
     }
     if (src_mac == backup_mac_) {
         last_backup_us_ = now_us_val;
-        if (!using_backup_ && last_primary_us_ > 0 && now_us_val > last_primary_us_ &&
-            (now_us_val - last_primary_us_) > timeout_us_) {
+        const uint64_t ref_p = last_primary_us_ ? last_primary_us_ : start_us_;
+        if (!using_backup_ && now_us_val > ref_p && (now_us_val - ref_p) > timeout_us_) {
             using_backup_ = true;
             ++failover_count_;
         }
@@ -320,6 +341,7 @@ bool GridFailoverController::on_processed_return(const MacAddress& src_mac, uint
 void GridFailoverController::on_heartbeat(const MacAddress& src_mac, const L2HeartbeatPayload& hb,
                                           uint64_t now_us_val) {
     std::lock_guard<std::mutex> lk(mu_);
+    if (start_us_ == 0 || now_us_val < start_us_) start_us_ = now_us_val;
     if (src_mac == primary_mac_) {
         last_primary_us_ = now_us_val;
         primary_cpu_ = float(hb.cpu_load_pct_x10) * 0.1f;
@@ -331,11 +353,17 @@ void GridFailoverController::on_heartbeat(const MacAddress& src_mac, const L2Hea
 
 void GridFailoverController::check_failover(uint64_t now_us_val) {
     std::lock_guard<std::mutex> lk(mu_);
-    const bool primary_timed_out =
-        (last_primary_us_ > 0 && now_us_val > last_primary_us_ && (now_us_val - last_primary_us_) > timeout_us_);
+    if (start_us_ == 0 || now_us_val < start_us_) start_us_ = now_us_val;
+    const uint64_t ref_p = last_primary_us_ ? last_primary_us_ : start_us_;
+    const bool primary_timed_out = (now_us_val > ref_p && (now_us_val - ref_p) > timeout_us_);
     const uint64_t backup_age = (now_us_val > last_backup_us_) ? (now_us_val - last_backup_us_) : 0;
+    const uint64_t primary_age = (now_us_val > last_primary_us_) ? (now_us_val - last_primary_us_) : 0;
     if (!using_backup_ && primary_timed_out && last_backup_us_ > 0 && backup_age <= timeout_us_ * 2) {
         using_backup_ = true;
+        ++failover_count_;
+    } else if (using_backup_ && last_backup_us_ > 0 && backup_age > timeout_us_ &&
+               last_primary_us_ > 0 && primary_age <= timeout_us_ * 2) {
+        using_backup_ = false;
         ++failover_count_;
     }
 }

@@ -771,7 +771,7 @@ public:
     }
 
     bool encode_image(const Image& img, EncodedVideoPacket& out) override {
-        if (!mft_ || img.width != width_ || img.height != height_) return false;
+        if (!mft_ || (img.width & ~1) != width_ || (img.height & ~1) != height_) return false;
 
         // Fast Path: GPU D3D11 Video Processor (BGRA/RGBA -> NV12) + MFCreateDXGISurfaceBuffer!
         if (use_d3d_surfaces_ && d3d_dev_ && d3d_ctx_) {
@@ -815,7 +815,7 @@ public:
 
     bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                        EncodedVideoPacket& out) override {
-        if (!mft_ || width != width_ || height != height_) return false;
+        if (!mft_ || (width & ~1) != width_ || (height & ~1) != height_) return false;
         const size_t nv12_size = size_t(width_) * size_t(height_) * 3 / 2;
         ComPtr<IMFSample> sample;
         ComPtr<IMFMediaBuffer> buf;
@@ -1046,8 +1046,9 @@ private:
         if (odb.pEvents) odb.pEvents->Release();
 
         if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+            if (mft_provides && odb.pSample) odb.pSample->Release();
             mft_->GetOutputStreamInfo(out_stream_id_, &out_stream_info_);
-            return pull_output_sample(out);
+            return false;
         }
         if (FAILED(hr) || !odb.pSample) {
             if (mft_provides && odb.pSample) odb.pSample->Release();
@@ -1099,6 +1100,7 @@ private:
                 if (FAILED(event_gen_->GetEvent(0, &ev)) || !ev) return false;
                 MediaEventType met = MEUnknown;
                 ev->GetType(&met);
+                if (met == MEError) return false;
                 if (met == METransformNeedInput) {
                     ++pending_need_input_;
                 } else if (met == METransformHaveOutput) {
@@ -1116,6 +1118,7 @@ private:
                 if (FAILED(event_gen_->GetEvent(0, &ev)) || !ev) return false;
                 MediaEventType met = MEUnknown;
                 ev->GetType(&met);
+                if (met == MEError) return false;
                 if (met == METransformHaveOutput) {
                     return pull_output_sample(out);
                 } else if (met == METransformNeedInput) {
@@ -1245,6 +1248,7 @@ public:
                 if (FAILED(event_gen_->GetEvent(0, &ev)) || !ev) return false;
                 MediaEventType met = MEUnknown;
                 ev->GetType(&met);
+                if (met == MEError) return false;
                 if (met == METransformNeedInput) ++pending_need_input_;
                 else if (met == METransformHaveOutput) {
                     pull_decoded_frame(output_order, out_image);
@@ -1259,6 +1263,7 @@ public:
                 if (FAILED(event_gen_->GetEvent(0, &ev)) || !ev) return false;
                 MediaEventType met = MEUnknown;
                 ev->GetType(&met);
+                if (met == MEError) return false;
                 if (met == METransformHaveOutput) {
                     if (pull_decoded_frame(output_order, out_image)) return true;
                 } else if (met == METransformNeedInput) {
@@ -1505,13 +1510,14 @@ private:
         if (SUCCEEDED(buf.As(&buf2d)) && buf2d) {
             BYTE* scan0 = nullptr;
             LONG pitch = 0;
-            if (SUCCEEDED(buf2d->Lock2D(&scan0, &pitch)) && scan0 && pitch > 0) {
+            if (SUCCEEDED(buf2d->Lock2D(&scan0, &pitch)) && scan0 && pitch >= display_w_) {
                 const uint8_t* uv_ptr = scan0 + size_t(coded_h_) * size_t(pitch);
                 nv12_to_packed_rgb(scan0, int(pitch), uv_ptr, int(pitch), display_w_, display_h_,
                                    order, out_image);
                 buf2d->Unlock2D();
                 return true;
             }
+            if (scan0) buf2d->Unlock2D();
         }
 
         // Path 3: Flat contiguous IMFMediaBuffer

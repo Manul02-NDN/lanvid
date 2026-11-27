@@ -140,10 +140,6 @@ bool UdpSocket::set_tos(int tos_value) const {
     int tos = tos_value;
     const bool ok =
         ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_TOS, reinterpret_cast<const char*>(&tos), sizeof(tos)) == 0;
-#if defined(IPV6_TCLASS)
-    int tclass = tos_value;
-    (void)::setsockopt(SOCKET(fd_), IPPROTO_IPV6, IPV6_TCLASS, reinterpret_cast<const char*>(&tclass), sizeof(tclass));
-#endif
     if (ok) cached_tos_.store(tos_value, std::memory_order_relaxed);
     return ok;
 }

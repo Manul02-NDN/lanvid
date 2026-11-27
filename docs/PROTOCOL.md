@@ -16,7 +16,7 @@ Ultra-low-latency intra-only LAN video + audio streaming protocol and slice-para
 | Offset | Size | Field | Notes |
 |---:|---:|---|---|
 | 0 | 2 | `magic` | `0x4C 0x56` (`"LV"`) |
-| 2 | 1 | `ver_type` | high nibble `version=1`, low nibble `type`: `1=VIDEO_SLICE, 2=PING, 3=AUDIO, 4=FEEDBACK, 5=PONG, 6=AUDIO2, 7=AUDIO_NACK` |
+| 2 | 1 | `ver_type` | high nibble `version=1`, low nibble `type`: `1=VIDEO_SLICE, 2=PING, 3=AUDIO, 4=FEEDBACK, 5=PONG, 6=AUDIO2, 7=AUDIO_NACK, 8=MIDI_FRAME, 9=CONTROL_SYNC, 10=TALLY_STATE, 11=INTERCOM_AUDIO, 12=CAMERA_CONTROL, 13=VIDEO_CONFIG_SYNC, 14=VIDEO_KEYFRAME_REQ` |
 | 3 | 1 | `flags` | bit0 `HAS_CRC` (`0x01`), bit1 `LAST_FRAG` (`0x02`), bit2 `LAST_SLICE_OF_FRAME` (`0x04`), bit3 `FEC_PARITY` (`0x08`), bit4 `KEYFRAME` (`0x10`, IDR), bit5 `CODEC_CONFIG` (`0x20`, SPS/PPS/VPS present), bits 6–7 `codec_id` (`0xC0`: `0=LANVID_DCT`, `1=H264`, `2=H265`) |
 | 4 | 4 | `frame_id` | u32 monotonic video `frame_id` or `audio_seq_id` (RFC 1982 wrap comparison) |
 | 8 | 4 | `timestamp_us` | u32 shared monotonic clock (`steady_clock`/QPC) for A/V sync & E2E latency |
@@ -158,13 +158,11 @@ The arrival lag is `MasterClock position at arrival - end of the block's samples
 received AUDIO2 packet (envelope: instant attack, 4 s release). Steps larger than 40 ms, a switch from a
 grown Adaptive buffer to Fixed and a consumer stall all re-anchor once with a 96-sample crossfade.
 
-`current_effective_latency_ms()` reports the measured delay (`MasterClock now - playout cursor`), shown in
-LanVid Studio as **ACTUAL BUFFER** (cyan = Fixed, green = Adaptive at nominal, amber = expanded by a burst).
+`current_effective_latency_ms()` reports the measured delay (`MasterClock now - playout cursor`) for telemetry displays.
 
 * C ABI: `LvReceiverConfig.adaptive_jitter`, `LV_DuplexConfig.adaptive_jitter` (both default 1),
   `lv_receiver_set_adaptive_jitter()`, `lv_duplex_set_adaptive_jitter()`, `lv_receiver_get_effective_latency_ms()`,
   `LvReceiverStats` / `LV_DuplexStats` `.effective_latency_ms`, `.effective_target_ms`, `.adaptive_jitter` (appended fields).
-* CLI: `receiver --fixed-latency`, `sender --duplex --fixed-latency`. Studio: `config.json` key `"adaptive_jitter"`.
 
 ## Platform Backends & Build
 
@@ -172,37 +170,17 @@ LanVid Studio as **ACTUAL BUFFER** (cyan = Fixed, green = Adaptive at nominal, a
 |---|---|---|---|
 | UDP Transport | Winsock2 | POSIX + `sendmmsg`/`recvmmsg` | POSIX BSD sockets |
 | SIMD | AVX2 (runtime CPUID) | AVX2 (x86_64) / NEON (ARM64) | AVX2 (x86_64) / NEON (Apple Silicon) |
-| Preview Window | Direct3D 11 Flip-Model + GDI fallback | Optional SDL2 (auto-detected) | Optional SDL2 (auto-detected) |
-| Capture / Audio | DXGI/GDI screen, MF webcam, WASAPI audio | Pattern + Y4M/PPM/raw file | Pattern + Y4M/PPM/raw file |
+| HW Video Codecs | Media Foundation (H.264/H.265) | FFmpeg `libavcodec` (NVENC/VAAPI/x264/x265) | VideoToolbox (H.264/H.265, zero-copy `CVPixelBuffer`) |
+| Capture / Audio | DXGI/GDI screen, MF webcam, WASAPI audio | Pattern + Y4M/PPM/raw file | CoreAudio / CoreMIDI + Pattern + Y4M/PPM/raw file |
 
 ```bash
-# Windows / Linux / macOS
+# Windows / Linux / macOS — build Core SDK (lanvid_core static & shared) + unit tests
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-# Unit tests (41 tests: DCT/AVX2 4K parity, FEC, AIMD, audio jitter buffer, 64-ch AoIP sync/reliability, Y4M/PPM, A/V loopback)
+# Run full SDK core test suite (DCT/AVX2/NEON parity, FEC, AIMD, 64-ch AoIP sync, MIDI, L2 Grid, Multi-Cam/ISO/Playout)
 ./build/lanvid_tests
 
-# Benchmark 1080p & 4K60 (scalar vs AVX2/NEON)
-./build/bench_codec
-
-# Windows 4K60 desktop + system audio (WASAPI loopback) -> D3D11 preview + WASAPI playback
-./build/receiver --port 5000 --preview
-./build/sender --source screen --monitor 0 --audio loopback --host 127.0.0.1 --port 5000 --fps 60 --fec-group 6 --adaptive-quality
-
-# Linux / macOS streaming from Y4M / PPM / pattern
-./build/receiver --port 5000 --preview
-./build/sender --source file --input sample.y4m --host 127.0.0.1 --port 5000
+# Package cross-platform SDK distribution + verify external CMake consumer
+python3 sdk/build_sdk.py --verify-client
 ```
-
-```bash
-# 64-channel AoIP test bus (N sine tones), 40 ms budget, receiver prints per-second bus telemetry
-./build/receiver --port 5000 --audio-channels 64 --audio-latency 40
-./build/sender --host 127.0.0.1 --port 5000 --audio tone --audio-channels 64 --audio-latency 40
-```
-
-### Preview Window Hotkeys (`receiver --preview`)
-- `Esc` / `Q` — close preview and exit
-- `F` / `F11` / double-click — toggle borderless fullscreen
-- `C` — live toggle concealment mode (`prev` <-> `gray`)
-- `S` — save current displayed frame as `snapshot_XXXX.ppm`

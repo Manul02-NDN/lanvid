@@ -84,7 +84,8 @@ void ThreadPool::worker_loop(uint32_t worker_id) {
 void ThreadPool::parallel_for(uint32_t count, const std::function<void(uint32_t, uint32_t)>& fn) {
     if (count == 0) return;
     if (num_threads_ <= 1 || count == 1) {
-        for (uint32_t i = 0; i < count; ++i) fn(i, 0);
+        // Use the caller's dedicated slot (num_threads_) so we never collide with worker 0 running async tasks.
+        for (uint32_t i = 0; i < count; ++i) fn(i, num_threads_);
         return;
     }
 

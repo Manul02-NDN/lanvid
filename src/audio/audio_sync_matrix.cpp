@@ -31,6 +31,12 @@ inline float hermite4(float xm1, float x0, float x1, float x2, float t) {
     const float c3 = 0.5f * (x2 - xm1) + 1.5f * (x0 - x1);
     return ((c3 * t + c2) * t + c1) * t + c0;
 }
+
+inline uint32_t make_ring_tag(uint32_t epoch, uint64_t pos, uint32_t shift) {
+    const uint32_t lap = uint32_t((pos >> shift) & 0x00FFFFFFu);
+    const uint32_t ep = ((epoch - 1u) % 255u) + 1u;  // 1..255, never 0
+    return (ep << 24) | lap;
+}
 }  // namespace
 
 AudioSyncMatrix::AudioSyncMatrix(uint32_t sample_rate)
@@ -40,6 +46,7 @@ AudioSyncMatrix::AudioSyncMatrix(uint32_t sample_rate)
     mask_ = cap_ - 1;
     shift_ = 0;
     while ((1u << shift_) < cap_) ++shift_;
+    meter_scratch_.assign(4096, 0.0f);
 }
 
 AudioSyncMatrix::~AudioSyncMatrix() {
@@ -58,9 +65,13 @@ void AudioSyncMatrix::reset() {
     effective_latency_ms_.store(latency_ms_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     actual_latency_ms_.store(0.0, std::memory_order_relaxed);
     jitter_peak_us_.store(0, std::memory_order_relaxed);
+    const uint32_t next_ep = epoch_gen_.fetch_add(1, std::memory_order_acq_rel) + 1u;
+    active_epoch_ = next_ep;
     for (auto& c : ch_) {
         Ring* r = c.ring.load(std::memory_order_acquire);
-        if (r) std::fill(r->tag.begin(), r->tag.end(), uint16_t(0));
+        if (r) {
+            for (uint32_t i = 0; i < r->size; ++i) r->tag[i].store(0u, std::memory_order_relaxed);
+        }
         c.head.store(0, std::memory_order_relaxed);
         c.first_ts.store(UINT64_MAX, std::memory_order_relaxed);
         c.seen_write_count = c.write_count.load(std::memory_order_relaxed);
@@ -73,6 +84,7 @@ void AudioSyncMatrix::reset() {
 }
 
 void AudioSyncMatrix::request_epoch_reset() {
+    epoch_gen_.fetch_add(1, std::memory_order_acq_rel);
     for (auto& c : ch_) {
         c.head.store(0, std::memory_order_relaxed);
         c.first_ts.store(UINT64_MAX, std::memory_order_relaxed);
@@ -194,31 +206,30 @@ void AudioSyncMatrix::write_frame_atomic(uint64_t ts, const float* const* planes
                                          uint32_t num_channels, uint32_t frames) {
     if (!planes || frames == 0) return;
     const uint32_t nch = std::min(num_channels, kChannels);
+    const uint32_t ep = epoch_gen_.load(std::memory_order_acquire);
     // Ensure rings exist for all channels first
     for (uint32_t chi = 0; chi < nch; ++chi) {
         Chan& c = ch_[chi];
         Ring* r = c.ring.load(std::memory_order_relaxed);
         if (!r) {
-            r = new Ring();
-            r->data.assign(cap_, 0.0f);
-            r->tag.assign(cap_, 0);
+            r = new Ring(cap_);
             c.ring.store(r, std::memory_order_release);
         }
         const float* src = planes[chi];
         for (uint32_t i = 0; i < frames; ++i) {
             const uint32_t idx = uint32_t(ts + i) & mask_;
-            r->data[idx] = src ? src[i] : 0.0f;
+            const float v = (src && std::isfinite(src[i])) ? src[i] : 0.0f;
+            r->data[idx].store(v, std::memory_order_relaxed);
         }
     }
-    // Single release fence publishes all N channels for [ts, ts + frames) atomically
-    std::atomic_thread_fence(std::memory_order_release);
+    // Publish all N channels for [ts, ts + frames) with release semantics
     const uint64_t end = ts + frames;
     for (uint32_t chi = 0; chi < nch; ++chi) {
         Chan& c = ch_[chi];
         Ring* r = c.ring.load(std::memory_order_relaxed);
         for (uint32_t i = 0; i < frames; ++i) {
             const uint64_t p = ts + i;
-            r->tag[uint32_t(p) & mask_] = uint16_t((p >> shift_) + 1);
+            r->tag[uint32_t(p) & mask_].store(make_ring_tag(ep, p, shift_), std::memory_order_release);
         }
         const uint64_t first = c.first_ts.load(std::memory_order_relaxed);
         if (ts < first) c.first_ts.store(ts, std::memory_order_relaxed);
@@ -228,21 +239,22 @@ void AudioSyncMatrix::write_frame_atomic(uint64_t ts, const float* const* planes
 }
 
 void AudioSyncMatrix::write(uint16_t channel, uint64_t ts, const float* s, uint32_t n) {
-    if (channel >= kChannels || n == 0) return;
+    if (channel >= kChannels || !s || n == 0) return;
+    const uint32_t ep = epoch_gen_.load(std::memory_order_acquire);
     Chan& c = ch_[channel];
     Ring* r = c.ring.load(std::memory_order_relaxed);
     if (!r) {
-        r = new Ring();
-        r->data.assign(cap_, 0.0f);
-        r->tag.assign(cap_, 0);
+        r = new Ring(cap_);
         c.ring.store(r, std::memory_order_release);
     }
     for (uint32_t i = 0; i < n; ++i) {
+        const uint32_t idx = uint32_t(ts + i) & mask_;
+        const float v = std::isfinite(s[i]) ? s[i] : 0.0f;
+        r->data[idx].store(v, std::memory_order_relaxed);
+    }
+    for (uint32_t i = 0; i < n; ++i) {
         const uint64_t p = ts + i;
-        const uint32_t idx = uint32_t(p) & mask_;
-        r->data[idx] = s[i];
-        std::atomic_thread_fence(std::memory_order_release);
-        r->tag[idx] = uint16_t((p >> shift_) + 1);
+        r->tag[uint32_t(p) & mask_].store(make_ring_tag(ep, p, shift_), std::memory_order_release);
     }
     uint64_t first = c.first_ts.load(std::memory_order_relaxed);
     if (ts < first) c.first_ts.store(ts, std::memory_order_relaxed);
@@ -257,12 +269,14 @@ uint64_t AudioSyncMatrix::newest_media_ts() const {
     return m;
 }
 
-bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, float& v) const {
+bool AudioSyncMatrix::sample_at(const Ring& r, int64_t pos, uint32_t epoch, float& v) const {
     if (pos < 0) return false;
     const uint32_t idx = uint32_t(pos) & mask_;
-    const uint16_t want = uint16_t((uint64_t(pos) >> shift_) + 1);
-    if (r.tag[idx] != want) return false;
-    v = r.data[idx];
+    const uint32_t want = make_ring_tag(epoch, uint64_t(pos), shift_);
+    if (r.tag[idx].load(std::memory_order_acquire) != want) return false;
+    const float s = r.data[idx].load(std::memory_order_relaxed);
+    if (r.tag[idx].load(std::memory_order_acquire) != want) return false;
+    v = s;
     return true;
 }
 
@@ -289,6 +303,9 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
     if (epoch_reset_req_.exchange(false, std::memory_order_acq_rel)) {
         // New sender epoch: the old timeline is gone. Fade the old position out (crossfade into a
         // position with no data = silence) and re-anchor once the new stream has data / clock sync.
+        p.old_epoch = active_epoch_;
+        active_epoch_ = epoch_gen_.load(std::memory_order_acquire);
+        p.epoch = active_epoch_;
         p.seek = started_;
         p.old_cursor = cursor_;
         p.cursor = -4.0 * double(frames);  // negative positions never hold data -> silence
@@ -299,6 +316,11 @@ AudioSyncMatrix::Plan AudioSyncMatrix::plan(const MasterClock& clk, uint64_t loc
         actual_latency_ms_.store(0.0, std::memory_order_relaxed);
         return p;
     }
+    if (!started_) {
+        active_epoch_ = epoch_gen_.load(std::memory_order_acquire);
+    }
+    p.epoch = active_epoch_;
+    p.old_epoch = active_epoch_;
     const bool det = deterministic_playout_.load(std::memory_order_acquire);
     const bool adaptive = !det && adaptive_jitter_.load(std::memory_order_acquire);
     const double prev_eff = eff_ms_;
@@ -462,20 +484,20 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     const uint64_t first_ts = c.first_ts.load(std::memory_order_relaxed);
 
     float peak = 0.0f;
-    auto read_at = [&](double base, double ratio, uint32_t i, bool& ok) -> float {
+    auto read_at = [&](double base, double ratio, uint32_t i, uint32_t epoch, bool& ok) -> float {
         const double pos = base + double(i) * ratio;
         const int64_t i0 = int64_t(std::floor(pos));
         const double frac = pos - double(i0);
         float x0 = 0.0f;
-        ok = sample_at(*r, i0, x0);
+        ok = sample_at(*r, i0, epoch, x0);
         if (!ok) return 0.0f;
         if (frac < 1e-9) return x0;
         float xm1 = x0, x1 = x0, x2 = x0;
-        sample_at(*r, i0 - 1, xm1);
+        sample_at(*r, i0 - 1, epoch, xm1);
         // The look-ahead samples must exist: substituting a missing one would give THIS channel a
         // slightly different value than the others (a silent inter-channel phase error). Treat it as
         // late data instead (gap -> concealment + underrun counter), like a missing x0.
-        if (!sample_at(*r, i0 + 1, x1) || !sample_at(*r, i0 + 2, x2)) {
+        if (!sample_at(*r, i0 + 1, epoch, x1) || !sample_at(*r, i0 + 2, epoch, x2)) {
             ok = false;
             return 0.0f;
         }
@@ -486,10 +508,10 @@ void AudioSyncMatrix::render_channel(uint16_t chi, const Plan& p, uint32_t frame
     bool resumed_after_gap = false;
     for (uint32_t i = 0; i < frames; ++i) {
         bool ok = false;
-        float v = p.hold ? 0.0f : read_at(p.cursor, p.ratio, i, ok);
+        float v = p.hold ? 0.0f : read_at(p.cursor, p.ratio, i, p.epoch, ok);
         if (p.seek && i < kCrossfadeSamples) {
             bool ok_old = false;
-            const float vo = read_at(p.old_cursor, 1.0, i, ok_old);
+            const float vo = read_at(p.old_cursor, 1.0, i, p.old_epoch, ok_old);
             const float w = float(i + 1) / float(kCrossfadeSamples + 1);
             v = v * w + vo * (1.0f - w);
             ok = ok || ok_old;
@@ -557,11 +579,10 @@ void AudioSyncMatrix::pop_planar(const MasterClock& clk, uint64_t local_now_us, 
     for (uint32_t c = 0; c < kChannels; ++c) {
         if (c < num_channels && out && out[c]) {
             render_channel(uint16_t(c), p, frames, out[c], 1);
-        } else if (ch_[c].ring.load(std::memory_order_relaxed)) {
+        } else if (ch_[c].ring.load(std::memory_order_acquire)) {
             // Meter-only channels still need to advance their activity/level state.
-            static thread_local std::vector<float> scratch;
-            if (scratch.size() < frames) scratch.resize(frames);
-            render_channel(uint16_t(c), p, frames, scratch.data(), 1);
+            if (meter_scratch_.size() < frames) meter_scratch_.resize(frames);
+            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1);
         }
     }
     if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
@@ -574,7 +595,7 @@ void AudioSyncMatrix::pop_planar(const MasterClock& clk, uint64_t local_now_us, 
                 if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
                 const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
                 float dummy = 0.0f;
-                if (!r || !sample_at(*r, i0, dummy)) {
+                if (!r || !sample_at(*r, i0, p.epoch, dummy)) {
                     frame_incomplete = true;
                     break;
                 }
@@ -598,10 +619,9 @@ void AudioSyncMatrix::pop_interleaved(const MasterClock& clk, uint64_t local_now
     for (uint32_t c = 0; c < kChannels; ++c) {
         if (c < num_channels && out) {
             render_channel(uint16_t(c), p, frames, out + c, num_channels);
-        } else if (ch_[c].ring.load(std::memory_order_relaxed)) {
-            static thread_local std::vector<float> scratch;
-            if (scratch.size() < frames) scratch.resize(frames);
-            render_channel(uint16_t(c), p, frames, scratch.data(), 1);
+        } else if (ch_[c].ring.load(std::memory_order_acquire)) {
+            if (meter_scratch_.size() < frames) meter_scratch_.resize(frames);
+            render_channel(uint16_t(c), p, frames, meter_scratch_.data(), 1);
         }
     }
     if (atomic_frame_lock_.load(std::memory_order_acquire) && out) {
@@ -612,7 +632,7 @@ void AudioSyncMatrix::pop_interleaved(const MasterClock& clk, uint64_t local_now
                 if (!ch_[c].active.load(std::memory_order_relaxed)) continue;
                 const Ring* r = ch_[c].ring.load(std::memory_order_acquire);
                 float dummy = 0.0f;
-                if (!r || !sample_at(*r, i0, dummy)) {
+                if (!r || !sample_at(*r, i0, p.epoch, dummy)) {
                     frame_incomplete = true;
                     break;
                 }

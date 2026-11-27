@@ -27,6 +27,9 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
+                .linkedFramework("CoreMIDI"),
+                .linkedFramework("CoreAudio", .when(platforms: [.macOS])),
+                .linkedFramework("SystemConfiguration", .when(platforms: [.macOS])),
                 .linkedLibrary("c++")
             ]
         )

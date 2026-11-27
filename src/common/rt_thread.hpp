@@ -31,8 +31,12 @@ public:
 
 private:
     bool active_ = false;
+#if defined(_WIN32)
     void* mmcss_ = nullptr;  // Windows MMCSS task handle
     bool timer_ = false;     // Windows timeBeginPeriod(1) taken
+    int prev_prio_ = 0;
+    bool has_prev_prio_ = false;
+#endif
 };
 
 }  // namespace lv

@@ -18,12 +18,17 @@ GridNode::GridNode(std::unique_ptr<L2Transport> transport, const GridNodeConfig&
         clock_.locked = true;
     }
     for (uint16_t c = 0; c < kGridMaxChannels; ++c) {
-        rx_scratch_[c].resize(128, 0.0f);
+        rx_scratch_[c].resize(256, 0.0f);
         rx_ptrs_[c] = rx_scratch_[c].data();
     }
 }
 
 GridNode::~GridNode() = default;
+
+GridNodeConfig GridNode::config() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return cfg_;
+}
 
 void GridNode::set_vlan_qos(const VlanQosTag& vlan) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -184,6 +189,7 @@ void GridNode::apply_local_route_rule(const L2RouteRulePayload& rule) {
             return;
         }
     }
+    if (tx_routes_.size() >= 512) return;
     tx_routes_.push_back(rule);
 }
 
@@ -231,6 +237,7 @@ size_t GridNode::send_audio_direct(const MacAddress& dst, uint16_t stream_id,
                                    uint16_t ch_count, uint16_t samples_per_ch, uint32_t media_ts_lo,
                                    uint8_t flags) {
     if (!is_open() || !planes || ch_count == 0 || samples_per_ch == 0) return 0;
+    if (uint32_t(src_ch_start) + uint32_t(ch_count) > kGridMaxChannels) return 0;
     L2AudioFormat fmt;
     VlanQosTag vlan;
     {
@@ -240,39 +247,52 @@ size_t GridNode::send_audio_direct(const MacAddress& dst, uint16_t stream_id,
     }
 
     // Fit cleanly inside standard 1500-byte Ethernet MTU (max ~1464 bytes audio payload per frame)
+    // and respect the 8-bit samples_per_ch header field (<= 255 samples per chunk).
     constexpr size_t kMaxPayload = 1440;
-    const size_t bytes_per_ch = size_t(samples_per_ch) * ((fmt == L2AudioFormat::kFloat32) ? 4u : 3u);
-    const uint16_t max_ch_per_frame =
-        uint16_t(std::clamp<size_t>(kMaxPayload / std::max<size_t>(bytes_per_ch, 1u), 1u, 255u));
+    const size_t bps = (fmt == L2AudioFormat::kFloat32) ? 4u : 3u;
+    const uint16_t max_spc = uint16_t(std::min<size_t>(255u, kMaxPayload / bps));
 
     uint8_t payload[kMaxPayload];
     uint8_t frame[kMaxEthFrameSize];
     size_t sent_frames = 0;
 
-    uint16_t done = 0;
-    while (done < ch_count) {
-        const uint16_t take = std::min<uint16_t>(max_ch_per_frame, uint16_t(ch_count - done));
-        const size_t plen = pack_l2_audio_planar(fmt, planes, uint16_t(src_ch_start + done), take,
-                                                 samples_per_ch, payload, sizeof(payload));
-        if (plen == 0) break;
-
-        LvL2Header hdr{};
-        hdr.type = L2PacketType::kAudio;
-        hdr.stream_id = stream_id;
-        hdr.seq = seq_.fetch_add(1, std::memory_order_relaxed);
-        hdr.channel_start = uint16_t(dst_ch_start + done);
-        hdr.channel_count = uint8_t(take);
-        hdr.samples_per_ch = uint8_t(samples_per_ch);
-        hdr.audio_fmt = fmt;
-        hdr.flags = flags;
-        hdr.media_ts_lo = media_ts_lo;
-
-        const size_t flen = write_l2_frame(frame, sizeof(frame), dst, mac(), vlan, hdr, payload, plen);
-        if (flen > 0 && transport_->send_frame(frame, flen)) {
-            ++sent_frames;
-            audio_tx_frames_.fetch_add(1, std::memory_order_relaxed);
+    for (uint16_t s_off = 0; s_off < samples_per_ch;) {
+        const uint16_t chunk_spc = std::min<uint16_t>(max_spc, uint16_t(samples_per_ch - s_off));
+        const float* chunk_planes[kGridMaxChannels]{};
+        for (uint16_t i = 0; i < ch_count; ++i) {
+            const uint16_t sc = uint16_t(src_ch_start + i);
+            chunk_planes[sc] = planes[sc] ? (planes[sc] + s_off) : nullptr;
         }
-        done = uint16_t(done + take);
+        const size_t bytes_per_ch = size_t(chunk_spc) * bps;
+        const uint16_t max_ch_per_frame =
+            uint16_t(std::clamp<size_t>(kMaxPayload / std::max<size_t>(bytes_per_ch, 1u), 1u, 255u));
+
+        uint16_t done = 0;
+        while (done < ch_count) {
+            const uint16_t take = std::min<uint16_t>(max_ch_per_frame, uint16_t(ch_count - done));
+            const size_t plen = pack_l2_audio_planar(fmt, chunk_planes, uint16_t(src_ch_start + done), take,
+                                                     chunk_spc, payload, sizeof(payload));
+            if (plen == 0) break;
+
+            LvL2Header hdr{};
+            hdr.type = L2PacketType::kAudio;
+            hdr.stream_id = stream_id;
+            hdr.seq = seq_.fetch_add(1, std::memory_order_relaxed);
+            hdr.channel_start = uint16_t(dst_ch_start + done);
+            hdr.channel_count = uint8_t(take);
+            hdr.samples_per_ch = uint8_t(chunk_spc);
+            hdr.audio_fmt = fmt;
+            hdr.flags = flags;
+            hdr.media_ts_lo = media_ts_lo + s_off;
+
+            const size_t flen = write_l2_frame(frame, sizeof(frame), dst, mac(), vlan, hdr, payload, plen);
+            if (flen > 0 && transport_->send_frame(frame, flen)) {
+                ++sent_frames;
+                audio_tx_frames_.fetch_add(1, std::memory_order_relaxed);
+            }
+            done = uint16_t(done + take);
+        }
+        s_off = uint16_t(s_off + chunk_spc);
     }
     return sent_frames;
 }
@@ -286,11 +306,30 @@ size_t GridNode::push_routed_audio(const float* const* planes, uint16_t total_ch
         routes = tx_routes_;
     }
     size_t total_frames = 0;
+    std::vector<float> scaled_storage;
+    const float* scaled_ptrs[kGridMaxChannels]{};
     for (const auto& r : routes) {
         if ((r.flags & 0x01u) != 0) continue;  // muted
         if (r.src_ch_start >= total_channels || r.channel_count == 0) continue;
         const uint16_t avail = std::min<uint16_t>(r.channel_count, uint16_t(total_channels - r.src_ch_start));
-        total_frames += send_audio_direct(r.dst_mac, r.stream_id, planes, r.src_ch_start, r.dst_ch_start,
+        const float* const* src_planes = planes;
+        if (r.gain_cb != 0) {
+            const float db = std::clamp(float(r.gain_cb) * 0.1f, -96.0f, 24.0f);
+            const float g = (db <= -96.0f) ? 0.0f : std::pow(10.0f, db / 20.0f);
+            scaled_storage.resize(size_t(avail) * size_t(samples_per_ch));
+            for (uint16_t c = 0; c < avail; ++c) {
+                float* dst_buf = scaled_storage.data() + size_t(c) * size_t(samples_per_ch);
+                const float* sp = planes[r.src_ch_start + c];
+                if (sp) {
+                    for (uint16_t i = 0; i < samples_per_ch; ++i) dst_buf[i] = sp[i] * g;
+                } else {
+                    std::memset(dst_buf, 0, size_t(samples_per_ch) * sizeof(float));
+                }
+                scaled_ptrs[r.src_ch_start + c] = dst_buf;
+            }
+            src_planes = scaled_ptrs;
+        }
+        total_frames += send_audio_direct(r.dst_mac, r.stream_id, src_planes, r.src_ch_start, r.dst_ch_start,
                                           avail, samples_per_ch, media_ts_lo,
                                           (r.flags & 0x02u) ? 0x04u : 0x00u);
     }
@@ -301,7 +340,6 @@ int GridNode::poll(int max_frames) {
     if (!is_open()) return 0;
     uint8_t buf[kMaxEthFrameSize];
     int processed = 0;
-    const uint64_t now = now_us();
     for (int i = 0; i < max_frames; ++i) {
         const int n = transport_->recv_frame(buf, sizeof(buf));
         if (n <= 0) break;
@@ -309,7 +347,7 @@ int GridNode::poll(int max_frames) {
         if (!parse_l2_frame(buf, size_t(n), f)) continue;
         // Ignore frames addressed to another unicast MAC
         if (!f.dst.is_broadcast() && f.dst != mac()) continue;
-        handle_frame(f, now);
+        handle_frame(f, now_us());
         ++processed;
     }
     return processed;
@@ -360,8 +398,16 @@ void GridNode::handle_frame(const ParsedL2Frame& f, uint64_t now_us_val) {
                 }
             }
             if (!slot) {
-                peers_.push_back({});
-                slot = &peers_.back();
+                if (peers_.size() >= 256) {
+                    auto oldest = std::min_element(peers_.begin(), peers_.end(),
+                                                   [](const GridDiscoveredNode& a, const GridDiscoveredNode& b) {
+                                                       return a.last_seen_us < b.last_seen_us;
+                                                   });
+                    slot = &(*oldest);
+                } else {
+                    peers_.push_back({});
+                    slot = &peers_.back();
+                }
             }
             slot->mac = f.src;
             slot->name = p.node_name[0] ? std::string(p.node_name) : f.src.to_string();

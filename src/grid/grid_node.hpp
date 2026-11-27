@@ -70,7 +70,7 @@ public:
     bool is_open() const { return transport_ && transport_->is_open(); }
     MacAddress mac() const { return transport_ ? transport_->mac() : MacAddress{}; }
     std::string backend_name() const { return transport_ ? transport_->backend_name() : "Closed"; }
-    const GridNodeConfig& config() const { return cfg_; }
+    GridNodeConfig config() const;
 
     void set_vlan_qos(const VlanQosTag& vlan);
     void set_clock_master(bool master);

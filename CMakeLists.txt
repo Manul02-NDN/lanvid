@@ -124,7 +124,6 @@ set(LV_CORE_SOURCES
   src/video/video_playout_buffer.cpp
   src/video/iso_recorder.cpp
   src/video/multicam_manager.cpp
-  src/net/mdns_advertiser.cpp
   src/midi/midi_sync_engine.cpp
   src/midi/midi_dejitter_queue.cpp
   src/midi/midi_device_manager.cpp
@@ -147,7 +146,6 @@ if(NOT LANVID_SDK_CORE_ONLY)
   list(APPEND LV_CORE_SOURCES
     src/app/test_pattern.cpp
     src/app/file_source.cpp
-    src/app/stats.cpp
   )
 endif()
 
@@ -195,14 +193,15 @@ endif()
 
 # Platform-specific network, preview, capture, and audio backends
 set(LV_PLATFORM_LIBS Threads::Threads)
+set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread")
 if(UNIX AND NOT APPLE AND NOT ANDROID)
   find_library(LV_RT_LIB rt)  # shm_open on glibc < 2.34
   if(LV_RT_LIB)
     list(APPEND LV_PLATFORM_LIBS ${LV_RT_LIB})
+    string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -lrt")
   endif()
 endif()
 set(LV_PLATFORM_INCLUDES "")
-set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread")
 
 if(WIN32)
   list(APPEND LV_CORE_SOURCES
@@ -215,14 +214,13 @@ if(WIN32)
   set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lws2_32 -liphlpapi -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -lmf -lmfplat -lmfuuid -lwinmm -lavrt")
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES
-      src/platform/preview_window_win32.cpp
       src/platform/screen_capture_win32.cpp
       src/platform/camera_capture_win32.cpp
       src/platform/audio_capture_win32.cpp
       src/platform/audio_playback_win32.cpp
     )
     list(APPEND LV_PLATFORM_LIBS
-      d3dcompiler gdi32 user32 avrt mmdevapi mfreadwrite
+      gdi32 user32 avrt mmdevapi mfreadwrite
     )
   endif()
 else()
@@ -239,7 +237,7 @@ else()
       "-framework CoreFoundation"
       "-framework CoreMIDI"
     )
-    set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation")
+    set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation -framework CoreMIDI")
     if(NOT IOS)  # CoreAudio HAL + SystemConfiguration (Ethernet vs Wi-Fi NIC enumeration on macOS)
       list(APPEND LV_PLATFORM_LIBS "-framework CoreAudio" "-framework SystemConfiguration")
       string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -framework CoreAudio -framework SystemConfiguration")
@@ -263,7 +261,7 @@ else()
         list(APPEND LV_SIMD_DEFS LV_HAVE_FFMPEG=1)
         list(APPEND LV_PLATFORM_INCLUDES ${LIBAV_INCLUDE_DIRS})
         list(APPEND LV_PLATFORM_LIBS ${LIBAV_LIBRARIES})
-        set(LANVID_PKGCONFIG_PRIVATE_LIBS "-lpthread -lavcodec -lavutil")
+        string(APPEND LANVID_PKGCONFIG_PRIVATE_LIBS " -lavcodec -lavutil")
       else()
         message(STATUS "lanvid: FFmpeg libavcodec not found -> Linux H.264/H.265 disabled (LanVid DCT active)")
       endif()
@@ -271,7 +269,6 @@ else()
   endif()
   if(NOT LANVID_SDK_CORE_ONLY)
     list(APPEND LV_CORE_SOURCES src/platform/platform_stubs_unix.cpp)
-    list(APPEND LV_CORE_SOURCES src/platform/preview_window_stub.cpp)  # headless (no SDL2 / GUI)
   endif()
 endif()
 

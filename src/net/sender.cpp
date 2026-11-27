@@ -14,6 +14,7 @@ namespace lv {
 
 UdpSender::UdpSender(const SenderConfig& cfg)
     : cfg_(cfg),
+      audio_latency_ms_(std::clamp<uint32_t>(cfg.audio_latency_ms, 2, 2000)),
       pool_(cfg.threads),
       target_bitrate_kbps_(cfg.bitrate_kbps > 0 ? cfg.bitrate_kbps : 8000u),
       enc_backend_name_(std::string("LanVid DCT (") + dct_kernels_best().name + ")"),
@@ -67,7 +68,7 @@ bool UdpSender::init() {
         return sock_.send_to_qos(d, n, dst_, QosTrafficClass::kAudio) == int(n);
     });
     atx_->set_latency_ms(cfg_.audio_latency_ms);
-    atx_->set_codec_profile(audio_codec_);
+    atx_->set_codec_profile(AudioCodecProfile(audio_codec_.load(std::memory_order_acquire)));
     atx_->set_epoch(stream_epoch_);
     atx_->set_wifi_redundancy(wifi_redundancy_.load(std::memory_order_acquire));
     midi_tx_ = std::make_unique<MidiTxEngine>(
@@ -251,7 +252,7 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
                                 return;
                             }
                             if (cfg_.pace_mbps > 0.0) pace_bytes(len, send_lk);
-                            const int sent = sock_.send_to_qos(dgram, len, dst_, QosTrafficClass::kVideo);
+                            const int sent = send_with_failover(dgram, len, QosTrafficClass::kVideo);
                             if (sent == int(len)) {
                                 packets_sent_.fetch_add(1, std::memory_order_relaxed);
                                 bytes_sent_.fetch_add(uint64_t(len), std::memory_order_relaxed);
@@ -293,6 +294,7 @@ bool UdpSender::ensure_video_encoder(int width, int height) {
 
 bool UdpSender::send_frame(const Image& img, const CodecParams& params, uint32_t frame_id,
                            uint32_t capture_ts_us) {
+    if (midi_only_.load(std::memory_order_relaxed)) return true;
     if (cfg_.codec != VideoCodecId::kLanVidDct) {
         if (!ensure_video_encoder(img.width, img.height)) return false;
         if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
@@ -324,6 +326,7 @@ bool UdpSender::send_frame(const Image& img, const CodecParams& params, uint32_t
 
 bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& params, uint32_t frame_id,
                                   uint32_t capture_ts_us) {
+    if (midi_only_.load(std::memory_order_relaxed)) return true;
     if (cfg_.codec != VideoCodecId::kLanVidDct) {
         if (!ensure_video_encoder(params.width, params.height)) return false;
         if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
@@ -352,6 +355,35 @@ bool UdpSender::send_frame_yuv420(const Yuv420View& yuv, const CodecParams& para
         send_encoded_slice(frame_id, capture_ts_us, slice_id, total_slices, data, size, 0);
     };
     if (!codec_.encode_streaming_yuv420(yuv, params, on_slice, &pool_)) return false;
+    frames_sent_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+bool UdpSender::send_frame_native(const void* native_buf, int width, int height, uint32_t frame_id,
+                                  uint32_t capture_ts_us) {
+    if (midi_only_.load(std::memory_order_relaxed)) return true;
+    if (!native_buf || cfg_.codec == VideoCodecId::kLanVidDct) return false;
+    const int even_w = width & ~1;
+    const int even_h = height & ~1;
+    if (!ensure_video_encoder(even_w, even_h)) return false;
+    if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
+        video_enc_->force_keyframe();
+    }
+    const uint32_t br = target_bitrate_kbps_.load(std::memory_order_relaxed);
+    if (br != applied_bitrate_kbps_) {
+        video_enc_->set_bitrate_kbps(br);
+        applied_bitrate_kbps_ = br;
+    }
+    if (!video_enc_->encode_native_buffer(native_buf, even_w, even_h, enc_pkt_) ||
+        enc_pkt_.data.empty()) {
+        return false;
+    }
+    const uint8_t extra_flags =
+        uint8_t(encode_codec_flags(cfg_.codec) |
+                (enc_pkt_.is_keyframe ? kFlagKeyFrame : 0) |
+                (enc_pkt_.has_codec_config ? kFlagCodecConfig : 0));
+    send_encoded_slice(frame_id, capture_ts_us, 0, 1, enc_pkt_.data.data(), enc_pkt_.data.size(),
+                       extra_flags);
     frames_sent_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -389,7 +421,7 @@ bool UdpSender::send_audio_raw(uint32_t audio_seq_id, uint32_t timestamp_us, con
     if (!n) return false;
 
     std::lock_guard<std::mutex> lk(pace_mu_);
-    const int sent = sock_.send_to_qos(dgram, n, dst_, QosTrafficClass::kAudio);
+    const int sent = send_with_failover(dgram, n, QosTrafficClass::kAudio);
     if (sent == int(n)) {
         audio_packets_sent_.fetch_add(1, std::memory_order_relaxed);
         audio_bytes_sent_.fetch_add(uint64_t(n), std::memory_order_relaxed);
@@ -462,15 +494,12 @@ uint64_t UdpSender::next_auto_media_ts(uint32_t num_samples) const {
 int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_t num_samples,
                                   AudioFormat2 fmt, uint64_t media_ts) {
     if (midi_only_.load(std::memory_order_relaxed)) {
-        std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
-        if (lk.owns_lock()) service_control();
+        service_control_try();
         return 0;
     }
     if (!atx_ || channel >= kMaxAudioChannels) return -1;
-    {   // answer PING / NACK from whichever pushing thread gets here first
-        std::unique_lock<std::mutex> lk(ctl_mu_, std::try_to_lock);
-        if (lk.owns_lock()) service_control();
-    }
+    // answer PING / NACK from whichever pushing thread gets here first
+    service_control_try();
     auto& next = next_auto_ts_[channel];
     if (media_ts == kAutoMediaTs) media_ts = resolve_auto_ts(next.load(std::memory_order_relaxed), num_samples);
     next.store(media_ts + num_samples, std::memory_order_relaxed);
@@ -478,8 +507,9 @@ int UdpSender::push_audio_channel(uint16_t channel, const void* samples, uint32_
 }
 
 void UdpSender::set_audio_latency_ms(uint32_t ms) {
-    cfg_.audio_latency_ms = std::clamp<uint32_t>(ms, 2, 2000);
-    if (atx_) atx_->set_latency_ms(ms);
+    const uint32_t clamped = std::clamp<uint32_t>(ms, 2, 2000);
+    audio_latency_ms_.store(clamped, std::memory_order_relaxed);
+    if (atx_) atx_->set_latency_ms(clamped);
 }
 
 void UdpSender::flush_audio() {
@@ -492,6 +522,28 @@ bool UdpSender::push_midi(uint8_t status, uint8_t d1, uint8_t d2, uint8_t port, 
     midi_tx_->push_event(status, d1, d2, port, ts);
     last_midi_us_.store(now_us(), std::memory_order_relaxed);
     return midi_tx_->flush(ts, now_us32());
+}
+
+int UdpSender::send_with_failover(const uint8_t* dgram, size_t len, QosTrafficClass qos) {
+    int sent = -1;
+    if (!primary_link_down_.load(std::memory_order_acquire)) {
+        sent = sock_.send_to_qos(dgram, len, dst_, qos);
+    }
+    if (dual_nic_active_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> nlk(nic_mu_);
+        if (sock_secondary_.is_open()) {
+            const int s2 = sock_secondary_.send_to_qos(dgram, len, dst_, qos);
+            if (s2 == int(len)) {
+                sec_pkts_sent_.fetch_add(1, std::memory_order_relaxed);
+                sec_bytes_sent_.fetch_add(uint64_t(len), std::memory_order_relaxed);
+                if (sent != int(len)) {
+                    failover_pkts_.fetch_add(1, std::memory_order_relaxed);
+                    sent = s2;
+                }
+            }
+        }
+    }
+    return sent;
 }
 
 bool UdpSender::send_control_sync(const ControlSyncPayload& cs) {
@@ -507,13 +559,18 @@ bool UdpSender::send_control_sync(const ControlSyncPayload& cs) {
     if (!n) return false;
     int ok = 0;
     for (int rep = 0; rep < 3; ++rep) {
-        if (sock_.send_to_qos(out, n, dst_, QosTrafficClass::kSyncControl) == int(n)) ++ok;
+        if (send_with_failover(out, n, QosTrafficClass::kSyncControl) == int(n)) ++ok;
     }
     if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
     return ok > 0;
 }
 
 void UdpSender::service_control() {
+    std::lock_guard<std::mutex> lk(ctl_mu_);
+    service_control_locked();
+}
+
+void UdpSender::service_control_locked() {
     if (atx_) atx_->service_redundancy(now_us32());
     // MIDI2 heartbeat: re-send recent events every 100 ms for 2 s after the last one (stuck-note guard).
     if (midi_tx_) {

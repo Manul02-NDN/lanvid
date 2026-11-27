@@ -340,8 +340,13 @@ TEST(network_dual_nic_1plus1_failover_zero_dropouts) {
         uint8_t buf[256];
         lv::Endpoint from{};
         int received = 0;
-        for (int i = 0; i < 32; ++i) {
-            if (rx_sock.recv_from(buf, sizeof(buf), from) > 0) ++received;
+        const uint64_t rx_deadline = lv::now_us() + 100'000ull;
+        while (received < 8 && lv::now_us() < rx_deadline) {
+            if (rx_sock.recv_from(buf, sizeof(buf), from) > 0) {
+                ++received;
+            } else {
+                std::this_thread::sleep_for(std::chrono::microseconds(250));
+            }
         }
         CHECK(received >= 8);
         rx_sock.close();

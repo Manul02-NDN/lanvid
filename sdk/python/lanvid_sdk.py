@@ -23,7 +23,7 @@ except ImportError:
 # ---- Constants matching sdk/include/lanvid/lanvid_export.h & lanvid_types.h ----
 __version__ = "2.7.0"
 LV_SDK_VERSION_MAJOR = 2
-LV_SDK_VERSION_MINOR = 4
+LV_SDK_VERSION_MINOR = 7
 LV_SDK_VERSION_PATCH = 0
 
 LV_PIXEL_FORMAT_BGRA8888 = 0
@@ -424,6 +424,8 @@ class LanVidSender:
         self._sdk = LanVidSDK(lib_path)
         self._lib = self._sdk.lib
         self._handle = self._lib.lv_sender_create()
+        if not self._handle:
+            raise MemoryError("lv_sender_create returned NULL")
         self._cfg = LV_SenderConfig()
         self._lib.lv_sdk_sender_config_default(ctypes.byref(self._cfg))
         self._cfg.dest_ip = dest_ip.encode("utf-8")
@@ -448,15 +450,19 @@ class LanVidSender:
                    pixel_format: int = LV_PIXEL_FORMAT_BGRA8888, timestamp_us: int = 0) -> None:
         """Accepts a `(H, W, 4)` uint8 numpy.ndarray OR raw bytes/bytearray."""
         if _HAS_NUMPY and isinstance(frame, np.ndarray):
+            if frame.ndim != 3 or frame.shape[2] != 4:
+                raise ValueError(f"Expected (H, W, 4) ndarray, got shape {frame.shape}")
             arr = np.ascontiguousarray(frame, dtype=np.uint8)
-            h, w = arr.shape[0], arr.shape[1]
-            stride = arr.strides[0]
+            h, w = int(arr.shape[0]), int(arr.shape[1])
+            stride = int(arr.strides[0])
             ptr = arr.ctypes.data_as(ctypes.c_void_p)
         else:
-            if width is None or height is None:
-                raise ValueError("width and height are required when passing raw bytes")
-            w, h = width, height
+            if width is None or height is None or width <= 0 or height <= 0:
+                raise ValueError("positive width and height are required when passing raw bytes")
+            w, h = int(width), int(height)
             stride = w * 4
+            if len(frame) < stride * h:
+                raise ValueError(f"Frame buffer too small: {len(frame)} < {stride * h}")
             buf = (ctypes.c_uint8 * len(frame)).from_buffer_copy(frame) if isinstance(frame, bytes) else (ctypes.c_uint8 * len(frame)).from_buffer(frame)
             ptr = ctypes.cast(buf, ctypes.c_void_p)
         rc = self._lib.lv_sender_push_packed_frame(self._handle, ptr, w, h, stride, pixel_format, timestamp_us)
@@ -546,6 +552,8 @@ class LanVidReceiver:
         self._sdk = LanVidSDK(lib_path)
         self._lib = self._sdk.lib
         self._handle = self._lib.lv_receiver_create()
+        if not self._handle:
+            raise MemoryError("lv_receiver_create returned NULL")
         self._cfg = LV_ReceiverConfig()
         self._lib.lv_sdk_receiver_config_default(ctypes.byref(self._cfg))
         self._cfg.bind_port = bind_port
@@ -553,19 +561,40 @@ class LanVidReceiver:
         self._cfg.output_format = output_format
         self._cfg.device_name = device_name.encode("utf-8")
         self._video_cb_ref = None
+        self._mc_cb_ref = None
         self._last_seq = ctypes.c_uint32(0)
         self._poll_buf: Optional[bytearray] = None
 
-    def on_video(self, callback: Callable[[object, int, int, int], None]) -> None:
-        """Registers callback(frame_ndarray_or_bytes, width, height, frame_id)."""
+    def on_video(self, callback: Optional[Callable[[object, int, int, int], None]]) -> None:
+        """Registers callback(frame_ndarray_or_bytes, width, height, frame_id), or None to clear."""
+        if callback is None:
+            self._video_cb_ref = VIDEO_CB_TYPE(0)
+            self._lib.lv_receiver_set_video_callback(self._handle, self._video_cb_ref, None)
+            return
+
         def _trampoline(view_ptr, _ud):
+            if not view_ptr:
+                return
             v = view_ptr.contents
+            if not v.data or v.width <= 0 or v.height <= 0 or v.size == 0:
+                return
             raw = ctypes.string_at(v.data, v.size)
+            row_bytes = v.width * 4
             if _HAS_NUMPY:
-                arr = np.frombuffer(raw, dtype=np.uint8).reshape((v.height, v.width, 4)).copy()
+                if v.stride == row_bytes and len(raw) >= row_bytes * v.height:
+                    arr = np.frombuffer(raw, dtype=np.uint8, count=row_bytes * v.height).reshape((v.height, v.width, 4)).copy()
+                elif v.stride >= row_bytes and len(raw) >= v.stride * v.height:
+                    rows = np.frombuffer(raw, dtype=np.uint8, count=v.stride * v.height).reshape((v.height, v.stride))
+                    arr = rows[:, :row_bytes].reshape((v.height, v.width, 4)).copy()
+                else:
+                    return
                 callback(arr, v.width, v.height, v.frame_id)
             else:
-                callback(raw, v.width, v.height, v.frame_id)
+                if v.stride == row_bytes:
+                    callback(raw[:row_bytes * v.height], v.width, v.height, v.frame_id)
+                elif v.stride > row_bytes and len(raw) >= v.stride * v.height:
+                    packed = b"".join(raw[y * v.stride : y * v.stride + row_bytes] for y in range(v.height))
+                    callback(packed, v.width, v.height, v.frame_id)
 
         self._video_cb_ref = VIDEO_CB_TYPE(_trampoline)
         self._lib.lv_receiver_set_video_callback(self._handle, self._video_cb_ref, None)
@@ -596,12 +625,13 @@ class LanVidReceiver:
                 self._handle, ptr, len(self._poll_buf), ctypes.byref(w), ctypes.byref(h),
                 ctypes.byref(self._last_seq), 1 if want_rgba else 0,
             )
-        if rc != 1 or self._poll_buf is None:
+        if rc != 1 or self._poll_buf is None or w.value <= 0 or h.value <= 0:
             return None
+        need = w.value * h.value * 4
         if _HAS_NUMPY:
-            arr = np.frombuffer(self._poll_buf, dtype=np.uint8).reshape((h.value, w.value, 4)).copy()
+            arr = np.frombuffer(self._poll_buf, dtype=np.uint8, count=need).reshape((h.value, w.value, 4)).copy()
             return arr, w.value, h.value
-        return bytes(self._poll_buf), w.value, h.value
+        return bytes(self._poll_buf[:need]), w.value, h.value
 
     # ---- 64-channel phase-coherent bus ----
     def configure_audio_bus(self, latency_ms: int = 20, sample_rate: int = 48000,
@@ -628,20 +658,31 @@ class LanVidReceiver:
         return float(self._lib.lv_receiver_get_effective_latency_ms(self._handle))
 
     def pop_audio_multichannel(self, num_channels: int, num_frames: int):
-        """Returns a `(num_frames, num_channels)` float32 array (or list of floats without numpy)."""
-        buf = (ctypes.c_float * (int(num_channels) * int(num_frames)))()
-        rc = self._lib.lv_receiver_pop_audio_multichannel(self._handle, buf, int(num_channels),
-                                                          int(num_frames), LV_AUDIO_LAYOUT_INTERLEAVED)
+        """Returns a `(frames_rendered, num_channels)` float32 array (or list of floats without numpy)."""
+        ch = int(num_channels)
+        nf = int(num_frames)
+        buf = (ctypes.c_float * (ch * nf))()
+        rc = self._lib.lv_receiver_pop_audio_multichannel(self._handle, buf, ch, nf, LV_AUDIO_LAYOUT_INTERLEAVED)
         if rc < 0:
             raise RuntimeError(self._lib.lv_error_string(rc).decode("utf-8"))
+        got = min(rc, nf)
         if _HAS_NUMPY:
-            return np.ctypeslib.as_array(buf).reshape((int(num_frames), int(num_channels))).copy()
-        return list(buf)
+            return np.ctypeslib.as_array(buf)[: got * ch].reshape((got, ch)).copy()
+        return [buf[i] for i in range(got * ch)]
 
-    def on_multichannel_audio(self, callback: Callable[[object, int], None]) -> None:
+    def on_multichannel_audio(self, callback: Optional[Callable[[object, int], None]]) -> None:
         """callback(frames, playout_position_samples); frames is (num_frames, num_channels) float32."""
+        if callback is None:
+            self._mc_cb_ref = MC_AUDIO_CB_TYPE(0)
+            self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, self._mc_cb_ref, None)
+            return
+
         def _trampoline(blk_ptr, _ud):
+            if not blk_ptr:
+                return
             b = blk_ptr.contents
+            if not b.data or b.num_frames <= 0 or b.num_channels <= 0:
+                return
             count = b.num_frames * b.num_channels
             if _HAS_NUMPY:
                 arr = np.ctypeslib.as_array(b.data, shape=(count,)).reshape((b.num_frames, b.num_channels)).copy()
@@ -649,7 +690,7 @@ class LanVidReceiver:
                 arr = [b.data[i] for i in range(count)]
             callback(arr, int(b.playout_position_samples))
 
-        self._mc_cb_ref = MC_AUDIO_CB_TYPE(_trampoline) if callback else MC_AUDIO_CB_TYPE(0)
+        self._mc_cb_ref = MC_AUDIO_CB_TYPE(_trampoline)
         self._lib.lv_receiver_set_multichannel_audio_callback(self._handle, self._mc_cb_ref, None)
 
     def channel_stats(self, channel: int) -> LV_AudioChannelStats:

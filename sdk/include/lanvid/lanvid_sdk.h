@@ -85,6 +85,12 @@ LV_API int lv_sender_push_cvpixelbuffer_planes(LvSenderHandle* handle, const uin
                                                int width, int height, int pixel_format,
                                                uint32_t timestamp_us);
 
+/* True zero-copy entry point for Apple CVPixelBufferRef (IOSurface-backed NV12/BGRA).
+ * Passes CVPixelBufferRef directly into VideoToolbox without locking, allocating, or copying pixels.
+ * Returns LV_ERR_UNSUPPORTED on non-Apple platforms or non-VT codecs. */
+LV_API int lv_sender_push_cvpixelbuffer(LvSenderHandle* handle, const void* cv_pixel_buffer_ref,
+                                        int width, int height, uint32_t timestamp_us);
+
 /* Pushes an audio chunk (LV_AUDIO_FORMAT_PCM16 or LV_AUDIO_FORMAT_F32) over the same UDP socket. */
 LV_API int lv_sender_push_audio_chunk(LvSenderHandle* handle, const void* data, int num_frames,
                                       int sample_rate, int channels, int audio_format,

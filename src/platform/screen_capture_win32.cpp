@@ -291,21 +291,31 @@ struct ScreenCapture::Impl {
         const HRESULT hr = dupl->AcquireNextFrame(UINT(std::max(0, timeout_ms)), &fi, &res);
 
         if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-            // Desktop static: reuse cached frame, or grab initial frame once via GDI so we never stall.
+            // Desktop static: reuse cached frame, or grab initial frame once via GDI in kAuto mode.
             if (has_cached_frame) {
                 out.order = PixelOrder::kBGRA;
                 resize_bilinear_32bpp(cached_native.data.data(), cached_native.width, cached_native.height,
                                       ptrdiff_t(cached_native.stride), out);
                 return true;
             }
-            if (capture_gdi(out)) return true;
-            return true;  // keep caller's existing buffer
+            if (requested == CaptureBackend::kDxgi) return false;
+            return capture_gdi(out);
         }
 
         if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL) {
-            // Resolution change / UAC / lock screen -> try recreating once, else fallback to GDI.
-            if (init_dxgi()) return capture_gdi(out);
-            return capture_gdi(out);
+            // Resolution change / UAC / lock screen -> refresh monitor geometry and re-create DXGI.
+            has_cached_frame = false;
+            const auto mons = list_monitors();
+            for (const auto& m : mons) {
+                if (m.name == mon.name || m.index == mon.index) {
+                    mon = m;
+                    break;
+                }
+            }
+            if (init_dxgi()) {
+                return requested == CaptureBackend::kDxgi ? false : capture_gdi(out);
+            }
+            return requested == CaptureBackend::kDxgi ? false : capture_gdi(out);
         }
 
         if (FAILED(hr) || !res) {

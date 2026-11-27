@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 namespace lv {
 
@@ -118,6 +119,7 @@ public:
     uint8_t* frame_buffer(uint32_t slot_index, uint32_t buf) const;
 
 private:
+    mutable std::mutex host_mu_;
     void* base_ = nullptr;
     size_t size_ = 0;
     VideoBusHeader* hdr_ = nullptr;

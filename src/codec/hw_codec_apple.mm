@@ -55,14 +55,35 @@ public:
                                  kCFBooleanTrue);
         }
 #endif
+        CFMutableDictionaryRef src_attrs = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 4, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (src_attrs) {
+            const int32_t pf = int32_t(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+            const int32_t w32 = int32_t(width_);
+            const int32_t h32 = int32_t(height_);
+            CFNumberRef pf_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pf);
+            CFNumberRef w_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &w32);
+            CFNumberRef h_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &h32);
+            CFMutableDictionaryRef io_props = CFDictionaryCreateMutable(
+                kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            if (pf_num) { CFDictionarySetValue(src_attrs, kCVPixelBufferPixelFormatTypeKey, pf_num); CFRelease(pf_num); }
+            if (w_num) { CFDictionarySetValue(src_attrs, kCVPixelBufferWidthKey, w_num); CFRelease(w_num); }
+            if (h_num) { CFDictionarySetValue(src_attrs, kCVPixelBufferHeightKey, h_num); CFRelease(h_num); }
+            if (io_props) { CFDictionarySetValue(src_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props); CFRelease(io_props); }
+        }
         OSStatus st = VTCompressionSessionCreate(
-            kCFAllocatorDefault, width_, height_, apple_codec_type(codec_), enc_spec, nullptr,
+            kCFAllocatorDefault, width_, height_, apple_codec_type(codec_), enc_spec, src_attrs,
             kCFAllocatorDefault, &VtVideoEncoder::output_callback, this, &session_);
+        if (src_attrs) CFRelease(src_attrs);
         if (enc_spec) CFRelease(enc_spec);
         if (st != noErr || !session_) return false;
 
         VTSessionSetProperty(session_, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
         VTSessionSetProperty(session_, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+        if (@available(iOS 14.0, macOS 11.0, *)) {
+            VTSessionSetProperty(session_, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                                 kCFBooleanTrue);
+        }
 
         int32_t kf_int = int32_t(keyint_);
         CFNumberRef kf_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &kf_int);
@@ -102,12 +123,10 @@ public:
     }
 
     bool encode_image(const Image& img, EncodedVideoPacket& out) override {
-        if (!session_ || img.width != width_ || img.height != height_) return false;
+        if (!session_ || (img.width & ~1) != width_ || (img.height & ~1) != height_) return false;
 
-        CVPixelBufferRef pb = nullptr;
-        CVReturn cr = CVPixelBufferCreate(kCFAllocatorDefault, size_t(width_), size_t(height_),
-                                          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nullptr, &pb);
-        if (cr != kCVReturnSuccess || !pb) return false;
+        CVPixelBufferRef pb = acquire_pool_pixel_buffer();
+        if (!pb) return false;
 
         CVPixelBufferLockBaseAddress(pb, 0);
         auto* dst_y = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, 0));
@@ -124,12 +143,10 @@ public:
 
     bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                        EncodedVideoPacket& out) override {
-        if (!session_ || width != width_ || height != height_) return false;
+        if (!session_ || (width & ~1) != width_ || (height & ~1) != height_) return false;
 
-        CVPixelBufferRef pb = nullptr;
-        CVReturn cr = CVPixelBufferCreate(kCFAllocatorDefault, size_t(width_), size_t(height_),
-                                          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nullptr, &pb);
-        if (cr != kCVReturnSuccess || !pb) return false;
+        CVPixelBufferRef pb = acquire_pool_pixel_buffer();
+        if (!pb) return false;
 
         CVPixelBufferLockBaseAddress(pb, 0);
         auto* dst_y = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(pb, 0));
@@ -142,6 +159,17 @@ public:
         const bool ok = encode_pixel_buffer(pb, out);
         CVPixelBufferRelease(pb);
         return ok;
+    }
+
+    bool encode_native_buffer(const void* native_buf, int width, int height,
+                              EncodedVideoPacket& out) override {
+        if (!session_ || !native_buf || (width & ~1) != width_ || (height & ~1) != height_) return false;
+        auto pb = reinterpret_cast<CVPixelBufferRef>(const_cast<void*>(native_buf));
+        if ((int(CVPixelBufferGetWidth(pb)) & ~1) != width_ ||
+            (int(CVPixelBufferGetHeight(pb)) & ~1) != height_) {
+            return false;
+        }
+        return encode_pixel_buffer(pb, out);
     }
 
     bool set_bitrate_kbps(uint32_t bitrate_kbps) override {
@@ -157,6 +185,26 @@ public:
     bool is_hardware() const override { return is_hardware_; }
 
 private:
+    CVPixelBufferRef acquire_pool_pixel_buffer() {
+        CVPixelBufferRef pb = nullptr;
+        CVPixelBufferPoolRef pool = VTCompressionSessionGetPixelBufferPool(session_);
+        if (pool && CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pb) == kCVReturnSuccess && pb) {
+            return pb;
+        }
+        CFMutableDictionaryRef io_props = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (attrs && io_props) {
+            CFDictionarySetValue(attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
+        }
+        CVReturn cr = CVPixelBufferCreate(kCFAllocatorDefault, size_t(width_), size_t(height_),
+                                          kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs, &pb);
+        if (attrs) CFRelease(attrs);
+        if (io_props) CFRelease(io_props);
+        return (cr == kCVReturnSuccess) ? pb : nullptr;
+    }
+
     bool apply_bitrate(uint32_t kbps) {
         if (!session_) return false;
         int64_t bps = int64_t(kbps) * 1000LL;
@@ -171,7 +219,10 @@ private:
         out.is_keyframe = false;
         out.has_codec_config = false;
 
-        current_out_ = &out;
+        {
+            std::lock_guard<std::mutex> lk(out_mu_);
+            current_out_ = &out;
+        }
         const bool want_idr = force_idr_.exchange(false, std::memory_order_acq_rel);
         CFMutableDictionaryRef frame_props = nullptr;
         if (want_idr) {
@@ -189,10 +240,12 @@ private:
         OSStatus st = VTCompressionSessionEncodeFrame(session_, pb, pts, dur, frame_props, nullptr, &flags);
         if (frame_props) CFRelease(frame_props);
         if (st != noErr) {
+            std::lock_guard<std::mutex> lk(out_mu_);
             current_out_ = nullptr;
             return false;
         }
         VTCompressionSessionCompleteFrames(session_, pts);
+        std::lock_guard<std::mutex> lk(out_mu_);
         current_out_ = nullptr;
         return !out.data.empty();
     }
@@ -200,7 +253,9 @@ private:
     static void output_callback(void* refcon, void*, OSStatus status, VTEncodeInfoFlags,
                                 CMSampleBufferRef sbuf) {
         auto* self = static_cast<VtVideoEncoder*>(refcon);
-        if (!self || !self->current_out_ || status != noErr || !sbuf) return;
+        if (!self || status != noErr || !sbuf) return;
+        std::lock_guard<std::mutex> lk(self->out_mu_);
+        if (!self->current_out_) return;
 
         bool is_kf = true;
         CFArrayRef atts = CMSampleBufferGetSampleAttachmentsArray(sbuf, false);
@@ -248,23 +303,34 @@ private:
 
         CMBlockBufferRef bb = CMSampleBufferGetDataBuffer(sbuf);
         if (!bb) return;
+        size_t len_at_offset = 0;
         size_t total_len = 0;
         char* data_ptr = nullptr;
-        if (CMBlockBufferGetDataPointer(bb, 0, nullptr, &total_len, &data_ptr) != kCMBlockBufferNoErr ||
-            !data_ptr) {
-            return;
+        std::vector<uint8_t> contig_buf;
+        const uint8_t* bytes = nullptr;
+        if (CMBlockBufferGetDataPointer(bb, 0, &len_at_offset, &total_len, &data_ptr) == kCMBlockBufferNoErr &&
+            data_ptr && len_at_offset == total_len) {
+            bytes = reinterpret_cast<const uint8_t*>(data_ptr);
+        } else {
+            total_len = CMBlockBufferGetDataLength(bb);
+            if (total_len == 0) return;
+            contig_buf.resize(total_len);
+            if (CMBlockBufferCopyDataBytes(bb, 0, total_len, contig_buf.data()) != kCMBlockBufferNoErr) {
+                return;
+            }
+            bytes = contig_buf.data();
         }
 
         // Convert 4-byte length-prefixed AVCC/HVCC NALUs to Annex-B start codes
         size_t off = 0;
         while (off + 4 <= total_len) {
-            uint32_t nalu_len = (uint32_t(uint8_t(data_ptr[off + 0])) << 24) |
-                                (uint32_t(uint8_t(data_ptr[off + 1])) << 16) |
-                                (uint32_t(uint8_t(data_ptr[off + 2])) << 8) |
-                                uint32_t(uint8_t(data_ptr[off + 3]));
+            uint32_t nalu_len = (uint32_t(bytes[off + 0]) << 24) |
+                                (uint32_t(bytes[off + 1]) << 16) |
+                                (uint32_t(bytes[off + 2]) << 8) |
+                                uint32_t(bytes[off + 3]);
             off += 4;
-            if (off + nalu_len > total_len) break;
-            append_annexb_nalu(out.data, reinterpret_cast<const uint8_t*>(data_ptr + off), nalu_len);
+            if (nalu_len > total_len - off) break;
+            append_annexb_nalu(out.data, bytes + off, nalu_len);
             off += nalu_len;
         }
     }
@@ -275,6 +341,8 @@ private:
             CFRelease(session_);
             session_ = nullptr;
         }
+        std::lock_guard<std::mutex> lk(out_mu_);
+        current_out_ = nullptr;
     }
 
     VideoCodecId codec_;
@@ -288,6 +356,7 @@ private:
     std::atomic<bool> force_idr_{true};
     bool is_hardware_ = true;
     std::string backend_name_;
+    std::mutex out_mu_;
     EncodedVideoPacket* current_out_ = nullptr;
 };
 
@@ -317,6 +386,7 @@ public:
         std::vector<const uint8_t*> ps_ptrs;
         std::vector<size_t> ps_sizes;
         std::vector<uint8_t> avcc_payload;
+        avcc_payload.reserve(size + 32);
 
         for (const auto& n : nalus) {
             if (annexb_is_param_set(codec_, n.nal_type)) {
@@ -357,10 +427,15 @@ public:
         if (!session_ || !fmt_desc_ || avcc_payload.empty()) return false;
 
         CMBlockBufferRef bb = nullptr;
-        if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, avcc_payload.data(),
-                                               avcc_payload.size(), kCFAllocatorNull, nullptr, 0,
-                                               avcc_payload.size(), 0, &bb) != kCMBlockBufferNoErr ||
+        if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, avcc_payload.size(),
+                                               kCFAllocatorDefault, nullptr, 0, avcc_payload.size(),
+                                               0, &bb) != kCMBlockBufferNoErr ||
             !bb) {
+            return false;
+        }
+        if (CMBlockBufferReplaceDataBytes(avcc_payload.data(), bb, 0, avcc_payload.size()) !=
+            kCMBlockBufferNoErr) {
+            CFRelease(bb);
             return false;
         }
 
@@ -371,18 +446,23 @@ public:
         CFRelease(bb);
         if (st != noErr || !sbuf) return false;
 
-        current_out_ = &out_image;
-        got_frame_ = false;
+        {
+            std::lock_guard<std::mutex> lk(out_mu_);
+            current_out_ = &out_image;
+            got_frame_ = false;
+        }
         VTDecodeInfoFlags info = 0;
         // Synchronous zero-latency decode (flags = 0 waits until callback finishes on this call!)
         st = VTDecompressionSessionDecodeFrame(session_, sbuf, 0, nullptr, &info);
         CFRelease(sbuf);
+        std::lock_guard<std::mutex> lk(out_mu_);
         current_out_ = nullptr;
         return st == noErr && got_frame_;
     }
 
     void reset() override {
         if (session_) {
+            VTDecompressionSessionWaitForAsynchronousFrames(session_);
             VTDecompressionSessionInvalidate(session_);
             CFRelease(session_);
             session_ = nullptr;
@@ -391,6 +471,9 @@ public:
             CFRelease(fmt_desc_);
             fmt_desc_ = nullptr;
         }
+        std::lock_guard<std::mutex> lk(out_mu_);
+        current_out_ = nullptr;
+        got_frame_ = false;
     }
 
     VideoCodecId codec_id() const override { return codec_; }
@@ -400,10 +483,16 @@ public:
 private:
     bool create_session() {
         CFMutableDictionaryRef dst_attrs = CFDictionaryCreateMutable(
-            kCFAllocatorDefault, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            kCFAllocatorDefault, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         const int32_t pf = int32_t(kCVPixelFormatType_32BGRA);
         CFNumberRef pf_num = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pf);
+        CFMutableDictionaryRef io_props = CFDictionaryCreateMutable(
+            kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(dst_attrs, kCVPixelBufferPixelFormatTypeKey, pf_num);
+        if (io_props) {
+            CFDictionarySetValue(dst_attrs, kCVPixelBufferIOSurfacePropertiesKey, io_props);
+            CFRelease(io_props);
+        }
         CFRelease(pf_num);
 
         VTDecompressionOutputCallbackRecord cb{};
@@ -419,7 +508,9 @@ private:
     static void decode_callback(void* refcon, void*, OSStatus status, VTDecodeInfoFlags,
                                 CVImageBufferRef img_buf, CMTime, CMTime) {
         auto* self = static_cast<VtVideoDecoder*>(refcon);
-        if (!self || !self->current_out_ || status != noErr || !img_buf) return;
+        if (!self || status != noErr || !img_buf) return;
+        std::lock_guard<std::mutex> lk(self->out_mu_);
+        if (!self->current_out_) return;
 
         CVPixelBufferLockBaseAddress(img_buf, kCVPixelBufferLock_ReadOnly);
         const int w = int(CVPixelBufferGetWidth(img_buf));
@@ -432,17 +523,21 @@ private:
                 dst.allocate(w, h, self->output_order_);
             }
             const bool swap_rb = (self->output_order_ == PixelOrder::kRGBA);
-            for (int y = 0; y < h; ++y) {
-                const uint8_t* srow = src + size_t(y) * stride;
-                uint8_t* drow = dst.row(y);
-                if (!swap_rb) {
-                    std::memcpy(drow, srow, size_t(w) * 4);
-                } else {
-                    for (int x = 0; x < w; ++x) {
-                        drow[x * 4 + 0] = srow[x * 4 + 2];
-                        drow[x * 4 + 1] = srow[x * 4 + 1];
-                        drow[x * 4 + 2] = srow[x * 4 + 0];
-                        drow[x * 4 + 3] = 255;
+            if (!swap_rb && stride == size_t(w) * 4) {
+                std::memcpy(dst.data.data(), src, size_t(w) * size_t(h) * 4);
+            } else {
+                for (int y = 0; y < h; ++y) {
+                    const uint8_t* srow = src + size_t(y) * stride;
+                    uint8_t* drow = dst.row(y);
+                    if (!swap_rb) {
+                        std::memcpy(drow, srow, size_t(w) * 4);
+                    } else {
+                        for (int x = 0; x < w; ++x) {
+                            drow[x * 4 + 0] = srow[x * 4 + 2];
+                            drow[x * 4 + 1] = srow[x * 4 + 1];
+                            drow[x * 4 + 2] = srow[x * 4 + 0];
+                            drow[x * 4 + 3] = 255;
+                        }
                     }
                 }
             }
@@ -456,6 +551,7 @@ private:
     CMFormatDescriptionRef fmt_desc_ = nullptr;
     VTDecompressionSessionRef session_ = nullptr;
     std::string backend_name_;
+    std::mutex out_mu_;
     Image* current_out_ = nullptr;
     bool got_frame_ = false;
 };

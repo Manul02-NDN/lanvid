@@ -111,9 +111,11 @@ private:
     // Minimum transit offset baseline (arrival_local_samples - media_ts_samples) for MIDI-only mode.
     bool has_baseline_ = false;
     int64_t min_offset_samples_ = 0;
+    uint32_t drift_relax_ticks_ = 0;
     double absorbed_jitter_ms_ = 0.0;
 
-    std::priority_queue<ScheduledEvent, std::vector<ScheduledEvent>, std::greater<ScheduledEvent>> queue_;
+    static constexpr size_t kMaxQueuedEvents = 2048;
+    std::vector<ScheduledEvent> queue_;
 
     std::atomic<uint64_t> total_enqueued_{0};
     std::atomic<uint64_t> total_dispatched_{0};

@@ -108,6 +108,16 @@ bool ShmAudioBus::open(const char* name, bool as_driver) {
 #endif
     bus_ = static_cast<ShmBusLayout*>(mem);
     ShmBusHeader& h0 = bus_->hdr;
+    // When attaching to a newly-created segment, give the creator a brief moment to stamp the magic.
+    if (!created) {
+        for (int wait = 0; wait < 25 && h0.magic.load(std::memory_order_acquire) != kShmBusMagic; ++wait) {
+#if defined(_WIN32)
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+        }
+    }
     // New segments are zero-filled by the OS; the creator stamps the layout. A stale/mismatched
     // segment (other version) is re-initialised.
     if (created || h0.magic.load(std::memory_order_acquire) != kShmBusMagic ||
@@ -137,10 +147,12 @@ void ShmAudioBus::close() {
 
 uint32_t ShmAudioBus::ring_write(ShmRing& r, const float* const* planes, const float* inter,
                                  uint32_t channels, uint32_t frames) {
+    if ((!planes && !inter) || frames == 0) return 0;
     channels = std::min(channels, kShmBusChannels);
     const uint64_t w = r.write_pos.load(std::memory_order_relaxed);
     const uint64_t rd = r.read_pos.load(std::memory_order_acquire);
-    const uint64_t free_frames = kShmBusFrames - (w - rd);
+    const uint64_t used = (w >= rd) ? std::min<uint64_t>(w - rd, kShmBusFrames) : kShmBusFrames;
+    const uint64_t free_frames = kShmBusFrames - used;
     uint32_t n = frames;
     if (n > free_frames) {
         n = uint32_t(free_frames);
@@ -160,10 +172,11 @@ uint32_t ShmAudioBus::ring_write(ShmRing& r, const float* const* planes, const f
 
 uint32_t ShmAudioBus::ring_read(ShmRing& r, float* const* planes, float* inter, uint32_t channels,
                                 uint32_t frames, bool zero_fill) {
+    if ((!planes && !inter) || frames == 0) return 0;
     channels = std::min(channels, kShmBusChannels);
     const uint64_t rd = r.read_pos.load(std::memory_order_relaxed);
     const uint64_t w = r.write_pos.load(std::memory_order_acquire);
-    const uint32_t avail = uint32_t(std::min<uint64_t>(w - rd, kShmBusFrames));
+    const uint32_t avail = (w >= rd) ? uint32_t(std::min<uint64_t>(w - rd, kShmBusFrames)) : 0u;
     const uint32_t n = std::min(avail, frames);
     for (uint32_t i = 0; i < frames; ++i) {
         const bool have = i < n;
@@ -214,14 +227,18 @@ void ShmAudioBus::driver_set_running(bool running, uint32_t sample_rate, uint32_
 
 uint32_t ShmAudioBus::host_tx_available() const {
     if (!bus_) return 0;
-    return uint32_t(bus_->tx.write_pos.load(std::memory_order_acquire) - bus_->tx.read_pos.load(std::memory_order_relaxed));
+    const uint64_t w = bus_->tx.write_pos.load(std::memory_order_acquire);
+    const uint64_t r = bus_->tx.read_pos.load(std::memory_order_relaxed);
+    return w >= r ? uint32_t(std::min<uint64_t>(w - r, kShmBusFrames)) : 0u;
 }
 uint32_t ShmAudioBus::host_read_tx(float* const* planes, uint32_t channels, uint32_t frames) {
     return bus_ ? ring_read(bus_->tx, planes, nullptr, channels, frames, false) : 0;
 }
 uint32_t ShmAudioBus::host_rx_fill() const {
     if (!bus_) return 0;
-    return uint32_t(bus_->rx.write_pos.load(std::memory_order_relaxed) - bus_->rx.read_pos.load(std::memory_order_acquire));
+    const uint64_t w = bus_->rx.write_pos.load(std::memory_order_relaxed);
+    const uint64_t r = bus_->rx.read_pos.load(std::memory_order_acquire);
+    return w >= r ? uint32_t(std::min<uint64_t>(w - r, kShmBusFrames)) : 0u;
 }
 uint32_t ShmAudioBus::host_write_rx(const float* const* planes, uint32_t channels, uint32_t frames) {
     return bus_ ? ring_write(bus_->rx, planes, nullptr, channels, frames) : 0;
@@ -233,12 +250,14 @@ void ShmAudioBus::host_drop_stale_tx() {
 bool ShmAudioBus::driver_connected(uint32_t timeout_ms) const {
     if (!bus_ || bus_->hdr.driver_running.load(std::memory_order_acquire) == 0) return false;
     const uint64_t hb = bus_->hdr.driver_heartbeat_ms.load(std::memory_order_acquire);
-    return shm_bus_now_ms() - hb <= timeout_ms;
+    const uint64_t now = shm_bus_now_ms();
+    return hb != 0 && now >= hb && (now - hb) <= timeout_ms;
 }
 bool ShmAudioBus::host_connected(uint32_t timeout_ms) const {
     if (!bus_) return false;
     const uint64_t hb = bus_->hdr.host_heartbeat_ms.load(std::memory_order_acquire);
-    return hb != 0 && shm_bus_now_ms() - hb <= timeout_ms;
+    const uint64_t now = shm_bus_now_ms();
+    return hb != 0 && now >= hb && (now - hb) <= timeout_ms;
 }
 
 }  // namespace lv

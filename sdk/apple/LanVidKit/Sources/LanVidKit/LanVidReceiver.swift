@@ -36,6 +36,7 @@ public final class LanVidReceiver {
         }
     }
 
+    private let cbLock = NSLock()
     private var handle: OpaquePointer?
     private var pool: CVPixelBufferPool?
     private var poolWidth: Int32 = 0
@@ -44,8 +45,17 @@ public final class LanVidReceiver {
     private var audioEngine: AVAudioEngine?
     private var sourceNode: AVAudioSourceNode?
 
-    public var onVideoPixelBuffer: ((CVPixelBuffer, UInt32) -> Void)?
-    public var onStateChanged: ((Int32, Int32, String) -> Void)?
+    private var _onVideoPixelBuffer: ((CVPixelBuffer, UInt32) -> Void)?
+    public var onVideoPixelBuffer: ((CVPixelBuffer, UInt32) -> Void)? {
+        get { cbLock.lock(); defer { cbLock.unlock() }; return _onVideoPixelBuffer }
+        set { cbLock.lock(); defer { cbLock.unlock() }; _onVideoPixelBuffer = newValue }
+    }
+
+    private var _onStateChanged: ((Int32, Int32, String) -> Void)?
+    public var onStateChanged: ((Int32, Int32, String) -> Void)? {
+        get { cbLock.lock(); defer { cbLock.unlock() }; return _onStateChanged }
+        set { cbLock.lock(); defer { cbLock.unlock() }; _onStateChanged = newValue }
+    }
 
     public init() throws {
         try LanVidRuntime.ensureInitialized()
@@ -92,6 +102,8 @@ public final class LanVidReceiver {
 
         let rc = lv_sdk_receiver_start(h, &c)
         if rc != LV_OK.rawValue {
+            lv_receiver_set_video_callback(h, nil, nil)
+            lv_receiver_set_state_callback(h, nil, nil)
             throw LanVidError.coreError(code: rc, message: String(cString: lv_error_string(rc)))
         }
         if config.enableAudioPlayback {
@@ -103,6 +115,8 @@ public final class LanVidReceiver {
         stopAudioEngine()
         if let h = handle {
             lv_receiver_stop(h)
+            lv_receiver_set_video_callback(h, nil, nil)
+            lv_receiver_set_state_callback(h, nil, nil)
         }
     }
 
@@ -192,12 +206,14 @@ public final class LanVidReceiver {
         if let dstBase = CVPixelBufferGetBaseAddress(pb) {
             let dstStride = CVPixelBufferGetBytesPerRow(pb)
             let srcStride = Int(frame.stride)
-            let rowBytes = Int(frame.width) * 4
-            if dstStride == srcStride {
-                memcpy(dstBase, srcData, rowBytes * Int(frame.height))
-            } else {
-                for y in 0..<Int(frame.height) {
-                    memcpy(dstBase.advanced(by: y * dstStride), srcData.advanced(by: y * srcStride), rowBytes)
+            let rowBytes = min(Int(frame.width) * 4, min(dstStride, srcStride))
+            if rowBytes > 0 {
+                if dstStride == srcStride && dstStride == rowBytes {
+                    memcpy(dstBase, srcData, rowBytes * Int(frame.height))
+                } else {
+                    for y in 0..<Int(frame.height) {
+                        memcpy(dstBase.advanced(by: y * dstStride), srcData.advanced(by: y * srcStride), rowBytes)
+                    }
                 }
             }
         }
@@ -228,19 +244,31 @@ public final class LanVidReceiver {
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false) else {
             return
         }
+        // Preallocate scratch PCM16 buffer once outside the real-time audio render block (zero heap allocs in callback)
+        let chunkCap = 4096
+        let scratchPtr = UnsafeMutablePointer<Int16>.allocate(capacity: chunkCap * 2)
+        scratchPtr.initialize(repeating: 0, count: chunkCap * 2)
+        let scratchHolder = ScratchBufferBox(ptr: scratchPtr, count: chunkCap * 2)
+
         let node = AVAudioSourceNode(format: format) { _, _, frameCount, audioBufferList -> OSStatus in
-            let n = Int(frameCount)
-            var tmp = [Int16](repeating: 0, count: n * 2)
-            _ = lv_receiver_pop_audio_pcm16(h, &tmp, Int32(n))
+            let total = Int(frameCount)
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            if abl.count >= 2,
-               let chL = abl[0].mData?.assumingMemoryBound(to: Float.self),
-               let chR = abl[1].mData?.assumingMemoryBound(to: Float.self) {
-                let scale: Float = 1.0 / 32768.0
+            guard abl.count >= 2,
+                  let chL = abl[0].mData?.assumingMemoryBound(to: Float.self),
+                  let chR = abl[1].mData?.assumingMemoryBound(to: Float.self) else {
+                return noErr
+            }
+            let scale: Float = 1.0 / 32768.0
+            let buf = scratchHolder.ptr
+            var offset = 0
+            while offset < total {
+                let n = min(chunkCap, total - offset)
+                _ = lv_receiver_pop_audio_pcm16(h, buf, Int32(n))
                 for i in 0..<n {
-                    chL[i] = Float(tmp[i * 2]) * scale
-                    chR[i] = Float(tmp[i * 2 + 1]) * scale
+                    chL[offset + i] = Float(buf[i * 2]) * scale
+                    chR[offset + i] = Float(buf[i * 2 + 1]) * scale
                 }
+                offset += n
             }
             return noErr
         }
@@ -255,5 +283,18 @@ public final class LanVidReceiver {
         audioEngine?.stop()
         audioEngine = nil
         sourceNode = nil
+    }
+
+    private final class ScratchBufferBox {
+        let ptr: UnsafeMutablePointer<Int16>
+        let count: Int
+        init(ptr: UnsafeMutablePointer<Int16>, count: Int) {
+            self.ptr = ptr
+            self.count = count
+        }
+        deinit {
+            ptr.deinitialize(count: count)
+            ptr.deallocate()
+        }
     }
 }

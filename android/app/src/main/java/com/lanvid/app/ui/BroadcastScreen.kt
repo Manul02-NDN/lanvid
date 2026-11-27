@@ -3,9 +3,16 @@ package com.lanvid.app.ui
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.media.projection.MediaProjectionManager
 import android.os.BatteryManager
 import android.os.Build
@@ -46,12 +53,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.lanvid.app.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.random.Random
 
 private enum class TallyVisual(val badgeLabel: String) {
     OFF("STBY"),
@@ -162,6 +172,12 @@ fun BroadcastScreen(
     var isTogglingLive by remember { mutableStateOf(false) }
 
     val prefs = remember { context.getSharedPreferences("lanvid_camera", Context.MODE_PRIVATE) }
+    val cameraId = remember {
+        val stored = prefs.getInt("cameraId", 0)
+        if (stored > 0) stored else Random.nextInt(1000, 999_999).also {
+            prefs.edit().putInt("cameraId", it).apply()
+        }
+    }
     val discovery = remember { LanPeerDiscovery(context) }
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
@@ -182,7 +198,7 @@ fun BroadcastScreen(
         discovery.start()
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(obs)
-            discovery.stop()
+            discovery.release()
         }
     }
 
@@ -207,6 +223,7 @@ fun BroadcastScreen(
     var rxStats by remember { mutableStateOf(ReceiverStats()) }
     var traffic by remember { mutableStateOf(TrafficState()) }
     var battery by remember { mutableIntStateOf(-1) }
+    var batteryTempC by remember { mutableIntStateOf(34) }
     var proState by remember { mutableStateOf(ProCameraState()) }
 
     fun pushLocalConfigSync(nextUi: HudUiState, nextPro: ProCameraState) {
@@ -295,22 +312,113 @@ fun BroadcastScreen(
         )
     }
 
-    // Studio Tally & Duplex Intercom connection + 10 Hz status poll (ALL native I/O off Main UI thread!)
+    // Studio Tally & Duplex Intercom connection + 50 Hz poll + full-duplex voice I/O (ALL off Main UI thread!)
     LaunchedEffect(ui.mode, ui.senderActive, ui.destIp) {
         if (ui.mode == BroadcastMode.SENDER && ui.senderActive && ui.destIp.isNotBlank()) {
             val destIp = ui.destIp
             val label = proState.cameraLabel
-            withContext(Dispatchers.IO) {
-                LanVidNative.nativeTallyConnect(destIp, 5022, 1, label)
-                LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+            val connected = withContext(Dispatchers.IO) {
+                val ok = LanVidNative.nativeTallyConnect(destIp, 5022, cameraId, label)
+                if (ok) {
+                    LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+                }
+                ok
             }
-            try {
-                while (true) {
-                    delay(100)
-                    val bat = battery.coerceAtLeast(0)
-                    val raw = withContext(Dispatchers.IO) {
-                        LanVidNative.nativeTallyPollJson(bat, 34)
+            if (!connected) return@LaunchedEffect
+
+            // Full-duplex Intercom audio job: IFB playback (AudioTrack) + PTT mic capture (AudioRecord) @ 48 kHz mono Float32
+            val intercomAudioJob = launch(Dispatchers.IO) {
+                val sr = 48000
+                val framesPerChunk = 240 // 5 ms
+                val trackBuf = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+                    .coerceAtLeast(framesPerChunk * 4 * 4)
+                val track = runCatching {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                        )
+                        .setAudioFormat(
+                            AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                                .setSampleRate(sr)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .build()
+                        )
+                        .setBufferSizeInBytes(trackBuf)
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .build()
+                }.getOrNull()?.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
+                runCatching { track?.play() }
+
+                val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                val recBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+                    .coerceAtLeast(framesPerChunk * 4 * 4)
+                val recorder = if (hasMicPerm) {
+                    runCatching {
+                        AudioRecord.Builder()
+                            .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                            .setAudioFormat(
+                                AudioFormat.Builder()
+                                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                                    .setSampleRate(sr)
+                                    .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                                    .build()
+                            )
+                            .setBufferSizeInBytes(recBuf)
+                            .build()
+                    }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+                } else null
+                runCatching { recorder?.startRecording() }
+
+                val rxJob = launch(Dispatchers.IO) {
+                    val rxPcm = FloatArray(framesPerChunk)
+                    while (isActive) {
+                        val got = LanVidNative.nativeIntercomPullRx(rxPcm, framesPerChunk)
+                        if (got > 0 && track != null) {
+                            track.write(rxPcm, 0, got, AudioTrack.WRITE_BLOCKING)
+                        } else {
+                            delay(5)
+                        }
                     }
+                }
+                val txJob = launch(Dispatchers.IO) {
+                    if (recorder == null) return@launch
+                    val txPcm = FloatArray(framesPerChunk)
+                    while (isActive) {
+                        val read = recorder.read(txPcm, 0, framesPerChunk, AudioRecord.READ_BLOCKING)
+                        if (read < 0) break
+                        if (read > 0 && (proState.pttHeld || proState.latchTalk)) {
+                            LanVidNative.nativeIntercomPushMic(txPcm, read)
+                        }
+                    }
+                }
+                try {
+                    rxJob.join()
+                    txJob.join()
+                } finally {
+                    rxJob.cancel()
+                    txJob.cancel()
+                    runCatching { recorder?.stop() }
+                    runCatching { recorder?.release() }
+                    runCatching { track?.stop() }
+                    runCatching { track?.release() }
+                }
+            }
+
+            try {
+                var tickCount = 0
+                while (true) {
+                    delay(20)
+                    tickCount++
+                    val bat = battery.coerceIn(0, 100)
+                    val temp = batteryTempC
+                    val raw = withContext(Dispatchers.IO) {
+                        LanVidNative.nativeTallyPollJson(bat, temp)
+                    }
+                    if (tickCount % 5 != 0) continue // UI state refresh at 10 Hz; network poll at 50 Hz
                     if (raw.isNotEmpty()) {
                         runCatching {
                             val obj = JSONObject(raw)
@@ -329,6 +437,8 @@ fun BroadcastScreen(
                             val nextLabel = newTag.ifBlank { obj.optString("label", proState.cameraLabel) }
                                 .ifBlank { proState.cameraLabel }
 
+                            // Capture previous sync revision BEFORE updating proState!
+                            val prevSyncRev = proState.lastSyncRev
                             proState = proState.copy(
                                 tally = tState,
                                 remoteRec = obj.optBoolean("remoteRec", obj.optInt("rec", 0) != 0),
@@ -340,10 +450,10 @@ fun BroadcastScreen(
                                 configSynced = synced,
                                 syncedDelayMs = delayMs,
                                 syncedFixedDelay = fixedDelay,
-                                lastSyncRev = maxOf(proState.lastSyncRev, syncRev)
+                                lastSyncRev = maxOf(prevSyncRev, syncRev)
                             )
 
-                            if (synced && syncRev > proState.lastSyncRev) {
+                            if (synced && syncRev > prevSyncRev) {
                                 val syncRes = obj.optInt("syncRes", -1)
                                 val syncCodec = obj.optInt("syncCodec", -1)
                                 val syncBitrateKbps = obj.optInt("syncBitrateKbps", 0)
@@ -363,18 +473,22 @@ fun BroadcastScreen(
                                     else -> ui.codec
                                 }
                                 val targetBitrateMbps = if (syncBitrateKbps >= 1000) {
-                                    (syncBitrateKbps / 1000.0).coerceIn(5.0, 50.0)
+                                    (syncBitrateKbps / 1000.0).coerceIn(1.0, 150.0)
                                 } else ui.bitrateMbps
                                 val targetSource = if (syncLens == 3) CaptureSource.FRONT_CAM
                                 else if (syncLens in 0..2 && ui.source == CaptureSource.FRONT_CAM) CaptureSource.BACK_CAM
                                 else ui.source
 
+                                val prevFps = proState.fps.toIntOrNull() ?: 60
+                                val targetFps = if (syncFps >= 15) syncFps else prevFps
+
                                 val onlyBitrateChanged = (targetRes == ui.resolution &&
                                     targetCodec == ui.codec &&
+                                    targetFps == prevFps &&
                                     targetSource == ui.source &&
                                     targetBitrateMbps != ui.bitrateMbps)
 
-                                val needRestartSender = (targetRes != ui.resolution || targetCodec != ui.codec)
+                                val needRestartSender = (targetRes != ui.resolution || targetCodec != ui.codec || targetFps != prevFps)
                                 ui = ui.copy(
                                     resolution = targetRes,
                                     codec = targetCodec,
@@ -382,14 +496,18 @@ fun BroadcastScreen(
                                     source = targetSource
                                 )
                                 proState = proState.copy(
-                                    resolution = targetRes.label,
+                                    resolution = when (targetRes) {
+                                        ResolutionPreset.UHD_4K -> "4K UHD"
+                                        ResolutionPreset.FHD_1080 -> "1080p"
+                                        ResolutionPreset.HD_720 -> "720p"
+                                    },
                                     codec = when (targetCodec) {
                                         VideoCodecOption.H265 -> "H.265"
                                         VideoCodecOption.H264 -> "H.264"
                                         VideoCodecOption.DCT -> "DCT"
                                     },
                                     bitrateMbps = targetBitrateMbps.toFloat(),
-                                    fps = if (syncFps > 0) syncFps.toString() else proState.fps,
+                                    fps = targetFps.toString(),
                                     lens = if (syncLens == 3) "Front" else if (syncLens == 1) "0.5x" else if (syncLens == 2) "2x" else "1x"
                                 )
                                 if (onlyBitrateChanged) {
@@ -399,10 +517,9 @@ fun BroadcastScreen(
                                 } else if (needRestartSender && ui.senderActive) {
                                     val encW = targetRes.width
                                     val encH = targetRes.height
-                                    val fpsVal = if (syncFps > 0) syncFps else 60
                                     withContext(Dispatchers.IO) {
                                         LanVidNative.nativeStartSender(
-                                            ui.destIp, ui.destPort, encW, encH, fpsVal,
+                                            ui.destIp, ui.destPort, encW, encH, targetFps,
                                             ui.quality, ui.fecGroup, ui.adaptive, targetCodec.id,
                                             (targetBitrateMbps * 1000).toInt()
                                         )
@@ -413,7 +530,8 @@ fun BroadcastScreen(
                     }
                 }
             } finally {
-                withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
+                intercomAudioJob.cancel()
+                withContext(NonCancellable + Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
             }
         } else {
             withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
@@ -421,13 +539,14 @@ fun BroadcastScreen(
         }
     }
 
-    // Restart live Camera2 viewfinder whenever lens, resolution, surface, orientation, resume state, or mode changes
+    // Restart live Camera2 viewfinder whenever lens, resolution, fps, surface, orientation, resume state, or mode changes
     LaunchedEffect(
         isAppResumed,
         hasCameraPermission,
         ui.mode,
         ui.source,
         ui.resolution,
+        proState.fps,
         displayRotation,
         cameraPreviewSurface
     ) {
@@ -443,6 +562,7 @@ fun BroadcastScreen(
                 width = ui.resolution.width,
                 height = ui.resolution.height,
                 frontFacing = ui.source == CaptureSource.FRONT_CAM,
+                targetFps = proState.fps.toIntOrNull() ?: 60,
                 displayRotation = displayRotation,
                 previewSurface = surface,
                 streamEnabled = ui.senderActive,
@@ -482,45 +602,59 @@ fun BroadcastScreen(
         if (res.resultCode == Activity.RESULT_OK && res.data != null) {
             val dm: DisplayMetrics = context.resources.displayMetrics
             val capW = ui.resolution.width.coerceAtMost(1280)
-            val capH = (capW * dm.heightPixels / dm.widthPixels.coerceAtLeast(1)) and 0x7FFE
-            val ok = LanVidNative.nativeStartSender(
-                ui.destIp,
-                ui.destPort,
-                capW,
-                capH.coerceIn(480, 1440),
-                60,
-                ui.quality,
-                ui.fecGroup,
-                ui.adaptive,
-                ui.codec.id,
-                (ui.bitrateMbps * 1000).toInt()
-            )
-            if (ok) {
-                val svcIntent = Intent(context, ScreenCaptureService::class.java).apply {
-                    action = ScreenCaptureService.ACTION_START
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, res.resultCode)
-                    putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, res.data)
-                    putExtra(ScreenCaptureService.EXTRA_WIDTH, capW)
-                    putExtra(ScreenCaptureService.EXTRA_HEIGHT, capH.coerceIn(480, 1440))
-                    putExtra(ScreenCaptureService.EXTRA_DPI, dm.densityDpi)
-                    putExtra(ScreenCaptureService.EXTRA_AUDIO_MODE, ui.audioSource.id)
+            val capH = ((capW * dm.heightPixels / dm.widthPixels.coerceAtLeast(1)) and 0x7FFE).coerceIn(480, 1440)
+            val snap = ui
+            val resCode = res.resultCode
+            val resData = res.data
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    LanVidNative.nativeStartSender(
+                        snap.destIp,
+                        snap.destPort,
+                        capW,
+                        capH,
+                        proState.fps.toIntOrNull() ?: 60,
+                        snap.quality,
+                        snap.fecGroup,
+                        snap.adaptive,
+                        snap.codec.id,
+                        (snap.bitrateMbps * 1000).toInt()
+                    )
                 }
-                context.startForegroundService(svcIntent)
-                ui = ui.copy(
-                    senderActive = true,
-                    statusMessage = "Screen cast -> ${ui.destIp}:${ui.destPort}"
-                )
+                if (ok) {
+                    val svcIntent = Intent(context, ScreenCaptureService::class.java).apply {
+                        action = ScreenCaptureService.ACTION_START
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, resCode)
+                        putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, resData)
+                        putExtra(ScreenCaptureService.EXTRA_WIDTH, capW)
+                        putExtra(ScreenCaptureService.EXTRA_HEIGHT, capH)
+                        putExtra(ScreenCaptureService.EXTRA_DPI, dm.densityDpi)
+                        putExtra(ScreenCaptureService.EXTRA_AUDIO_MODE, snap.audioSource.id)
+                    }
+                    context.startForegroundService(svcIntent)
+                    ui = ui.copy(
+                        senderActive = true,
+                        statusMessage = "Screen cast -> ${snap.destIp}:${snap.destPort}"
+                    )
+                } else {
+                    ui = ui.copy(statusMessage = "Не вдалося запустити трансляцію екрана")
+                }
             }
         } else {
             ui = ui.copy(statusMessage = "Screen capture permission denied")
         }
     }
 
-    // Battery monitor
+    // Battery level & real device temperature monitor
     LaunchedEffect(Unit) {
         while (true) {
             battery = context.getSystemService(BatteryManager::class.java)
                 ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+            val batIntent = runCatching {
+                context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            }.getOrNull()
+            val tenthsC = batIntent?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 340) ?: 340
+            if (tenthsC > 0) batteryTempC = (tenthsC / 10).coerceIn(0, 100)
             delay(10_000)
         }
     }
@@ -565,11 +699,7 @@ fun BroadcastScreen(
         scope.launch(Dispatchers.IO) {
             micStreamer.stop()
             if (ScreenCaptureService.isRunning) {
-                context.startService(
-                    Intent(context, ScreenCaptureService::class.java).apply {
-                        action = ScreenCaptureService.ACTION_STOP
-                    }
-                )
+                context.stopService(Intent(context, ScreenCaptureService::class.java))
             }
             LanVidNative.nativeStopSender()
             LanVidNative.nativeStopReceiver()
@@ -619,7 +749,7 @@ fun BroadcastScreen(
                                 targetPort,
                                 encW,
                                 encH,
-                                60,
+                                proState.fps.toIntOrNull() ?: 60,
                                 snap.quality,
                                 snap.fecGroup,
                                 snap.adaptive,
@@ -735,10 +865,12 @@ fun BroadcastScreen(
                             }
 
                             override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                                cameraStreamer.stop()
-                                cameraSurfaceTexture = null
-                                cameraPreviewSurface?.release()
+                                val oldSurface = cameraPreviewSurface
                                 cameraPreviewSurface = null
+                                cameraSurfaceTexture = null
+                                cameraStreamer.stop {
+                                    runCatching { oldSurface?.release() }
+                                }
                                 return true
                             }
 
@@ -818,6 +950,7 @@ fun BroadcastScreen(
                 // 4a. Top Bar (status, tally, timer, bitrate, format, battery, HUD/mode toggle)
                 TopHudBar(
                     ui = ui,
+                    fpsLabel = proState.fps,
                     tally = tally,
                     traffic = traffic,
                     txStats = txStats,
@@ -913,16 +1046,38 @@ fun BroadcastScreen(
                         ProManualDeckDrawer(
                             state = proState,
                             onStateChange = { next ->
-                                val prevLens = proState.lens
+                                val prev = proState
                                 proState = next
                                 var nextUi = ui
-                                if (next.lens != prevLens) {
+                                if (next.lens != prev.lens) {
                                     val nextSource = if (next.lens == "Front") CaptureSource.FRONT_CAM else CaptureSource.BACK_CAM
                                     if (ui.source != nextSource) {
                                         nextUi = ui.copy(source = nextSource)
                                         ui = nextUi
                                     }
                                     pushLocalConfigSync(nextUi, next)
+                                }
+                                val expChanged = next.iso != prev.iso || next.shutterAngleDeg != prev.shutterAngleDeg
+                                val wbChanged = next.wbKelvin != prev.wbKelvin
+                                val focusChanged = next.focusDist != prev.focusDist
+                                if (expChanged || wbChanged || focusChanged) {
+                                    val nextLocked = next.copy(
+                                        shutterLocked = next.shutterLocked || expChanged,
+                                        isoLocked = next.isoLocked || expChanged,
+                                        wbLocked = next.wbLocked || wbChanged,
+                                        focusLocked = next.focusLocked || focusChanged
+                                    )
+                                    proState = nextLocked
+                                    cameraStreamer.applyManualControls(
+                                        manualExposure = nextLocked.isoLocked || nextLocked.shutterLocked,
+                                        iso = nextLocked.iso,
+                                        shutterAngleDeg = nextLocked.shutterAngleDeg,
+                                        fps = nextLocked.fps.toIntOrNull() ?: 60,
+                                        manualWb = nextLocked.wbLocked,
+                                        wbKelvin = nextLocked.wbKelvin,
+                                        manualFocus = nextLocked.focusLocked,
+                                        focusNormalized = nextLocked.focusDist
+                                    )
                                 }
                             },
                             modifier = Modifier.align(Alignment.CenterStart)
@@ -933,6 +1088,8 @@ fun BroadcastScreen(
                         ProEncoderDrawer(
                             state = proState,
                             onStateChange = { next ->
+                                val prevUi = ui
+                                val prevFps = proState.fps
                                 proState = next
                                 val nextRes = when (next.resolution) {
                                     "4K UHD" -> ResolutionPreset.UHD_4K
@@ -944,13 +1101,29 @@ fun BroadcastScreen(
                                     "H.264" -> VideoCodecOption.H264
                                     else -> VideoCodecOption.DCT
                                 }
+                                val nextMbps = next.bitrateMbps.toDouble().coerceIn(1.0, 150.0)
                                 val nextUi = ui.copy(
                                     resolution = nextRes,
                                     codec = nextCodec,
-                                    bitrateMbps = next.bitrateMbps.toDouble().coerceIn(1.0, 50.0)
+                                    bitrateMbps = nextMbps
                                 )
                                 ui = nextUi
                                 pushLocalConfigSync(nextUi, next)
+                                if (nextUi.senderActive) {
+                                    val needRestart = (nextRes != prevUi.resolution || nextCodec != prevUi.codec || next.fps != prevFps)
+                                    val fpsVal = next.fps.toIntOrNull() ?: 60
+                                    scope.launch(Dispatchers.IO) {
+                                        if (needRestart) {
+                                            LanVidNative.nativeStartSender(
+                                                nextUi.destIp, nextUi.destPort, nextRes.width, nextRes.height,
+                                                fpsVal, nextUi.quality, nextUi.fecGroup, nextUi.adaptive,
+                                                nextCodec.id, (nextMbps * 1000).toInt()
+                                            )
+                                        } else if (nextMbps != prevUi.bitrateMbps) {
+                                            LanVidNative.nativeSetSenderBitrateKbps((nextMbps * 1000).toInt())
+                                        }
+                                    }
+                                }
                             },
                             modifier = Modifier.align(Alignment.CenterEnd)
                         )
@@ -973,11 +1146,44 @@ fun BroadcastScreen(
                                 toggleLive(overridePeer = peer)
                             },
                             onUpdate = { next ->
+                                val prevUi = ui
                                 if (next.destIp != ui.destIp || next.destPort != ui.destPort) {
                                     userManuallyPickedIp = true
                                     saveTargetPc(next.destIp, next.destPort, next.destName)
                                 }
                                 ui = next
+                                if (next.resolution != prevUi.resolution || next.codec != prevUi.codec || next.bitrateMbps != prevUi.bitrateMbps) {
+                                    val syncedPro = proState.copy(
+                                        resolution = when (next.resolution) {
+                                            ResolutionPreset.UHD_4K -> "4K UHD"
+                                            ResolutionPreset.FHD_1080 -> "1080p"
+                                            ResolutionPreset.HD_720 -> "720p"
+                                        },
+                                        codec = when (next.codec) {
+                                            VideoCodecOption.H265 -> "H.265"
+                                            VideoCodecOption.H264 -> "H.264"
+                                            VideoCodecOption.DCT -> "DCT"
+                                        },
+                                        bitrateMbps = next.bitrateMbps.toFloat()
+                                    )
+                                    proState = syncedPro
+                                    pushLocalConfigSync(next, syncedPro)
+                                    if (next.senderActive) {
+                                        val needRestart = (next.resolution != prevUi.resolution || next.codec != prevUi.codec)
+                                        val fpsVal = syncedPro.fps.toIntOrNull() ?: 60
+                                        scope.launch(Dispatchers.IO) {
+                                            if (needRestart) {
+                                                LanVidNative.nativeStartSender(
+                                                    next.destIp, next.destPort, next.resolution.width, next.resolution.height,
+                                                    fpsVal, next.quality, next.fecGroup, next.adaptive,
+                                                    next.codec.id, (next.bitrateMbps * 1000).toInt()
+                                                )
+                                            } else if (next.bitrateMbps != prevUi.bitrateMbps) {
+                                                LanVidNative.nativeSetSenderBitrateKbps((next.bitrateMbps * 1000).toInt())
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             onSwitchMode = { next ->
                                 if (next != ui.mode) {
@@ -1067,6 +1273,7 @@ private fun FrameGuidesOverlay(modifier: Modifier) = Canvas(modifier) {
 @Composable
 private fun TopHudBar(
     ui: HudUiState,
+    fpsLabel: String,
     tally: TallyVisual,
     traffic: TrafficState,
     txStats: SenderStats,
@@ -1115,9 +1322,9 @@ private fun TopHudBar(
             }
             if (ui.mode == BroadcastMode.SENDER) {
                 val fmtLabel = if (ui.codec == VideoCodecOption.DCT) {
-                    "${ui.resolution.label} · 60 · DCT Q${ui.quality}"
+                    "${ui.resolution.label} · $fpsLabel · DCT Q${ui.quality}"
                 } else {
-                    "${ui.resolution.label} · 60 · ${ui.codec.shortLabel} ${ui.bitrateMbps.toInt()}M"
+                    "${ui.resolution.label} · $fpsLabel · ${ui.codec.shortLabel} ${ui.bitrateMbps.toInt()}M"
                 }
                 Text(fmtLabel, style = Bm.mono(10.sp), color = Bm.text, maxLines = 1, softWrap = false)
                 if (ui.senderActive) {

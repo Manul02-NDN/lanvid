@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define LV_SDK_VERSION_MAJOR 2
-#define LV_SDK_VERSION_MINOR 6
+#define LV_SDK_VERSION_MINOR 7
 #define LV_SDK_VERSION_PATCH 0
 #define LV_SDK_VERSION_STRING "2.7.0"
 #define LV_SDK_ABI_VERSION   2

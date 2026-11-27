@@ -48,6 +48,10 @@ struct TallyIntercomEngine::Impl {
         VideoConfigSyncPayload last_vcfg{};
         std::array<uint32_t, 256> seen_seq{};
         std::array<uint8_t, 256> seen_valid{};
+        std::deque<float> rx_fifo;
+#ifdef LV_HAVE_OPUS
+        OpusDecoder* opus_dec = nullptr;
+#endif
     };
 
     struct PendingDup {
@@ -98,6 +102,7 @@ struct TallyIntercomEngine::Impl {
     // Audio FIFOs (48 kHz mono float32)
     std::vector<float> tx_stage;
     std::deque<float> rx_fifo;
+    std::deque<float> sidetone_fifo;
 
 #ifdef LV_HAVE_OPUS
     OpusEncoder* enc = nullptr;
@@ -125,16 +130,34 @@ struct TallyIntercomEngine::Impl {
 #endif
     }
 
+    void destroy_cam_decoder_locked(CamSlot& c) {
+#ifdef LV_HAVE_OPUS
+        if (c.opus_dec) {
+            opus_decoder_destroy(c.opus_dec);
+            c.opus_dec = nullptr;
+        }
+#else
+        (void)c;
+#endif
+    }
+
+    void reset_cam_slot_locked(int i) {
+        if (i < 0 || i >= kMaxStudioCameras) return;
+        destroy_cam_decoder_locked(cams[i]);
+        cams[i] = CamSlot{};
+    }
+
     void destroy_codec() {
 #ifdef LV_HAVE_OPUS
         if (enc) { opus_encoder_destroy(enc); enc = nullptr; }
         if (dec) { opus_decoder_destroy(dec); dec = nullptr; }
+        for (auto& c : cams) destroy_cam_decoder_locked(c);
 #endif
     }
 
     ~Impl() { destroy_codec(); }
 
-    int find_or_alloc_cam_locked(uint32_t cid, const Endpoint& ep) {
+    int find_or_alloc_cam_locked(uint32_t cid, const Endpoint& ep, uint64_t now = 0) {
         for (int i = 0; i < kMaxStudioCameras; ++i) {
             if (cams[i].used && ((cid != 0 && cams[i].camera_id == cid) || (ep.valid() && cams[i].ep == ep))) {
                 return i;
@@ -142,13 +165,34 @@ struct TallyIntercomEngine::Impl {
         }
         for (int i = 0; i < kMaxStudioCameras; ++i) {
             if (!cams[i].used) {
-                cams[i] = CamSlot{};
+                reset_cam_slot_locked(i);
                 cams[i].used = true;
                 cams[i].camera_id = cid ? cid : uint32_t(i + 1);
                 cams[i].label = "CAM " + std::to_string(i + 1);
                 cams[i].ep = ep;
                 cams[i].listen_from_cam = true;
                 return i;
+            }
+        }
+        // Reclaim the stalest disconnected camera slot (> 30 s unseen) when full.
+        if (now > 0) {
+            int stale = -1;
+            uint64_t oldest = UINT64_MAX;
+            for (int i = 0; i < kMaxStudioCameras; ++i) {
+                if (cams[i].used && cams[i].last_seen_us != 0 && now > cams[i].last_seen_us &&
+                    (now - cams[i].last_seen_us) > 30'000'000ull && cams[i].last_seen_us < oldest) {
+                    oldest = cams[i].last_seen_us;
+                    stale = i;
+                }
+            }
+            if (stale >= 0) {
+                reset_cam_slot_locked(stale);
+                cams[stale].used = true;
+                cams[stale].camera_id = cid ? cid : uint32_t(stale + 1);
+                cams[stale].label = "CAM " + std::to_string(stale + 1);
+                cams[stale].ep = ep;
+                cams[stale].listen_from_cam = true;
+                return stale;
             }
         }
         return -1;
@@ -288,17 +332,34 @@ struct TallyIntercomEngine::Impl {
         }
     }
 
-    int decode_voice_locked(const IntercomAudioHeader& ih, const uint8_t* data, size_t len, float* out) {
+    int decode_voice_locked(const IntercomAudioHeader& ih, const uint8_t* data, size_t len, float* out,
+                            int max_out_samples, CamSlot* cam_slot = nullptr) {
+        const int cap = std::min<int>(int(ih.num_samples), max_out_samples);
+        if (cap <= 0) return 0;
         if (ih.codec == 1) {
 #ifdef LV_HAVE_OPUS
-            if (dec && len > 0) {
-                const int d = opus_decode_float(dec, data, int(len), out, int(ih.num_samples), 0);
+            OpusDecoder* d_inst = dec;
+            if (cam_slot) {
+                if (!cam_slot->opus_dec) {
+                    int err = OPUS_OK;
+                    cam_slot->opus_dec = opus_decoder_create(48000, 1, &err);
+                    if (err != OPUS_OK) {
+                        if (cam_slot->opus_dec) opus_decoder_destroy(cam_slot->opus_dec);
+                        cam_slot->opus_dec = nullptr;
+                    }
+                }
+                d_inst = cam_slot->opus_dec;
+            }
+            if (d_inst && len > 0) {
+                const int d = opus_decode_float(d_inst, data, int(len), out, cap, 0);
                 if (d > 0) return d;
             }
+#else
+            (void)cam_slot;
 #endif
             return 0;
         }
-        const int n = std::min<int>(int(ih.num_samples), int(len / 2));
+        const int n = std::min<int>(cap, int(len / 2));
         for (int i = 0; i < n; ++i) {
             const int16_t v = int16_t(uint16_t(data[2 * i]) | (uint16_t(data[2 * i + 1]) << 8));
             out[i] = float(v) * (1.0f / 32768.0f);
@@ -370,13 +431,15 @@ void TallyIntercomEngine::stop() {
     impl_->sock.close();
     impl_->tx_stage.clear();
     impl_->rx_fifo.clear();
+    impl_->sidetone_fifo.clear();
     impl_->pending_dups.clear();
     impl_->cam_seen_valid.fill(0);
     impl_->cam_last_rx_vcfg_rev = 0;
     impl_->last_vcfg = VideoConfigSyncPayload{};
+    impl_->last_tally = TallyStatePayload{};
     impl_->my_assigned_cam_number = 0;
     impl_->my_assigned_cam_tag.clear();
-    for (auto& c : impl_->cams) c = Impl::CamSlot{};
+    for (int i = 0; i < kMaxStudioCameras; ++i) impl_->reset_cam_slot_locked(i);
     bound_port_ = 0;
 }
 
@@ -577,6 +640,13 @@ void TallyIntercomEngine::push_mic_pcm(const float* samples, int frames) {
 
     const bool red = wifi_redundancy_.load(std::memory_order_acquire);
     const uint32_t stag = dup_stagger_us_.load(std::memory_order_relaxed);
+    if (impl_->sidetone_gain > 0.0f) {
+        const float sg = impl_->sidetone_gain;
+        for (int i = 0; i < frames; ++i) {
+            impl_->sidetone_fifo.push_back(samples[i] * sg);
+        }
+        while (impl_->sidetone_fifo.size() > 9600) impl_->sidetone_fifo.pop_front();
+    }
     impl_->tx_stage.insert(impl_->tx_stage.end(), samples, samples + frames);
     while (int(impl_->tx_stage.size()) >= kIntercomFrameSamples) {
         impl_->encode_and_send_voice_locked(impl_->tx_stage.data(), kIntercomFrameSamples,
@@ -588,17 +658,40 @@ void TallyIntercomEngine::push_mic_pcm(const float* samples, int frames) {
 int TallyIntercomEngine::pull_rx_pcm(float* out_samples, int frames) {
     if (!out_samples || frames <= 0) return 0;
     std::lock_guard<std::mutex> lk(impl_->mu);
-    const int avail = int(impl_->rx_fifo.size());
-    const int n = std::min(frames, avail);
+    const bool is_studio = studio_mode_.load(std::memory_order_relaxed);
     const float g = impl_->listen_muted ? 0.0f : impl_->rx_gain;
+    std::fill(out_samples, out_samples + frames, 0.0f);
+    int n = 0;
+    if (is_studio) {
+        for (auto& c : impl_->cams) {
+            if (!c.used || !c.listen_from_cam || c.rx_fifo.empty()) continue;
+            const int take = std::min<int>(frames, int(c.rx_fifo.size()));
+            for (int i = 0; i < take; ++i) {
+                out_samples[i] += c.rx_fifo.front() * g;
+                c.rx_fifo.pop_front();
+            }
+            if (take > n) n = take;
+        }
+    } else {
+        n = std::min<int>(frames, int(impl_->rx_fifo.size()));
+        for (int i = 0; i < n; ++i) {
+            out_samples[i] = impl_->rx_fifo.front() * g;
+            impl_->rx_fifo.pop_front();
+        }
+    }
+    if (!impl_->sidetone_fifo.empty()) {
+        const int st_n = std::min<int>(frames, int(impl_->sidetone_fifo.size()));
+        for (int i = 0; i < st_n; ++i) {
+            out_samples[i] += impl_->sidetone_fifo.front();
+            impl_->sidetone_fifo.pop_front();
+        }
+        if (st_n > n) n = st_n;
+    }
     float pk = 0.0f;
     for (int i = 0; i < n; ++i) {
-        const float s = std::clamp(impl_->rx_fifo.front() * g, -1.0f, 1.0f);
-        impl_->rx_fifo.pop_front();
-        out_samples[i] = s;
-        pk = std::max(pk, std::fabs(s));
+        out_samples[i] = std::clamp(out_samples[i], -1.0f, 1.0f);
+        pk = std::max(pk, std::fabs(out_samples[i]));
     }
-    for (int i = n; i < frames; ++i) out_samples[i] = 0.0f;
     rx_peak_dbfs_.store(peak_to_dbfs(pk), std::memory_order_relaxed);
     return n;
 }
@@ -615,12 +708,15 @@ void TallyIntercomEngine::poll() {
 
     uint8_t buf[2048];
     Endpoint src{};
-    TallyCallback cb_to_fire;
-    TallyStatePayload cb_payload{};
-    bool fire_cb = false;
+    std::vector<std::pair<TallyCallback, TallyStatePayload>> tally_events;
 
     for (int iter = 0; iter < 64; ++iter) {
-        const int n = impl_->sock.recv_from(buf, sizeof(buf), src);
+        int n = 0;
+        {
+            std::lock_guard<std::mutex> lk(impl_->mu);
+            if (!impl_->sock.is_open()) break;
+            n = impl_->sock.recv_from(buf, sizeof(buf), src);
+        }
         if (n <= 0) break;
         PacketHeader h{};
         const uint8_t* pl = nullptr;
@@ -631,7 +727,7 @@ void TallyIntercomEngine::poll() {
             if (!parse_tally_state(pl, h.payload_size, tp)) continue;
             std::lock_guard<std::mutex> lk(impl_->mu);
             if (is_studio) {
-                const int idx = impl_->find_or_alloc_cam_locked(tp.camera_id, src);
+                const int idx = impl_->find_or_alloc_cam_locked(tp.camera_id, src, now);
                 if (idx >= 0) {
                     auto& c = impl_->cams[idx];
                     c.ep = src;
@@ -642,14 +738,16 @@ void TallyIntercomEngine::poll() {
                 }
             } else {
                 if (tp.camera_id == 0 || tp.camera_id == impl_->my_camera_id) {
+                    if (impl_->last_tally.revision != 0 && tp.revision != 0 &&
+                        int32_t(tp.revision - impl_->last_tally.revision) < 0) {
+                        continue;  // stale out-of-order Tally packet
+                    }
                     const bool changed = (tp.tally_state != impl_->last_tally.tally_state) ||
                                          (tp.flags != impl_->last_tally.flags) ||
                                          (tp.revision != impl_->last_tally.revision);
                     impl_->last_tally = tp;
                     if (changed && impl_->tally_cb) {
-                        cb_to_fire = impl_->tally_cb;
-                        cb_payload = tp;
-                        fire_cb = true;
+                        tally_events.emplace_back(impl_->tally_cb, tp);
                     }
                 }
             }
@@ -674,7 +772,7 @@ void TallyIntercomEngine::poll() {
                 std::lock_guard<std::mutex> lk(impl_->mu);
                 if (vc.origin_id != 0 && vc.origin_id == impl_->my_origin_id) continue;  // Echo Guard
                 if (is_studio) {
-                    const int idx = impl_->find_or_alloc_cam_locked(vc.camera_id, src);
+                    const int idx = impl_->find_or_alloc_cam_locked(vc.camera_id, src, now);
                     if (idx < 0) continue;
                     auto& c = impl_->cams[idx];
                     c.ep = src;
@@ -716,20 +814,21 @@ void TallyIntercomEngine::poll() {
             float pcm[1920];
 
             std::lock_guard<std::mutex> lk(impl_->mu);
+            Impl::CamSlot* cam_slot = nullptr;
             if (is_studio) {
-                const int idx = impl_->find_or_alloc_cam_locked(ih.camera_id, src);
-                if (idx >= 0) {
-                    auto& c = impl_->cams[idx];
-                    c.ep = src;
-                    c.last_seen_us = now;
-                    if (Impl::check_and_mark_seq(c.seen_seq, c.seen_valid, ih.seq)) {
-                        dup_drops_.fetch_add(1, std::memory_order_relaxed);
-                        continue;
-                    }
-                    c.last_voice_us = now;
-                    ++c.ic_rx;
-                    if (!c.listen_from_cam) continue;
+                const int idx = impl_->find_or_alloc_cam_locked(ih.camera_id, src, now);
+                if (idx < 0) continue;  // all camera slots occupied
+                auto& c = impl_->cams[idx];
+                cam_slot = &c;
+                c.ep = src;
+                c.last_seen_us = now;
+                if (Impl::check_and_mark_seq(c.seen_seq, c.seen_valid, ih.seq)) {
+                    dup_drops_.fetch_add(1, std::memory_order_relaxed);
+                    continue;
                 }
+                c.last_voice_us = now;
+                ++c.ic_rx;
+                if (!c.listen_from_cam) continue;
             } else {
                 if (ih.camera_id != 0 && ih.camera_id != impl_->my_camera_id) continue;
                 if (Impl::check_and_mark_seq(impl_->cam_seen_seq, impl_->cam_seen_valid, ih.seq)) {
@@ -739,24 +838,24 @@ void TallyIntercomEngine::poll() {
                 impl_->last_director_voice_us = now;
             }
 
-            const int dec_n = impl_->decode_voice_locked(ih, voice_data, voice_len, pcm);
+            const int dec_n = impl_->decode_voice_locked(ih, voice_data, voice_len, pcm, 1920, cam_slot);
             if (dec_n > 0) {
                 float pk = 0.0f;
+                auto& target_fifo = cam_slot ? cam_slot->rx_fifo : impl_->rx_fifo;
                 for (int i = 0; i < dec_n; ++i) {
                     pk = std::max(pk, std::fabs(pcm[i]));
-                    impl_->rx_fifo.push_back(pcm[i]);
+                    target_fifo.push_back(pcm[i]);
                 }
-                while (impl_->rx_fifo.size() > 9600) impl_->rx_fifo.pop_front();  // cap 200 ms max
+                while (target_fifo.size() > 9600) target_fifo.pop_front();  // cap 200 ms max
                 rx_pkts_.fetch_add(1, std::memory_order_relaxed);
-                if (is_studio) {
-                    const int idx = impl_->find_or_alloc_cam_locked(ih.camera_id, src);
-                    if (idx >= 0) impl_->cams[idx].voice_peak_dbfs = peak_to_dbfs(pk);
-                }
+                if (cam_slot) cam_slot->voice_peak_dbfs = peak_to_dbfs(pk);
             }
         }
     }
 
-    if (fire_cb && cb_to_fire) cb_to_fire(cb_payload);
+    for (const auto& ev : tally_events) {
+        if (ev.first) ev.first(ev.second);
+    }
 
     // Update smooth program ducking gain on Camera side (0.25 while director speaks, 1.0 otherwise)
     if (!is_studio) {

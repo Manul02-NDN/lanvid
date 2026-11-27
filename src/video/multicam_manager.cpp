@@ -150,7 +150,6 @@ bool MultiCamManager::start(const MultiCamConfig& cfg) {
     }
     stop_.store(false);
     iso_stop_.store(false);
-    iso_thread_ = std::thread([this] { iso_worker_loop(); });
     if (cfg_.publish_video_bus) {
         if (bus_.open(cfg_.video_bus_name.empty() ? nullptr : cfg_.video_bus_name.c_str())) {
             bus_.set_active_vcams(cfg_.vcam_count, cfg_.vcam_placeholder);
@@ -178,6 +177,7 @@ bool MultiCamManager::start(const MultiCamConfig& cfg) {
         }
         bound_base_port_ = cfg_.base_port;
     }
+    iso_thread_ = std::thread([this] { iso_worker_loop(); });
     running_.store(true, std::memory_order_release);
     demux_thread_ = std::thread([this] { demux_loop(); });
     return true;
@@ -186,30 +186,37 @@ bool MultiCamManager::start(const MultiCamConfig& cfg) {
 void MultiCamManager::stop() {
     rec_stop_all();
     stop_.store(true);
-    {
-        std::lock_guard<std::mutex> lk(iso_q_mu_);
-        iso_stop_.store(true);
-    }
-    iso_q_cv_.notify_all();
-    if (iso_thread_.joinable()) iso_thread_.join();
     if (demux_thread_.joinable()) demux_thread_.join();
     for (auto& s : slots_) {
         if (!s) continue;
         s->th_stop.store(true);
         if (s->th.joinable()) s->th.join();
     }
+    // Move receivers out under slots_mu_ and destroy them outside the lock (avoids AB-BA deadlock with vdec_thread -> request_idr).
+    std::vector<std::unique_ptr<UdpReceiver>> rx_to_destroy;
     {
         std::lock_guard<std::mutex> lk(slots_mu_);
-        for (auto& s : slots_)
-            if (s) {
-                s->rx.reset();
-                s->rx_raw.store(nullptr);
+        for (auto& s : slots_) {
+            if (s && s->rx) {
+                s->rx_raw.store(nullptr, std::memory_order_release);
+                rx_to_destroy.push_back(std::move(s->rx));
             }
+        }
     }
+    rx_to_destroy.clear();
+    {
+        std::lock_guard<std::mutex> lk(iso_q_mu_);
+        iso_stop_.store(true);
+    }
+    iso_q_cv_.notify_all();
+    if (iso_thread_.joinable()) iso_thread_.join();
     demux_sock_.reset();
-    if (bus_.is_open()) {
-        for (uint32_t i = 0; i < kVideoBusSlots; ++i) bus_.set_slot_info(i, nullptr, nullptr, false, false);
-        bus_.close();
+    {
+        std::lock_guard<std::mutex> lk(bus_mu_);
+        if (bus_.is_open()) {
+            for (uint32_t i = 0; i < kVideoBusSlots; ++i) bus_.set_slot_info(i, nullptr, nullptr, false, false);
+            bus_.close();
+        }
     }
     running_.store(false, std::memory_order_release);
 }
@@ -238,12 +245,13 @@ bool MultiCamManager::ensure_receiver(uint32_t i) {
         s->rx_raw.store(s->rx.get(), std::memory_order_release);
         s->th_stop.store(false);
         UdpReceiver* r = s->rx.get();
-        s->th = std::thread([s, r] {
+        s->th = std::thread([this, s, r] {
             while (!s->th_stop.load(std::memory_order_relaxed)) {
                 r->step_once();
-                if (!s->bound) {
-                    Endpoint ep;
-                    if (r->sender_endpoint(ep)) {
+                Endpoint ep;
+                if (r->sender_endpoint(ep)) {
+                    std::lock_guard<std::mutex> lk(slots_mu_);
+                    if (!s->bound) {
                         s->ip_be = ep.ipv4_be;
                         s->port = ep.port;
                         s->bound = true;
@@ -307,10 +315,11 @@ void MultiCamManager::demux_loop() {
     RecvDatagram batch[kBatch];
     uint64_t next_house = 0;
     while (!stop_.load(std::memory_order_acquire)) {
-        const uint64_t now = now_us();
+        uint64_t now = 0;
         if (demux_sock_) {
             for (int k = 0; k < kBatch; ++k) batch[k] = {storage.data() + size_t(k) * 2048, 2048, 0, {}};
             const int got = demux_sock_->recv_batch(batch, kBatch);
+            now = now_us();
             std::lock_guard<std::mutex> lk(slots_mu_);
             for (int k = 0; k < got; ++k) {
                 if (!batch[k].len) continue;
@@ -323,10 +332,12 @@ void MultiCamManager::demux_loop() {
                 if (s->rx) s->rx->service(now);
         } else {
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            now = now_us();
         }
         for (uint32_t i = 0; i < slots_.size(); ++i) publish_slot_playout(i, now);
         if (now >= next_house) {  // 5 Hz: virtual-camera slot state + bus heartbeat
             next_house = now + 200000;
+            std::lock_guard<std::mutex> blk(bus_mu_);
             if (bus_.is_open()) {
                 bus_.heartbeat();
                 for (auto& s : slots_) {
@@ -343,7 +354,12 @@ void MultiCamManager::demux_loop() {
                 const int pgm = program_slot();
                 const Slot* ps = slot_ptr(uint32_t(std::max(0, pgm)));
                 const bool pgm_live = ps && age_us(now, ps->last_frame_us.load()) < 1000000;
-                bus_.set_slot_info(kVideoBusProgramSlot, "LanVid Program Out", ps ? ps->label.c_str() : "", pgm_live,
+                std::string pgm_label;
+                if (ps) {
+                    std::lock_guard<std::mutex> lk(ps->info_mu);
+                    pgm_label = ps->label;
+                }
+                bus_.set_slot_info(kVideoBusProgramSlot, "LanVid Program Out", pgm_label.c_str(), pgm_live,
                                    false);
             }
         }
@@ -466,17 +482,19 @@ void MultiCamManager::iso_worker_loop() {
                     if (!program_rec_->open(rc)) program_rec_.reset();
                 }
                 if (program_enc_ && program_rec_) {
-                    Image scaled;
-                    scaled.allocate(kW, kH, PixelOrder::kBGRA);
+                    if (program_scaled_img_.width != kW || program_scaled_img_.height != kH ||
+                        program_scaled_img_.order != PixelOrder::kBGRA) {
+                        program_scaled_img_.allocate(kW, kH, PixelOrder::kBGRA);
+                    }
                     VideoBus::FrameInfo fi;
                     fi.width = uint32_t(job.image.width);
                     fi.height = uint32_t(job.image.height);
                     fi.stride = uint32_t(job.image.stride);
                     fi.format = VideoBusFormat::kBGRA;
-                    video_bus_convert_to_bgra(job.image.data.data(), fi, scaled.data.data(), kW, kH,
-                                              uint32_t(scaled.stride));
+                    video_bus_convert_to_bgra(job.image.data.data(), fi, program_scaled_img_.data.data(), kW, kH,
+                                              uint32_t(program_scaled_img_.stride));
                     EncodedVideoPacket pkt;
-                    if (program_enc_->encode_image(scaled, pkt))
+                    if (program_enc_->encode_image(program_scaled_img_, pkt))
                         program_rec_->write_video(pkt.data.data(), pkt.data.size(), pkt.is_keyframe, job.timestamp_us);
                 }
             }
@@ -683,7 +701,7 @@ bool MultiCamManager::rec_start_all(const IsoSessionConfig& session) {
         fs::create_directories(dir, ec);
         if (ec) return false;
         session_dir_ = dir;
-        session_t0_us_ = now_us();
+        session_t0_us_.store(now_us(), std::memory_order_release);
         session_unix_s_ = uint64_t(t);
         session_tc_frame_ = iso_timecode_now(30);
         session_active_ = true;
@@ -720,18 +738,25 @@ void MultiCamManager::request_idr(uint32_t i) {
 }
 
 void MultiCamManager::rec_stop_all() {
-    drain_iso_queue();
     for (auto& s : slots_) {
         if (!s) continue;
         std::lock_guard<std::mutex> lk(s->rec_mu);
         s->rec_on = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(rec_mu_);
+        session_active_ = false;
+    }
+    drain_iso_queue();
+    for (auto& s : slots_) {
+        if (!s) continue;
+        std::lock_guard<std::mutex> lk(s->rec_mu);
         if (s->rec) s->rec->close();
         s->enc.reset();
     }
     std::lock_guard<std::mutex> lk(rec_mu_);
     if (program_rec_) program_rec_->close();
     program_enc_.reset();
-    session_active_ = false;
 }
 
 bool MultiCamManager::rec_slot(uint32_t i, bool on) {
@@ -739,12 +764,13 @@ bool MultiCamManager::rec_slot(uint32_t i, bool on) {
     if (!s) return false;
     if (on) {
         bool active;
+        IsoSessionConfig sc;
         {
             std::lock_guard<std::mutex> lk(rec_mu_);
             active = session_active_;
+            sc = session_;
         }
         if (!active) {
-            IsoSessionConfig sc = session_;
             sc.slot_mask = 0;  // start a session for just this camera
             if (!rec_start_all(sc)) return false;
         }
@@ -818,13 +844,19 @@ std::string MultiCamManager::session_dir() const {
 
 uint64_t MultiCamManager::session_elapsed_us() const {
     std::lock_guard<std::mutex> lk(rec_mu_);
-    return session_active_ ? now_us() - session_t0_us_ : 0;
+    if (!session_active_) return 0;
+    const uint64_t now = now_us();
+    const uint64_t t0 = session_t0_us_.load(std::memory_order_acquire);
+    return now > t0 ? (now - t0) : 0;
 }
 
 std::string MultiCamManager::session_timecode() const {
     std::lock_guard<std::mutex> lk(rec_mu_);
     if (!session_active_) return "00:00:00:00";
-    return iso_timecode_string(session_tc_frame_ + (now_us() - session_t0_us_) * 30 / 1000000, 30);
+    const uint64_t now = now_us();
+    const uint64_t t0 = session_t0_us_.load(std::memory_order_acquire);
+    const uint64_t elapsed = now > t0 ? (now - t0) : 0;
+    return iso_timecode_string(session_tc_frame_ + elapsed * 30 / 1000000, 30);
 }
 
 MultiCamSlotInfo MultiCamManager::slot_info(uint32_t i) const {
@@ -871,12 +903,21 @@ MultiCamSlotInfo MultiCamManager::slot_info(uint32_t i) const {
     info.codec = codec_name(s->codec.load());
     info.frames = s->frames.load();
     info.audio_peak_dbfs = s->audio_peak.load();
-    if (s->rx) {
-        const uint64_t b = s->rx->assembler_stats().bytes_total;
+    uint64_t rx_bytes = 0;
+    bool has_rx = false;
+    {
+        std::lock_guard<std::mutex> lk(slots_mu_);
+        if (s->rx) {
+            rx_bytes = s->rx->assembler_stats().bytes_total;
+            has_rx = true;
+        }
+    }
+    if (has_rx) {
+        std::lock_guard<std::mutex> flk(s->frame_mu);
         if (now - s->br_t0 >= 1000000) {
-            s->br_mbps = s->br_t0 ? double(b - std::min(b, s->br_b0)) * 8.0 / double(now - s->br_t0) : 0.0;
+            s->br_mbps = s->br_t0 ? double(rx_bytes - std::min(rx_bytes, s->br_b0)) * 8.0 / double(now - s->br_t0) : 0.0;
             s->br_t0 = now;
-            s->br_b0 = b;
+            s->br_b0 = rx_bytes;
         }
         info.bitrate_mbps = info.streaming ? s->br_mbps : 0.0;
     }
@@ -917,20 +958,29 @@ void MultiCamManager::release_slot(uint32_t i) {
     Slot* s = slot_ptr(i);
     if (!s) return;
     rec_slot(i, false);
-    std::lock_guard<std::mutex> lk(slots_mu_);
-    s->bound = false;
-    s->ip_be = 0;
-    s->port = 0;
-    if (cfg_.port_mode == MultiCamPortMode::kSingleDemux) {  // fresh receiver for the next phone
-        s->rx.reset();
-        s->rx_raw.store(nullptr);
+    std::unique_ptr<UdpReceiver> rx_to_destroy;
+    {
+        std::lock_guard<std::mutex> lk(slots_mu_);
+        s->bound = false;
+        s->ip_be = 0;
+        s->port = 0;
+        if (cfg_.port_mode == MultiCamPortMode::kSingleDemux) {  // fresh receiver for the next phone
+            s->rx_raw.store(nullptr, std::memory_order_release);
+            rx_to_destroy = std::move(s->rx);
+        }
     }
-    std::lock_guard<std::mutex> plk(s->pub_mu);
-    s->playout.reset();
-    s->playout_pub_seq = 0;
-    std::lock_guard<std::mutex> fl(s->frame_mu);
-    s->frame = Image{};
-    s->last_frame_us.store(0);
+    // Destroy UdpReceiver outside slots_mu_ to prevent AB-BA deadlock with vdec_thread -> request_idr.
+    rx_to_destroy.reset();
+    {
+        std::lock_guard<std::mutex> plk(s->pub_mu);
+        s->playout.reset();
+        s->playout_pub_seq = 0;
+    }
+    {
+        std::lock_guard<std::mutex> fl(s->frame_mu);
+        s->frame = Image{};
+        s->last_frame_us.store(0);
+    }
 }
 
 bool MultiCamManager::latest_frame(uint32_t i, Image& out, uint64_t& seq) const {

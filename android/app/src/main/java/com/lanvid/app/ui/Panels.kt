@@ -66,10 +66,10 @@ enum class HudTool(val title: String) {
 data class HudUiState(
     val mode: BroadcastMode = BroadcastMode.SENDER,
     val source: CaptureSource = CaptureSource.BACK_CAM,
-    val resolution: ResolutionPreset = ResolutionPreset.HD_720,
+    val resolution: ResolutionPreset = ResolutionPreset.FHD_1080,
     val audioSource: AudioSourceOption = AudioSourceOption.OFF,
-    val codec: VideoCodecOption = VideoCodecOption.DCT,
-    val bitrateMbps: Double = 10.0,
+    val codec: VideoCodecOption = VideoCodecOption.H265,
+    val bitrateMbps: Double = 25.0,
     val quality: Int = 80,
     val fecGroup: Int = 6,
     val adaptive: Boolean = true,
@@ -393,10 +393,10 @@ fun ToolPanel(
                 }
                 if (ui.codec != VideoCodecOption.DCT) {
                     Row2("${ui.codec.title} BITRATE", "${ui.bitrateMbps.toInt()} Mb/s")
-                    ValueSlider(ui.bitrateMbps, 1.0..50.0, log = true) {
-                        onUpdate(ui.copy(bitrateMbps = Math.round(it).toDouble().coerceIn(1.0, 50.0)))
+                    ValueSlider(ui.bitrateMbps, 1.0..150.0, log = true) {
+                        onUpdate(ui.copy(bitrateMbps = Math.round(it).toDouble().coerceIn(1.0, 150.0)))
                     }
-                    PresetRow(listOf(5, 10, 15, 25, 50), ui.bitrateMbps.toInt(), { "$it Mb" }) {
+                    PresetRow(listOf(5, 15, 25, 50, 100), ui.bitrateMbps.toInt(), { "$it Mb" }) {
                         onUpdate(ui.copy(bitrateMbps = it.toDouble()))
                     }
                 }

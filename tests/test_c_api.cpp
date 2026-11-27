@@ -307,10 +307,10 @@ TEST(android_yuv420_padded_stride_and_front_camera_rotation) {
     auto expected_y = [](int sx, int sy) -> uint8_t {
         return uint8_t(32 + ((sx * 160) / W) + ((sy * 48) / H));
     };
-    auto expected_u = [](int cx, int cy) -> uint8_t {
+    auto expected_u = [](int cx, int /*cy*/) -> uint8_t {
         return uint8_t(64 + ((cx * 120) / cw));
     };
-    auto expected_v = [](int cx, int cy) -> uint8_t {
+    auto expected_v = [](int /*cx*/, int cy) -> uint8_t {
         return uint8_t(64 + ((cy * 120) / ch));
     };
 

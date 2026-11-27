@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
+#include <linux/filter.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <net/if.h>
@@ -176,6 +177,9 @@ struct NpcapApi {
     using SetMinToCopyFn = int(__cdecl*)(void*, int);
     using SendPacketFn = int(__cdecl*)(void*, const uint8_t*, int);
     using NextExFn = int(__cdecl*)(void*, PcapPkthdr**, const uint8_t**);
+    using CompileFn = int(__cdecl*)(void*, void*, const char*, int, uint32_t);
+    using SetFilterFn = int(__cdecl*)(void*, void*);
+    using FreeCodeFn = void(__cdecl*)(void*);
 
     OpenLiveFn open_live = nullptr;
     CloseFn close = nullptr;
@@ -183,28 +187,33 @@ struct NpcapApi {
     SetMinToCopyFn setmintocopy = nullptr;
     SendPacketFn sendpacket = nullptr;
     NextExFn next_ex = nullptr;
+    CompileFn compile = nullptr;
+    SetFilterFn setfilter = nullptr;
+    FreeCodeFn freecode = nullptr;
+
+    NpcapApi() {
+        // Npcap installs into System32\Npcap (and optionally System32 in WinPcap-compat mode).
+        char sysdir[MAX_PATH] = {};
+        if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
+            std::string npcap_path = std::string(sysdir) + "\\Npcap\\wpcap.dll";
+            mod = LoadLibraryA(npcap_path.c_str());
+        }
+        if (!mod) mod = LoadLibraryExA("wpcap.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (mod) {
+            open_live = reinterpret_cast<OpenLiveFn>(GetProcAddress(mod, "pcap_open_live"));
+            close = reinterpret_cast<CloseFn>(GetProcAddress(mod, "pcap_close"));
+            setnonblock = reinterpret_cast<SetNonblockFn>(GetProcAddress(mod, "pcap_setnonblock"));
+            setmintocopy = reinterpret_cast<SetMinToCopyFn>(GetProcAddress(mod, "pcap_setmintocopy"));
+            sendpacket = reinterpret_cast<SendPacketFn>(GetProcAddress(mod, "pcap_sendpacket"));
+            next_ex = reinterpret_cast<NextExFn>(GetProcAddress(mod, "pcap_next_ex"));
+            compile = reinterpret_cast<CompileFn>(GetProcAddress(mod, "pcap_compile"));
+            setfilter = reinterpret_cast<SetFilterFn>(GetProcAddress(mod, "pcap_setfilter"));
+            freecode = reinterpret_cast<FreeCodeFn>(GetProcAddress(mod, "pcap_freecode"));
+        }
+    }
 
     static NpcapApi& instance() {
-        static NpcapApi api;
-        static bool tried = false;
-        if (!tried) {
-            tried = true;
-            // Npcap installs into System32\Npcap (and optionally System32 in WinPcap-compat mode).
-            char sysdir[MAX_PATH] = {};
-            if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
-                std::string npcap_path = std::string(sysdir) + "\\Npcap\\wpcap.dll";
-                api.mod = LoadLibraryA(npcap_path.c_str());
-            }
-            if (!api.mod) api.mod = LoadLibraryA("wpcap.dll");
-            if (api.mod) {
-                api.open_live = reinterpret_cast<OpenLiveFn>(GetProcAddress(api.mod, "pcap_open_live"));
-                api.close = reinterpret_cast<CloseFn>(GetProcAddress(api.mod, "pcap_close"));
-                api.setnonblock = reinterpret_cast<SetNonblockFn>(GetProcAddress(api.mod, "pcap_setnonblock"));
-                api.setmintocopy = reinterpret_cast<SetMinToCopyFn>(GetProcAddress(api.mod, "pcap_setmintocopy"));
-                api.sendpacket = reinterpret_cast<SendPacketFn>(GetProcAddress(api.mod, "pcap_sendpacket"));
-                api.next_ex = reinterpret_cast<NextExFn>(GetProcAddress(api.mod, "pcap_next_ex"));
-            }
-        }
+        static NpcapApi api;  // C++11 thread-safe function-local static initialization
         return api;
     }
 
@@ -328,10 +337,18 @@ public:
             return 0;
         }
         const auto* bh = reinterpret_cast<const bpf_hdr*>(bpf_buf_.data() + rx_off_);
-        const size_t pkt_off = rx_off_ + bh->bh_hdrlen;
-        const size_t pkt_len = bh->bh_caplen;
-        rx_off_ += BPF_WORDALIGN(bh->bh_hdrlen + bh->bh_caplen);
-        if (pkt_off + pkt_len > rx_len_) return 0;
+        if (bh->bh_hdrlen < sizeof(bpf_hdr) || size_t(bh->bh_hdrlen) > rx_len_ - rx_off_) {
+            rx_off_ = rx_len_ = 0;
+            return 0;
+        }
+        const size_t pkt_off = rx_off_ + size_t(bh->bh_hdrlen);
+        const size_t pkt_len = size_t(bh->bh_caplen);
+        const size_t adv = BPF_WORDALIGN(size_t(bh->bh_hdrlen) + pkt_len);
+        if (adv == 0 || pkt_len > rx_len_ - pkt_off) {
+            rx_off_ = rx_len_ = 0;
+            return 0;
+        }
+        rx_off_ += adv;
         const size_t copy_n = std::min(cap, pkt_len);
         std::memcpy(out_buf, bpf_buf_.data() + pkt_off, copy_n);
         return int(copy_n);
@@ -355,13 +372,13 @@ std::vector<L2AdapterInfo> list_l2_adapters() {
     ULONG sz = 16384;
     std::vector<uint8_t> buf(sz);
     auto* addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, addrs, &sz) ==
-        ERROR_BUFFER_OVERFLOW) {
+    ULONG rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, addrs, &sz);
+    if (rc == ERROR_BUFFER_OVERFLOW) {
         buf.resize(sz);
         addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+        rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, addrs, &sz);
     }
-    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, addrs, &sz) ==
-        NO_ERROR) {
+    if (rc == NO_ERROR) {
         for (auto* a = addrs; a != nullptr; a = a->Next) {
             if (a->PhysicalAddressLength != 6) continue;
             if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
@@ -513,9 +530,16 @@ std::unique_ptr<L2Transport> create_native_l2_transport(const L2AdapterInfo& ada
     }
     api.setnonblock(h, 1, errbuf);
     if (api.setmintocopy) api.setmintocopy(h, 0);  // Sub-millisecond immediate delivery!
+    if (api.compile && api.setfilter && api.freecode) {
+        struct BpfProgCompat { uint32_t bf_len; void* bf_insns; } prog{};
+        if (api.compile(h, &prog, "ether proto 0x88b6 or (vlan and ether proto 0x88b6)", 1, 0xFFFFFFFFu) == 0) {
+            api.setfilter(h, &prog);
+            api.freecode(&prog);
+        }
+    }
     return std::make_unique<NpcapL2Transport>(h, adapter.mac);
 #elif defined(LV_L2_LINUX_AF_PACKET)
-    const int fd = ::socket(AF_PACKET, SOCK_RAW, htons(kGridEtherType));
+    const int fd = ::socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (fd < 0) {
         if (err) *err = "AF_PACKET socket failed (requires CAP_NET_RAW)";
         return nullptr;
@@ -529,13 +553,25 @@ std::unique_ptr<L2Transport> create_native_l2_transport(const L2AdapterInfo& ada
     }
     sockaddr_ll sll{};
     sll.sll_family = AF_PACKET;
-    sll.sll_protocol = htons(kGridEtherType);
+    sll.sll_protocol = htons(ETH_P_ALL);
     sll.sll_ifindex = ifr.ifr_ifindex;
     if (::bind(fd, reinterpret_cast<const sockaddr*>(&sll), sizeof(sll)) < 0) {
         ::close(fd);
         if (err) *err = "AF_PACKET bind failed";
         return nullptr;
     }
+    // Filter in kernel: accept only EtherType 0x88B6 (or 802.1Q VLAN wrapping 0x88B6)
+    static sock_filter kGridFilter[] = {
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kGridEtherType, 3, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kVlanEtherType, 0, 3),
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 16),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kGridEtherType, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, 0x00040000u),
+        BPF_STMT(BPF_RET | BPF_K, 0u),
+    };
+    sock_fprog fprog{static_cast<unsigned short>(sizeof(kGridFilter) / sizeof(kGridFilter[0])), kGridFilter};
+    ::setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &fprog, sizeof(fprog));
     int prio = 6;
     ::setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(prio));
     return std::make_unique<LinuxAfPacketL2Transport>(fd, ifr.ifr_ifindex, adapter.mac);
@@ -561,6 +597,18 @@ std::unique_ptr<L2Transport> create_native_l2_transport(const L2AdapterInfo& ada
     ::ioctl(fd, BIOCIMMEDIATE, &one);
     ::ioctl(fd, BIOCSHDRCMPLT, &one);
     ::ioctl(fd, BIOCSSEESENT, &zero);
+    // Kernel BPF filter: accept only EtherType 0x88B6 (or 802.1Q VLAN wrapping 0x88B6)
+    static bpf_insn kBpfGridFilter[] = {
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kGridEtherType, 3, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kVlanEtherType, 0, 3),
+        BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 16),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kGridEtherType, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, 0x00040000u),
+        BPF_STMT(BPF_RET | BPF_K, 0u),
+    };
+    bpf_program bprog{static_cast<u_int>(sizeof(kBpfGridFilter) / sizeof(kBpfGridFilter[0])), kBpfGridFilter};
+    ::ioctl(fd, BIOCSETF, &bprog);
     ::ioctl(fd, BIOCGBLEN, &blen);
     return std::make_unique<MacOsBpfL2Transport>(fd, blen, adapter.mac);
 #else

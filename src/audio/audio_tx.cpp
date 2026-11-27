@@ -112,8 +112,6 @@ void decimate_box(const float* in, uint32_t n, uint32_t factor, std::vector<floa
     }
 }
 
-constexpr uint32_t kOpusFrameSamples = 120;  // 2.5 ms @ 48 kHz (CELT Restricted Low-Delay)
-
 int opus_bitrate_bps_for_profile(AudioCodecProfile prof) {
     switch (prof) {
         case AudioCodecProfile::kBitrate256: return 256000;
@@ -233,6 +231,7 @@ struct AudioTxEngine::Stream {
 #ifdef LV_HAVE_OPUS
     OpusEncoder* opus_enc = nullptr;
     int opus_bitrate_bps = 0;
+    bool opus_cbr = false;
 
     ~Stream() {
         if (opus_enc) {
@@ -241,7 +240,7 @@ struct AudioTxEngine::Stream {
         }
     }
 
-    bool ensure_opus_encoder(uint32_t sample_rate, int target_bps) {
+    bool ensure_opus_encoder(uint32_t sample_rate, int target_bps, bool use_cbr) {
         if (sample_rate != 48000) return false;
         if (!opus_enc) {
             int err = OPUS_OK;
@@ -256,9 +255,14 @@ struct AudioTxEngine::Stream {
             opus_encoder_ctl(opus_enc, OPUS_SET_LSB_DEPTH(24));
             opus_encoder_ctl(opus_enc, OPUS_SET_INBAND_FEC(1));         // honoured when the mode allows (LBRR)
             opus_encoder_ctl(opus_enc, OPUS_SET_PACKET_LOSS_PERC(5));  // expected Wi-Fi loss: tunes CELT stability
-            opus_encoder_ctl(opus_enc, OPUS_SET_VBR(1));
-            opus_encoder_ctl(opus_enc, OPUS_SET_VBR_CONSTRAINT(1));  // constrained VBR: tight Wi-Fi rate + optimal SNR
+            opus_encoder_ctl(opus_enc, OPUS_SET_VBR(use_cbr ? 0 : 1));
+            opus_encoder_ctl(opus_enc, OPUS_SET_VBR_CONSTRAINT(1));  // constrained VBR when VBR enabled
+            opus_cbr = use_cbr;
             opus_bitrate_bps = 0;
+        }
+        if (opus_cbr != use_cbr) {
+            opus_encoder_ctl(opus_enc, OPUS_SET_VBR(use_cbr ? 0 : 1));
+            opus_cbr = use_cbr;
         }
         if (opus_bitrate_bps != target_bps) {
             opus_encoder_ctl(opus_enc, OPUS_SET_BITRATE(target_bps));
@@ -451,9 +455,11 @@ void AudioTxEngine::emit_data(Stream& s, uint16_t ch, const uint8_t* samples, ui
             bool opus_encoded = false;
 #ifdef LV_HAVE_OPUS
             const int target_bps = opus_bitrate_bps_for_profile(cp);
+            const bool want_cbr = prof.fec_k > 1 && !wifi_redundancy_.load(std::memory_order_relaxed) &&
+                                  !has_secondary_send_.load(std::memory_order_relaxed);
             if (target_bps > 0 && rate_ == 48000 &&
                 (n == 120 || n == 240 || n == 480 || n == 960) &&
-                s.ensure_opus_encoder(rate_, target_bps)) {
+                s.ensure_opus_encoder(rate_, target_bps, want_cbr)) {
                 encoded.resize(512);
                 const int nb = opus_encode_float(s.opus_enc, reinterpret_cast<const float*>(samples),
                                                  int(n), encoded.data(), int(encoded.size()));
@@ -586,10 +592,13 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
                                 AudioFormat2 fmt, uint64_t media_ts, uint32_t wallclock_us) {
     if (channel >= kMaxAudioChannels || !samples || num_samples == 0) return -1;
     if (uint8_t(fmt) < 1 || uint8_t(fmt) > 3) return -1;
-    Stream* sp = streams_[channel].get();
+    Stream* sp = stream_ptrs_[channel].load(std::memory_order_acquire);
     if (!sp) {
         std::lock_guard<std::mutex> lk(create_mu_);
-        if (!streams_[channel]) streams_[channel] = std::make_unique<Stream>();
+        if (!streams_[channel]) {
+            streams_[channel] = std::make_unique<Stream>();
+            stream_ptrs_[channel].store(streams_[channel].get(), std::memory_order_release);
+        }
         sp = streams_[channel].get();
     }
     Stream& s = *sp;
@@ -640,7 +649,7 @@ int AudioTxEngine::push_channel(uint16_t channel, const void* samples, uint32_t 
 
 void AudioTxEngine::flush(uint32_t wallclock_us) {
     for (uint16_t c = 0; c < kMaxAudioChannels; ++c) {
-        Stream* s = streams_[c].get();
+        Stream* s = stream_ptrs_[c].load(std::memory_order_acquire);
         if (!s) continue;
         std::lock_guard<std::mutex> lk(s->mu);
         flush_stream(*s, c, wallclock_us);
@@ -668,7 +677,7 @@ void AudioTxEngine::on_nack(const uint8_t* payload, size_t len) {
     AudioNack nk;
     if (!parse_audio_nack(payload, len, nk)) return;
     nacks_rx_.fetch_add(1, std::memory_order_relaxed);
-    Stream* sp = streams_[nk.stream_id].get();
+    Stream* sp = stream_ptrs_[nk.stream_id].load(std::memory_order_acquire);
     if (!sp) return;
     Stream& s = *sp;
     std::lock_guard<std::mutex> lk(s.mu);
@@ -700,7 +709,8 @@ AudioTxStats AudioTxEngine::stats() const {
     st.failover_packets = failover_pkts_.load(std::memory_order_relaxed);
     st.nacks_received = nacks_rx_.load(std::memory_order_relaxed);
     st.nack_misses = nack_miss_.load(std::memory_order_relaxed);
-    for (const auto& s : streams_) if (s) ++st.active_streams;
+    for (const auto& sp : stream_ptrs_)
+        if (sp.load(std::memory_order_acquire)) ++st.active_streams;
     st.mode = profile(AudioFormat2::kPcm16).mode;
     return st;
 }

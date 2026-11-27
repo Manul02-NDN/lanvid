@@ -15,7 +15,9 @@ uint16_t packetize_slice(uint32_t frame_id, uint32_t timestamp_us, uint16_t slic
 
     const size_t max_payload = std::min(cfg.mtu, kMaxDatagram) - kPacketHeaderSize - fec_overhead;
     const size_t frag_count_sz = (slice_size + max_payload - 1) / max_payload;
-    if (frag_count_sz > 65000) return 0;
+    const size_t fec_groups_sz =
+        cfg.fec_group_size > 0 ? (frag_count_sz + cfg.fec_group_size - 1) / cfg.fec_group_size : 0;
+    if (frag_count_sz == 0 || frag_count_sz > 32000 || frag_count_sz + fec_groups_sz > 65535) return 0;
     const uint16_t frag_count = uint16_t(frag_count_sz);
 
     uint8_t stack_buf[2048];

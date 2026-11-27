@@ -273,7 +273,7 @@ TEST(audio_device_rate_adapter_44k1_render_capture) {
     std::vector<float> m0(kMix), d0(kDev), d1(kDev);
     float* dp[2] = {d0.data(), d1.data()};
     std::vector<float> dev_out;
-    uint64_t mix_frames = 0, dev_frames = 0, real_frames = 0;
+    uint64_t mix_frames = 0, dev_frames = 0;
     double t_mix = 0.0, t_dev = 0.0;
     double max_trim = 0.0;
     const double T = 20.0;  // seconds of virtual time
@@ -286,7 +286,7 @@ TEST(audio_device_rate_adapter_44k1_render_capture) {
             mix_frames += kMix;
             t_mix = double(mix_frames) / 48000.0;
         } else {
-            real_frames += ad.render(ring, dp, 2, kDev, kDevNominal);
+            (void)ad.render(ring, dp, 2, kDev, kDevNominal);
             if (t_dev > 2.0) dev_out.insert(dev_out.end(), d0.begin(), d0.end());  // after priming/settling
             if (t_dev > 2.0) max_trim = std::max(max_trim, std::fabs(ad.trim_ppm()));
             dev_frames += kDev;

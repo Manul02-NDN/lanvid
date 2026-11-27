@@ -141,7 +141,7 @@ TEST(multicam_three_cameras_iso_recording_and_video_bus) {
     bool rec_started = false;
     const uint64_t t0 = lv::now_us();
     uint64_t next = t0;
-    for (int f = 0; lv::now_us() - t0 < 3'500'000; ++f) {
+    while (lv::now_us() - t0 < 3'500'000) {
         for (auto& cam : cams) {
             for (size_t p = 0; p < frame.size(); p += 4) {
                 frame[p] = cam->b;

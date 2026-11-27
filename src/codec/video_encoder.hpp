@@ -56,6 +56,12 @@ public:
     virtual bool encode_yuv420(const Yuv420View& yuv, int width, int height,
                                EncodedVideoPacket& out) = 0;
 
+    // True zero-copy encode from a native platform hardware surface (e.g. Apple CVPixelBufferRef).
+    virtual bool encode_native_buffer(const void* /*native_buf*/, int /*width*/, int /*height*/,
+                                      EncodedVideoPacket& /*out*/) {
+        return false;
+    }
+
     // Dynamically updates target bitrate without recreating the encoder (for AIMD / GUI slider).
     virtual bool set_bitrate_kbps(uint32_t bitrate_kbps) = 0;
 

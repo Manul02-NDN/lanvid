@@ -1,30 +1,83 @@
 import AVFoundation
 import SwiftUI
 
-/// Live AVCaptureVideoPreviewLayer host for hardware camera feeds.
+/// Live AVCaptureVideoPreviewLayer host for hardware camera feeds (single session & MultiCam).
 struct CameraLayerPreview: UIViewRepresentable {
     let session: AVCaptureSession
     var connectionPosition: AVCaptureDevice.Position? = nil
 
+    final class Coordinator {
+        weak var boundSession: AVCaptureSession?
+        var boundPosition: AVCaptureDevice.Position?
+        weak var multiCamConnection: AVCaptureConnection?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeUIView(context: Context) -> PreviewContainerView {
         let v = PreviewContainerView()
-        v.previewLayer.session = session
         v.previewLayer.videoGravity = .resizeAspectFill
+        attachSession(to: v, coordinator: context.coordinator)
         return v
     }
 
     func updateUIView(_ uiView: PreviewContainerView, context: Context) {
-        if uiView.previewLayer.session !== session {
-            uiView.previewLayer.session = session
+        if context.coordinator.boundSession !== session ||
+            context.coordinator.boundPosition != connectionPosition ||
+            (connectionPosition != nil && context.coordinator.multiCamConnection == nil) {
+            attachSession(to: uiView, coordinator: context.coordinator)
         }
-        if let conn = uiView.previewLayer.connection, conn.isVideoOrientationSupported {
-            switch UIDevice.current.orientation {
-            case .landscapeLeft: conn.videoOrientation = .landscapeRight
-            case .landscapeRight: conn.videoOrientation = .landscapeLeft
+        let conn = context.coordinator.multiCamConnection ?? uiView.previewLayer.connection
+        if let conn, conn.isVideoOrientationSupported {
+            let interfaceOrient = uiView.window?.windowScene?.interfaceOrientation
+            switch interfaceOrient {
+            case .landscapeLeft: conn.videoOrientation = .landscapeLeft
+            case .landscapeRight: conn.videoOrientation = .landscapeRight
             case .portraitUpsideDown: conn.videoOrientation = .portraitUpsideDown
             default: conn.videoOrientation = .portrait
             }
         }
+    }
+
+    static func dismantleUIView(_ uiView: PreviewContainerView, coordinator: Coordinator) {
+        if let mc = coordinator.boundSession as? AVCaptureMultiCamSession,
+           let conn = coordinator.multiCamConnection {
+            mc.beginConfiguration()
+            mc.removeConnection(conn)
+            mc.commitConfiguration()
+        }
+        coordinator.multiCamConnection = nil
+        coordinator.boundSession = nil
+        uiView.previewLayer.session = nil
+    }
+
+    private func attachSession(to uiView: PreviewContainerView, coordinator: Coordinator) {
+        if let oldMc = coordinator.boundSession as? AVCaptureMultiCamSession,
+           let oldConn = coordinator.multiCamConnection {
+            oldMc.beginConfiguration()
+            oldMc.removeConnection(oldConn)
+            oldMc.commitConfiguration()
+            coordinator.multiCamConnection = nil
+        }
+
+        if let pos = connectionPosition, let mc = session as? AVCaptureMultiCamSession {
+            uiView.previewLayer.setSessionWithNoConnection(mc)
+            if let input = mc.inputs.compactMap({ $0 as? AVCaptureDeviceInput })
+                .first(where: { $0.device.position == pos }),
+               let port = input.ports(for: .video, sourceDeviceType: input.device.deviceType, sourceDevicePosition: pos).first {
+                let conn = AVCaptureConnection(inputPort: port, videoPreviewLayer: uiView.previewLayer)
+                mc.beginConfiguration()
+                if mc.canAddConnection(conn) {
+                    mc.addConnection(conn)
+                    coordinator.multiCamConnection = conn
+                }
+                mc.commitConfiguration()
+            }
+        } else {
+            uiView.previewLayer.session = session
+        }
+        coordinator.boundSession = session
+        coordinator.boundPosition = connectionPosition
     }
 
     final class PreviewContainerView: UIView {

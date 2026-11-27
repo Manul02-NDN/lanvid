@@ -23,18 +23,51 @@ inline uint32_t now_us32() { return uint32_t(now_us()); }
 // Signed difference (a - b) for wrapping 32-bit microsecond timestamps (valid up to ~35 min).
 inline int32_t diff_us32(uint32_t a, uint32_t b) { return int32_t(a - b); }
 
+#if defined(_WIN32)
+namespace detail {
+struct ThreadWaitableTimer {
+    HANDLE handle = nullptr;
+    ThreadWaitableTimer()
+        : handle(CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                        TIMER_ALL_ACCESS)) {}
+    ~ThreadWaitableTimer() {
+        if (handle) CloseHandle(handle);
+    }
+    ThreadWaitableTimer(const ThreadWaitableTimer&) = delete;
+    ThreadWaitableTimer& operator=(const ThreadWaitableTimer&) = delete;
+};
+inline HANDLE thread_waitable_timer() {
+    static thread_local ThreadWaitableTimer t;
+    return t.handle;
+}
+}  // namespace detail
+#endif
+
 // Sleeps accurately until `target_us`, periodically calling `idle_cb()` if provided.
 template <class Fn>
 inline void sleep_until_us(uint64_t target_us, Fn&& idle_cb) {
 #if defined(_WIN32)
-    static thread_local HANDLE timer =
-        CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    HANDLE timer = detail::thread_waitable_timer();
 #endif
     for (;;) {
         const uint64_t now = now_us();
         if (now >= target_us) return;
         idle_cb();
         const uint64_t rem = target_us - now;
+#if defined(__APPLE__)
+        if (rem > 300) {
+            const uint64_t chunk_us = rem > 4000 ? 2000 : (rem - 150);
+            // Absolute Mach deadline: microsecond-accurate wakeup prevents 100% busy-spin
+            // (and macOS RT thread computation-budget throttling) on 1 ms pacer ticks.
+            static const mach_timebase_info_data_t tb = [] {
+                mach_timebase_info_data_t t{};
+                mach_timebase_info(&t);
+                return t;
+            }();
+            mach_wait_until(mach_absolute_time() + chunk_us * 1000ull * tb.denom / tb.numer);
+            continue;
+        }
+#else
         if (rem > 1200) {
             const uint64_t chunk_us = rem > 4000 ? 2000 : (rem - 600);
 #if defined(_WIN32)
@@ -46,18 +79,12 @@ inline void sleep_until_us(uint64_t target_us, Fn&& idle_cb) {
                     continue;
                 }
             }
-#elif defined(__APPLE__)
-            // Absolute Mach deadline: no rounding-up of relative sleeps on the audio/mixer threads.
-            static const mach_timebase_info_data_t tb = [] {
-                mach_timebase_info_data_t t{};
-                mach_timebase_info(&t);
-                return t;
-            }();
-            mach_wait_until(mach_absolute_time() + chunk_us * 1000ull * tb.denom / tb.numer);
-            continue;
 #endif
             std::this_thread::sleep_for(std::chrono::microseconds(chunk_us));
-        } else if (rem > 150) {
+            continue;
+        }
+#endif
+        if (rem > 150) {
             std::this_thread::yield();
         }
     }

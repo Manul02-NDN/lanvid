@@ -13,6 +13,17 @@ constexpr double kSkewLimit = 500e-6;  // crystals never differ by more than a f
 // as drift: 50 us over 5 s is 10 ppm, the same 50 us over 0.5 s would be 100 ppm of wrong playout speed.
 constexpr uint64_t kSkewMinBaselineUs = 5'000'000;
 constexpr uint64_t kSkewMinSamples = 8;
+inline uint64_t double_to_bits(double v) {
+    uint64_t b = 0;
+    std::memcpy(&b, &v, sizeof(b));
+    return b;
+}
+
+inline double bits_to_double(uint64_t b) {
+    double v = 0.0;
+    std::memcpy(&v, &b, sizeof(v));
+    return v;
+}
 }  // namespace
 
 MasterClock::Snapshot MasterClock::read() const {
@@ -20,7 +31,10 @@ MasterClock::Snapshot MasterClock::read() const {
     for (;;) {
         const uint32_t s0 = seq_.load(std::memory_order_acquire);
         if (s0 & 1u) continue;
-        std::memcpy(&out, &snap_, sizeof(out));
+        out.ref_local_us = snap_.ref_local_us.load(std::memory_order_relaxed);
+        out.offset_us = bits_to_double(snap_.offset_bits.load(std::memory_order_relaxed));
+        out.skew = bits_to_double(snap_.skew_bits.load(std::memory_order_relaxed));
+        out.sigma_us = bits_to_double(snap_.sigma_bits.load(std::memory_order_relaxed));
         std::atomic_thread_fence(std::memory_order_acquire);
         if (seq_.load(std::memory_order_relaxed) == s0) return out;
     }
@@ -30,7 +44,10 @@ void MasterClock::publish(const Snapshot& s) {
     const uint32_t s0 = seq_.load(std::memory_order_relaxed);
     seq_.store(s0 + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    std::memcpy(&snap_, &s, sizeof(s));
+    snap_.ref_local_us.store(s.ref_local_us, std::memory_order_relaxed);
+    snap_.offset_bits.store(double_to_bits(s.offset_us), std::memory_order_relaxed);
+    snap_.skew_bits.store(double_to_bits(s.skew), std::memory_order_relaxed);
+    snap_.sigma_bits.store(double_to_bits(s.sigma_us), std::memory_order_relaxed);
     seq_.store(s0 + 2, std::memory_order_release);
 }
 
@@ -100,7 +117,8 @@ void MasterClock::on_exchange(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4
         anchor_rtt_ = uint32_t(delta);
         accepted_.store(0, std::memory_order_relaxed);
     } else {
-        const double dt = double(int64_t(t_meas) - int64_t(t_ref_));
+        if (t_meas <= t_ref_) return;
+        const double dt = double(t_meas - t_ref_);
         // Predict.
         x_off_ += x_skew_ * dt;
         const double q_off = 0.05 * 0.05 * (dt * 1e-6);   // offset random walk (us^2)
@@ -113,7 +131,7 @@ void MasterClock::on_exchange(uint64_t t1, uint64_t t2, uint64_t t3, uint64_t t4
         const double S = p00 + R;
         const double k0 = p00 / S;
         // Offset-only tracking until the baseline is long enough for a trustworthy skew.
-        const bool skew_ok = t_meas - t_first_ >= kSkewMinBaselineUs &&
+        const bool skew_ok = t_meas >= t_first_ && (t_meas - t_first_) >= kSkewMinBaselineUs &&
                              accepted_.load(std::memory_order_relaxed) >= kSkewMinSamples;
         const double k1 = skew_ok ? p01 / S : 0.0;
         x_off_ += k0 * innov;

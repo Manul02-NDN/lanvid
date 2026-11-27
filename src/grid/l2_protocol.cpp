@@ -76,6 +76,7 @@ std::string MacAddress::to_string() const {
 size_t write_l2_frame(uint8_t* out, size_t cap, const MacAddress& dst, const MacAddress& src,
                       const VlanQosTag& vlan, const LvL2Header& hdr,
                       const uint8_t* payload, size_t payload_len) {
+    if (payload_len > 0 && !payload) return 0;
     const size_t eth_len = kEthHeaderSize + (vlan.enabled ? kVlanTagSize : 0);
     const size_t total = eth_len + kL2HeaderSize + payload_len;
     if (!out || total > cap) return 0;
@@ -139,6 +140,7 @@ bool parse_l2_frame(const uint8_t* frame, size_t len, ParsedL2Frame& out) {
     out.hdr.channel_start = get_u16_le(h + 6);
     out.hdr.channel_count = h[8];
     out.hdr.samples_per_ch = h[9];
+    if (h[10] > uint8_t(L2AudioFormat::kFloat32)) return false;
     out.hdr.audio_fmt = static_cast<L2AudioFormat>(h[10]);
     out.hdr.flags = h[11];
     out.hdr.media_ts_lo = get_u32_le(h + 12);
@@ -162,7 +164,10 @@ size_t pack_l2_audio_planar(L2AudioFormat fmt, const float* const* planes, uint1
         for (uint16_t c = 0; c < ch_count; ++c) {
             const float* src = planes[ch_start + c];
             if (src) {
-                std::memcpy(out + pos, src, size_t(samples_per_ch) * 4u);
+                for (uint16_t i = 0; i < samples_per_ch; ++i) {
+                    const float v = std::isfinite(src[i]) ? src[i] : 0.0f;
+                    put_f32_le(out + pos + size_t(i) * 4u, v);
+                }
             } else {
                 std::memset(out + pos, 0, size_t(samples_per_ch) * 4u);
             }
@@ -172,7 +177,8 @@ size_t pack_l2_audio_planar(L2AudioFormat fmt, const float* const* planes, uint1
         for (uint16_t c = 0; c < ch_count; ++c) {
             const float* src = planes[ch_start + c];
             for (uint16_t i = 0; i < samples_per_ch; ++i) {
-                const float f = src ? std::clamp(src[i], -1.0f, 1.0f) : 0.0f;
+                const float raw = src ? src[i] : 0.0f;
+                const float f = std::isfinite(raw) ? std::clamp(raw, -1.0f, 1.0f) : 0.0f;
                 const int32_t q = std::clamp<int32_t>(int32_t(std::lrint(double(f) * 8388607.0)),
                                                       -8388608, 8388607);
                 const uint32_t u = uint32_t(q) & 0xFFFFFFu;
@@ -195,7 +201,12 @@ bool unpack_l2_audio_planar(L2AudioFormat fmt, const uint8_t* in, size_t in_len,
     if (fmt == L2AudioFormat::kFloat32) {
         for (uint16_t c = 0; c < ch_count; ++c) {
             float* dst = out_planes[dst_ch_start + c];
-            if (dst) std::memcpy(dst, in + pos, size_t(samples_per_ch) * 4u);
+            if (dst) {
+                for (uint16_t i = 0; i < samples_per_ch; ++i) {
+                    const float v = get_f32_le(in + pos + size_t(i) * 4u);
+                    dst[i] = std::isfinite(v) ? v : 0.0f;
+                }
+            }
             pos += size_t(samples_per_ch) * 4u;
         }
     } else {
@@ -328,6 +339,12 @@ bool parse_l2_dsp_param(const uint8_t* in, size_t len, L2DspParamPayload& p) {
     p.gate_thresh_db = get_f32_le(in + 36);
     p.output_gain_db = get_f32_le(in + 40);
     p.revision = get_u32_le(in + 44);
+    if (!std::isfinite(p.hpf_hz) || !std::isfinite(p.eq_low_db) || !std::isfinite(p.eq_mid_hz) ||
+        !std::isfinite(p.eq_mid_db) || !std::isfinite(p.eq_high_db) || !std::isfinite(p.comp_thresh_db) ||
+        !std::isfinite(p.comp_ratio) || !std::isfinite(p.comp_makeup_db) || !std::isfinite(p.gate_thresh_db) ||
+        !std::isfinite(p.output_gain_db)) {
+        return false;
+    }
     return true;
 }
 

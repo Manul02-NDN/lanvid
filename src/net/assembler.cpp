@@ -25,6 +25,7 @@ void SeqLossTracker::set_bit(uint16_t seq, bool v) {
 }
 
 void SeqLossTracker::reset() {
+    std::lock_guard<std::mutex> lk(mu_);
     initialized_ = false;
     max_seq_ = 0;
     span_ = 0;
@@ -36,6 +37,7 @@ void SeqLossTracker::reset() {
 }
 
 void SeqLossTracker::observe(uint16_t seq) {
+    std::lock_guard<std::mutex> lk(mu_);
     if (!initialized_) {
         initialized_ = true;
         max_seq_ = seq;
@@ -85,7 +87,7 @@ void SeqLossTracker::observe(uint16_t seq) {
     }
 }
 
-uint64_t SeqLossTracker::lost(int reorder_margin) const {
+uint64_t SeqLossTracker::lost_locked(int reorder_margin) const {
     if (!initialized_) return 0;
     const uint64_t tracked = std::min<uint64_t>(span_, kWindow);
     const uint64_t start = uint64_t(std::max(0, reorder_margin));
@@ -97,8 +99,14 @@ uint64_t SeqLossTracker::lost(int reorder_margin) const {
     return evicted_lost_ + in_win_lost;
 }
 
+uint64_t SeqLossTracker::lost(int reorder_margin) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return lost_locked(reorder_margin);
+}
+
 double SeqLossTracker::loss_percent(int reorder_margin) const {
-    const uint64_t l = lost(reorder_margin);
+    std::lock_guard<std::mutex> lk(mu_);
+    const uint64_t l = lost_locked(reorder_margin);
     const uint64_t expected = received_ + l;
     if (expected == 0) return 0.0;
     return 100.0 * double(l) / double(expected);
@@ -132,9 +140,12 @@ std::vector<size_t> FrameAssembler::active_slots_sorted() const {
     for (size_t i = 0; i < kNumSlots; ++i) {
         if (slots_[i].active) idx.push_back(i);
     }
-    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-        return frame_diff(slots_[a].frame_id, slots_[b].frame_id) < 0;
-    });
+    if (idx.size() > 1) {
+        const uint32_t base = has_finalized_ ? last_finalized_id_ : slots_[idx[0]].frame_id;
+        std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+            return frame_diff(slots_[a].frame_id, base) < frame_diff(slots_[b].frame_id, base);
+        });
+    }
     return idx;
 }
 
@@ -156,6 +167,7 @@ void FrameAssembler::init_slot(FrameSlot& slot, const PacketHeader& h, uint64_t 
     slot.slices_done.store(0, std::memory_order_relaxed);
     slot.in_flight.store(0, std::memory_order_relaxed);
     slot.decode_us_sum.store(0, std::memory_order_relaxed);
+    slot.row_claimed.clear();
 
     if (slot.slices_cap < h.total_slices) {
         slot.slices = std::make_unique<SliceSlot[]>(h.total_slices);
@@ -209,7 +221,10 @@ void FrameAssembler::trigger_pli(uint32_t failed_frame_id, uint64_t now_us, bool
         return;
     }
     last_pli_us_ = now_us;
-    ++stats_.pli_requests;
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        ++stats_.pli_requests;
+    }
     if (on_pli_) on_pli_(failed_frame_id);
 }
 
@@ -233,20 +248,22 @@ void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us)
 
     // ---- async mode: gate on the ingest thread, decode on the worker ----
     fold_vdec_feedback(now_us);
-    if (active_codec_ != slot.codec) {
-        active_codec_ = slot.codec;
+    if (active_codec() != slot.codec) {
+        active_codec_.store(uint8_t(slot.codec), std::memory_order_release);
         has_submitted_inter_ = false;
-        awaiting_idr_ = !slot.is_keyframe;
+        awaiting_idr_.store(!slot.is_keyframe, std::memory_order_release);
     }
 
     const bool complete =
         slot.total_slices >= 1 &&
         SliceState(slot.slices[0].state.load(std::memory_order_acquire)) == SliceState::kComplete;
     if (!complete) {
-        ++stats_.frames_concealed;
-        ++stats_.slices_lost;
-        const bool first_loss = !awaiting_idr_;
-        awaiting_idr_ = true;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.frames_concealed;
+            ++stats_.slices_lost;
+        }
+        const bool first_loss = !awaiting_idr_.exchange(true, std::memory_order_acq_rel);
         trigger_pli(slot.frame_id, now_us, first_loss);
         slot.active = false;
         return;
@@ -254,10 +271,12 @@ void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us)
 
     const bool frame_gap = has_submitted_inter_ && (frame_diff(slot.frame_id, last_submitted_fid_) != 1);
     const bool need_idr_first = !has_submitted_inter_ && !slot.is_keyframe;
-    if (!slot.is_keyframe && (awaiting_idr_ || frame_gap || need_idr_first)) {
-        ++stats_.frames_dropped_awaiting_idr;
-        const bool first_loss = !awaiting_idr_;
-        awaiting_idr_ = true;
+    if (!slot.is_keyframe && (awaiting_idr() || frame_gap || need_idr_first)) {
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.frames_dropped_awaiting_idr;
+        }
+        const bool first_loss = !awaiting_idr_.exchange(true, std::memory_order_acq_rel);
         trigger_pli(slot.frame_id, now_us, first_loss);
         slot.active = false;
         return;
@@ -291,15 +310,18 @@ void FrameAssembler::finalize_inter_frame_slot(FrameSlot& slot, uint64_t now_us)
         }
     }
     if (!queued) {  // decoder cannot keep up: skip ahead to the next IDR instead of growing latency
-        ++stats_.frames_dropped_awaiting_idr;
-        awaiting_idr_ = true;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.frames_dropped_awaiting_idr;
+        }
+        awaiting_idr_.store(true, std::memory_order_release);
         has_submitted_inter_ = false;
         trigger_pli(slot.frame_id, now_us, true);
         slot.active = false;
         return;
     }
     vdec_cv_.notify_one();
-    if (slot.is_keyframe) awaiting_idr_ = false;
+    if (slot.is_keyframe) awaiting_idr_.store(false, std::memory_order_release);
     has_submitted_inter_ = true;
     last_submitted_fid_ = slot.frame_id;
     slot.active = false;
@@ -310,11 +332,14 @@ void FrameAssembler::fold_vdec_feedback(uint64_t now_us) {
     const uint64_t ok = vdec_ok_.load(std::memory_order_acquire);
     const uint64_t fail = vdec_fail_.load(std::memory_order_acquire);
     const uint64_t skipped = vdec_skipped_.load(std::memory_order_acquire);
-    stats_.frames_complete += ok - vdec_ok_seen_;
-    stats_.slices_ok += ok - vdec_ok_seen_;
-    stats_.slices_corrupt += fail - vdec_fail_seen_;
-    stats_.frames_concealed += fail - vdec_fail_seen_;
-    stats_.frames_dropped_awaiting_idr += skipped - vdec_skipped_seen_;
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats_.frames_complete += ok - vdec_ok_seen_;
+        stats_.slices_ok += ok - vdec_ok_seen_;
+        stats_.slices_corrupt += fail - vdec_fail_seen_;
+        stats_.frames_concealed += fail - vdec_fail_seen_;
+        stats_.frames_dropped_awaiting_idr += skipped - vdec_skipped_seen_;
+    }
     vdec_ok_seen_ = ok;
     vdec_fail_seen_ = fail;
     vdec_skipped_seen_ = skipped;
@@ -323,7 +348,7 @@ void FrameAssembler::fold_vdec_feedback(uint64_t now_us) {
         last_known_h_ = vdec_h_.load(std::memory_order_relaxed);
     }
     if (vdec_error_.exchange(false, std::memory_order_acq_rel)) {
-        awaiting_idr_ = true;
+        awaiting_idr_.store(true, std::memory_order_release);
         has_submitted_inter_ = false;
         trigger_pli(vdec_error_fid_.load(std::memory_order_relaxed), now_us, true);
     }
@@ -404,6 +429,7 @@ void FrameAssembler::stop_decoder_worker() {
     {
         std::lock_guard<std::mutex> lk(vdec_mu_);
         vdec_stop_ = true;
+        vdec_q_.clear();
     }
     vdec_cv_.notify_all();
     if (vdec_thread_.joinable()) vdec_thread_.join();
@@ -412,11 +438,11 @@ void FrameAssembler::stop_decoder_worker() {
 void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
     if (!video_decoder_ || video_decoder_->codec_id() != slot.codec) {
         video_decoder_ = create_video_decoder(slot.codec, cfg_.output_order);
-        active_codec_ = slot.codec;
+        active_codec_.store(uint8_t(slot.codec), std::memory_order_release);
         set_backend(video_decoder_ ? video_decoder_->backend_name() : "Unavailable",
                     video_decoder_ ? video_decoder_->is_hardware() : false);
         has_decoded_inter_frame_ = false;
-        awaiting_idr_ = !slot.is_keyframe;
+        awaiting_idr_.store(!slot.is_keyframe, std::memory_order_release);
     }
 
     const bool complete =
@@ -424,10 +450,12 @@ void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
         SliceState(slot.slices[0].state.load(std::memory_order_acquire)) == SliceState::kComplete;
 
     if (!complete) {
-        ++stats_.frames_concealed;
-        ++stats_.slices_lost;
-        const bool first_loss = !awaiting_idr_;
-        awaiting_idr_ = true;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.frames_concealed;
+            ++stats_.slices_lost;
+        }
+        const bool first_loss = !awaiting_idr_.exchange(true, std::memory_order_acq_rel);
         trigger_pli(slot.frame_id, now_us, first_loss);
         slot.active = false;
         return;
@@ -437,24 +465,29 @@ void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
         has_decoded_inter_frame_ && (frame_diff(slot.frame_id, last_decoded_inter_fid_) != 1);
     const bool need_idr_first = !has_decoded_inter_frame_ && !slot.is_keyframe;
 
-    if (!slot.is_keyframe && (awaiting_idr_ || frame_gap || need_idr_first)) {
-        ++stats_.frames_dropped_awaiting_idr;
-        const bool first_loss = !awaiting_idr_;
-        awaiting_idr_ = true;
+    if (!slot.is_keyframe && (awaiting_idr() || frame_gap || need_idr_first)) {
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.frames_dropped_awaiting_idr;
+        }
+        const bool first_loss = !awaiting_idr_.exchange(true, std::memory_order_acq_rel);
         trigger_pli(slot.frame_id, now_us, first_loss);
         slot.active = false;
         return;
     }
 
     if (!video_decoder_) {
-        ++stats_.slices_corrupt;
-        ++stats_.frames_concealed;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.slices_corrupt;
+            ++stats_.frames_concealed;
+        }
         slot.active = false;
         return;
     }
 
     if (slot.is_keyframe) {
-        awaiting_idr_ = false;
+        awaiting_idr_.store(false, std::memory_order_release);
     }
 
     const SliceSlot& ss = slot.slices[0];
@@ -467,9 +500,12 @@ void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
     const uint64_t dt = lv::now_us() - t0;
 
     if (!decoded || slot.frame.width <= 0 || slot.frame.height <= 0) {
-        ++stats_.slices_corrupt;
-        ++stats_.frames_concealed;
-        awaiting_idr_ = true;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.slices_corrupt;
+            ++stats_.frames_concealed;
+        }
+        awaiting_idr_.store(true, std::memory_order_release);
         video_decoder_->reset();
         trigger_pli(slot.frame_id, now_us, true);
         slot.active = false;
@@ -478,8 +514,11 @@ void FrameAssembler::decode_inter_frame_sync(FrameSlot& slot, uint64_t now_us) {
 
     has_decoded_inter_frame_ = true;
     last_decoded_inter_fid_ = slot.frame_id;
-    ++stats_.frames_complete;
-    ++stats_.slices_ok;
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        ++stats_.frames_complete;
+        ++stats_.slices_ok;
+    }
     last_known_w_ = slot.frame.width;
     last_known_h_ = slot.frame.height;
 
@@ -512,10 +551,10 @@ void FrameAssembler::finalize_slot(FrameSlot& slot, uint64_t now_us) {
         return;
     }
 
-    if (active_codec_ != VideoCodecId::kLanVidDct) {
-        active_codec_ = VideoCodecId::kLanVidDct;
+    if (active_codec() != VideoCodecId::kLanVidDct) {
+        active_codec_.store(uint8_t(VideoCodecId::kLanVidDct), std::memory_order_release);
         set_backend(std::string("LanVid DCT (") + dct_kernels_best().name + ")", false);
-        awaiting_idr_ = false;
+        awaiting_idr_.store(false, std::memory_order_release);
         has_decoded_inter_frame_ = false;
         has_submitted_inter_ = false;
     }
@@ -559,11 +598,14 @@ void FrameAssembler::finalize_slot(FrameSlot& slot, uint64_t now_us) {
         }
     }
 
-    stats_.slices_ok += ok_cnt;
-    stats_.slices_corrupt += corrupt_cnt;
-    stats_.slices_lost += lost_cnt;
-    if (corrupt_cnt == 0 && lost_cnt == 0) ++stats_.frames_complete;
-    else ++stats_.frames_concealed;
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        stats_.slices_ok += ok_cnt;
+        stats_.slices_corrupt += corrupt_cnt;
+        stats_.slices_lost += lost_cnt;
+        if (corrupt_cnt == 0 && lost_cnt == 0) ++stats_.frames_complete;
+        else ++stats_.frames_concealed;
+    }
 
     if (!has_finalized_ || frame_newer(slot.frame_id, last_finalized_id_)) {
         has_finalized_ = true;
@@ -623,6 +665,7 @@ void FrameAssembler::dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id) {
         if (slot.frame.width != sh.width || slot.frame.height != sh.height) {
             slot.frame.allocate(sh.width, sh.height, cfg_.output_order);
         }
+        slot.row_claimed.assign(size_t(sh.height), 0);
         if (slice_id + 1 < slot.total_slices) {
             slot.nominal_slice_h = sh.slice_h;
         } else if (slice_id > 0 && sh.slice_y0 % slice_id == 0) {
@@ -639,6 +682,22 @@ void FrameAssembler::dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id) {
         slot.slices_done.fetch_add(1, std::memory_order_release);
         return;
     }
+    // Reject overlapping slice row ranges so parallel ThreadPool workers never race on shared output rows.
+    const int y0 = sh.slice_y0;
+    const int y1 = y0 + sh.slice_h;
+    if (y0 < 0 || y1 > slot.height || size_t(y1) > slot.row_claimed.size()) {
+        ss.state.store(uint8_t(SliceState::kCorrupt), std::memory_order_release);
+        slot.slices_done.fetch_add(1, std::memory_order_release);
+        return;
+    }
+    for (int y = y0; y < y1; ++y) {
+        if (slot.row_claimed[size_t(y)]) {
+            ss.state.store(uint8_t(SliceState::kCorrupt), std::memory_order_release);
+            slot.slices_done.fetch_add(1, std::memory_order_release);
+            return;
+        }
+    }
+    std::memset(slot.row_claimed.data() + y0, 1, size_t(sh.slice_h));
 
     auto run_decode = [this, slot_ptr = &slot, slice_id](uint32_t worker_slot) {
         SliceSlot& s = slot_ptr->slices[slice_id];
@@ -666,8 +725,11 @@ void FrameAssembler::dispatch_slice_decode(FrameSlot& slot, uint16_t slice_id) {
 }
 
 void FrameAssembler::insert_data_fragment(FrameSlot& slot, SliceSlot& ss, uint16_t slice_id, uint16_t fi,
-                                          const uint8_t* payload, uint16_t payload_size, uint64_t now_us) {
+                                          const uint8_t* payload, uint16_t payload_size, uint64_t now_us,
+                                          bool run_fec) {
+    constexpr size_t kMaxSliceBytes = 16u * 1024u * 1024u;
     if (SliceState(ss.state.load(std::memory_order_acquire)) != SliceState::kPartial) return;
+    if (fi >= ss.frag_count) return;
     const uint8_t bit = uint8_t(1u << (fi & 7));
     if (ss.frag_bitmap[fi >> 3] & bit) return;  // duplicate
 
@@ -681,8 +743,15 @@ void FrameAssembler::insert_data_fragment(FrameSlot& slot, SliceSlot& ss, uint16
         ss.total_size = payload_size;
     } else if (fi + 1 < ss.frag_count) {
         if (ss.chunk_size == 0) {
+            const size_t need_bytes = size_t(ss.frag_count) * size_t(payload_size);
+            if (payload_size == 0 || need_bytes > kMaxSliceBytes) {
+                ss.state.store(uint8_t(SliceState::kCorrupt), std::memory_order_release);
+                ++slot.slices_dispatched;
+                slot.slices_done.fetch_add(1, std::memory_order_release);
+                return;
+            }
             ss.chunk_size = payload_size;
-            ss.buf.resize(size_t(ss.frag_count) * ss.chunk_size);
+            ss.buf.resize(need_bytes);
             if (ss.has_deferred_last) {
                 if (ss.last_frag_size > ss.chunk_size) {
                     ss.state.store(uint8_t(SliceState::kCorrupt), std::memory_order_release);
@@ -728,7 +797,7 @@ void FrameAssembler::insert_data_fragment(FrameSlot& slot, SliceSlot& ss, uint16
         } else {
             slot.slices_done.fetch_add(1, std::memory_order_release);
         }
-    } else {
+    } else if (run_fec) {
         // Attempt XOR FEC recovery in case a parity packet is waiting for this fragment.
         try_fec_recover(slot, ss, slice_id, now_us);
     }
@@ -738,65 +807,74 @@ void FrameAssembler::try_fec_recover(FrameSlot& slot, SliceSlot& ss, uint16_t sl
     if (SliceState(ss.state.load(std::memory_order_acquire)) != SliceState::kPartial) return;
     if (ss.fec_parities.empty()) return;
 
-    for (auto& fp : ss.fec_parities) {
-        if (fp.used) continue;
-        const uint16_t start = fp.hdr.group_start_frag;
-        const uint16_t cnt = fp.hdr.group_data_count;
-        if (uint32_t(start) + cnt > ss.frag_count) {
-            fp.used = true;
-            continue;
-        }
-
-        int missing_count = 0;
-        uint16_t miss_fi = 0;
-        for (uint16_t fi = start; fi < start + cnt; ++fi) {
-            if ((ss.frag_bitmap[fi >> 3] & uint8_t(1u << (fi & 7))) == 0) {
-                ++missing_count;
-                miss_fi = fi;
-                if (missing_count > 1) break;
+    // Iterative recovery loop (no mutual recursion -> immune to crafted FEC chain stack overflow).
+    bool progress = true;
+    while (progress && SliceState(ss.state.load(std::memory_order_acquire)) == SliceState::kPartial) {
+        progress = false;
+        for (auto& fp : ss.fec_parities) {
+            if (fp.used) continue;
+            const uint16_t start = fp.hdr.group_start_frag;
+            const uint16_t cnt = fp.hdr.group_data_count;
+            if (uint32_t(start) + cnt > ss.frag_count) {
+                fp.used = true;
+                continue;
             }
-        }
-        if (missing_count == 0) {
-            fp.used = true;
-            continue;
-        }
-        if (missing_count != 1) continue;
 
-        // Recover exact length and payload of `miss_fi` via XOR!
-        uint16_t rec_len = fp.hdr.xor_payload_len;
-        for (uint16_t fi = start; fi < start + cnt; ++fi) {
-            if (fi != miss_fi) rec_len ^= ss.frag_lens[fi];
-        }
-        if (rec_len == 0 || rec_len > fp.parity.size()) {
-            fp.used = true;
-            continue;
-        }
-
-        std::vector<uint8_t> recovered(fp.parity.begin(), fp.parity.begin() + ptrdiff_t(rec_len));
-        bool ok = true;
-        for (uint16_t fi = start; fi < start + cnt; ++fi) {
-            if (fi == miss_fi) continue;
-            const uint8_t* ptr = nullptr;
-            const uint16_t flen = ss.frag_lens[fi];
-            if (ss.frag_count == 1) {
-                ptr = ss.buf.data();
-            } else if (fi + 1 == ss.frag_count && ss.has_deferred_last) {
-                ptr = ss.last_frag_tmp.data();
-            } else if (ss.chunk_size > 0) {
-                ptr = ss.buf.data() + size_t(fi) * ss.chunk_size;
-            } else {
-                ok = false;
-                break;
+            int missing_count = 0;
+            uint16_t miss_fi = 0;
+            for (uint16_t fi = start; fi < start + cnt; ++fi) {
+                if ((ss.frag_bitmap[fi >> 3] & uint8_t(1u << (fi & 7))) == 0) {
+                    ++missing_count;
+                    miss_fi = fi;
+                    if (missing_count > 1) break;
+                }
             }
-            const size_t xlen = std::min<size_t>(rec_len, flen);
-            for (size_t i = 0; i < xlen; ++i) recovered[i] ^= ptr[i];
-        }
-        fp.used = true;
-        if (!ok) continue;
+            if (missing_count == 0) {
+                fp.used = true;
+                continue;
+            }
+            if (missing_count != 1) continue;
 
-        ++stats_.fec_recovered_packets;
-        insert_data_fragment(slot, ss, slice_id, miss_fi, recovered.data(), rec_len, now_us);
-        if (SliceState(ss.state.load(std::memory_order_acquire)) != SliceState::kPartial) break;
+            // Recover exact length and payload of `miss_fi` via XOR!
+            uint16_t rec_len = fp.hdr.xor_payload_len;
+            for (uint16_t fi = start; fi < start + cnt; ++fi) {
+                if (fi != miss_fi) rec_len ^= ss.frag_lens[fi];
+            }
+            if (rec_len == 0 || rec_len > fp.parity.size()) {
+                fp.used = true;
+                continue;
+            }
+
+            std::vector<uint8_t> recovered(fp.parity.begin(), fp.parity.begin() + ptrdiff_t(rec_len));
+            bool ok = true;
+            for (uint16_t fi = start; fi < start + cnt; ++fi) {
+                if (fi == miss_fi) continue;
+                const uint8_t* ptr = nullptr;
+                const uint16_t flen = ss.frag_lens[fi];
+                if (ss.frag_count == 1) {
+                    ptr = ss.buf.data();
+                } else if (fi + 1 == ss.frag_count && ss.has_deferred_last) {
+                    ptr = ss.last_frag_tmp.data();
+                } else if (ss.chunk_size > 0) {
+                    ptr = ss.buf.data() + size_t(fi) * ss.chunk_size;
+                } else {
+                    ok = false;
+                    break;
+                }
+                const size_t xlen = std::min<size_t>(rec_len, flen);
+                for (size_t i = 0; i < xlen; ++i) recovered[i] ^= ptr[i];
+            }
+            fp.used = true;
+            if (!ok) continue;
+
+            {
+                std::lock_guard<std::mutex> lk(stats_mu_);
+                ++stats_.fec_recovered_packets;
+            }
+            insert_data_fragment(slot, ss, slice_id, miss_fi, recovered.data(), rec_len, now_us, false);
+            progress = true;
+            if (SliceState(ss.state.load(std::memory_order_acquire)) != SliceState::kPartial) break;
+        }
     }
 }
 
@@ -819,6 +897,7 @@ void FrameAssembler::try_finalize_ready(uint64_t now_us) {
 }
 
 void FrameAssembler::record_bad_packet(PacketParseStatus st, size_t dgram_len) {
+    std::lock_guard<std::mutex> lk(stats_mu_);
     ++stats_.datagrams_total;
     stats_.bytes_total += dgram_len;
     ++stats_.bad_packets;
@@ -836,6 +915,7 @@ PacketParseStatus FrameAssembler::ingest_datagram(const uint8_t* dgram, size_t l
     if (h.type == PacketType::kVideoSlice) {
         ingest_video_packet(h, payload, len, now_us);
     } else {
+        std::lock_guard<std::mutex> lk(stats_mu_);
         ++stats_.datagrams_total;
         stats_.bytes_total += len;
     }
@@ -844,11 +924,26 @@ PacketParseStatus FrameAssembler::ingest_datagram(const uint8_t* dgram, size_t l
 
 void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* payload, size_t dgram_len,
                                          uint64_t now_us) {
-    ++stats_.datagrams_total;
-    stats_.bytes_total += dgram_len;
+    constexpr uint16_t kMaxSlicesPerFrame = 2048;
+    constexpr uint16_t kMaxFragsPerSlice = 8192;
+    constexpr size_t kMaxFecParitiesPerSlice = 256;
+
+    {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        ++stats_.datagrams_total;
+        stats_.bytes_total += dgram_len;
+    }
     seq_.observe(h.seq);
 
+    if (h.total_slices == 0 || h.total_slices > kMaxSlicesPerFrame || h.slice_id >= h.total_slices ||
+        h.frag_count == 0 || h.frag_count > kMaxFragsPerSlice) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
+        ++stats_.bad_packets;
+        return;
+    }
+
     if (has_finalized_ && frame_diff(h.frame_id, last_finalized_id_) <= 0) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
         if ((h.flags & kFlagFecParity) && h.frame_id == last_finalized_id_) {
             ++stats_.fec_parity_received;
         } else {
@@ -870,11 +965,13 @@ void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* p
     if (!slot.active) {
         init_slot(slot, h, now_us);
     } else if (slot.frame_id != h.frame_id) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
         ++stats_.late_packets;
         return;
     }
 
     if (h.total_slices != slot.total_slices || h.slice_id >= slot.total_slices) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
         ++stats_.bad_packets;
         return;
     }
@@ -884,21 +981,29 @@ void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* p
     SliceSlot& ss = slot.slices[h.slice_id];
     const auto cur_state = SliceState(ss.state.load(std::memory_order_acquire));
     if (cur_state != SliceState::kEmpty && cur_state != SliceState::kPartial) {
-        if (h.flags & kFlagFecParity) ++stats_.fec_parity_received;
+        if (h.flags & kFlagFecParity) {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.fec_parity_received;
+        }
         return;  // slice already complete / decoded / corrupt
     }
 
     ensure_slice_initialized(ss, h.frag_count);
     if (h.frag_count != ss.frag_count) {
+        std::lock_guard<std::mutex> lk(stats_mu_);
         ++stats_.bad_packets;
         return;
     }
 
     if (h.flags & kFlagFecParity) {
-        ++stats_.fec_parity_received;
+        {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.fec_parity_received;
+        }
         FecHeader fh;
         if (!parse_fec_header(payload, h.payload_size, fh) ||
             uint32_t(fh.group_start_frag) + fh.group_data_count > ss.frag_count) {
+            std::lock_guard<std::mutex> lk(stats_mu_);
             ++stats_.bad_packets;
             return;
         }
@@ -908,6 +1013,11 @@ void FrameAssembler::ingest_video_packet(const PacketHeader& h, const uint8_t* p
                 existing.hdr.group_data_count == fh.group_data_count) {
                 return;
             }
+        }
+        if (ss.fec_parities.size() >= kMaxFecParitiesPerSlice) {
+            std::lock_guard<std::mutex> lk(stats_mu_);
+            ++stats_.bad_packets;
+            return;
         }
         FecParityEntry entry;
         entry.hdr = fh;

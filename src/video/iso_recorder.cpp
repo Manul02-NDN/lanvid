@@ -75,7 +75,8 @@ struct BitReader {
     }
     uint32_t ue() {
         int lz = 0;
-        while (!eof() && bit() == 0 && lz < 32) ++lz;
+        while (!eof() && bit() == 0 && lz < 31) ++lz;
+        if (lz >= 31) return 0u;
         return lz ? ((1u << lz) - 1u + bits(lz)) : 0u;
     }
     int32_t se() {
@@ -140,8 +141,8 @@ bool h264_sps_dimensions(const uint8_t* sps, size_t size, int& width, int& heigh
     const uint32_t sub_w = (chroma == 1 || chroma == 2) ? 2 : 1;
     const uint32_t sub_h = (chroma == 1) ? 2 : 1;
     const uint32_t crop_x = chroma ? sub_w : 1, crop_y = (chroma ? sub_h : 1) * (2 - frame_mbs_only);
-    const int64_t w = int64_t(wmb) * 16 - int64_t(crop_x) * (cl + cr);
-    const int64_t h = int64_t(hmu) * 16 * (2 - frame_mbs_only) - int64_t(crop_y) * (ct + cb);
+    const int64_t w = int64_t(wmb) * 16 - int64_t(crop_x) * (int64_t(cl) + int64_t(cr));
+    const int64_t h = int64_t(hmu) * 16 * (2 - frame_mbs_only) - int64_t(crop_y) * (int64_t(ct) + int64_t(cb));
     if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return false;
     width = int(w);
     height = int(h);
@@ -319,15 +320,33 @@ struct IsoRecorder::Impl {
     bool hevc() const { return cfg.codec == IsoVideoCodec::kH265; }
 
     // ---------------- open ----------------
+    ~Impl() {
+        if (f) {
+            std::fclose(f);
+            f = nullptr;
+        }
+    }
+
     bool open() {
 #if defined(_WIN32)
-        f = std::fopen(cfg.path.c_str(), "wb");  // UTF-8 paths: caller passes ASCII-safe names (sanitized label)
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, cfg.path.c_str(), -1, nullptr, 0);
+        if (wlen > 0) {
+            std::wstring wpath(size_t(wlen), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, cfg.path.c_str(), -1, wpath.data(), wlen);
+            f = _wfopen(wpath.c_str(), L"wb");
+        } else {
+            f = std::fopen(cfg.path.c_str(), "wb");
+        }
 #else
         f = std::fopen(cfg.path.c_str(), "wb");
 #endif
         if (!f) return false;
-        if (mp4()) return open_mp4();
-        return open_mkv();
+        const bool ok = mp4() ? open_mp4() : open_mkv();
+        if (!ok && f) {
+            std::fclose(f);
+            f = nullptr;
+        }
+        return ok;
     }
 
     bool open_mp4() {
@@ -465,7 +484,8 @@ struct IsoRecorder::Impl {
         uint64_t v_dur_ts = 0;
         for (size_t i = 0; i < nv; ++i) {
             if (i + 1 < nv) {
-                const uint64_t d = (v_pts[i + 1] - v_pts[i]) * vts / 1000000ull;
+                const uint64_t dt_us = v_pts[i + 1] > v_pts[i] ? (v_pts[i + 1] - v_pts[i]) : 0;
+                const uint64_t d = dt_us * vts / 1000000ull;
                 durs[i] = uint32_t(std::clamp<uint64_t>(d, 1, vts));
             } else if (i > 0) {
                 durs[i] = durs[i - 1];
@@ -639,7 +659,7 @@ struct IsoRecorder::Impl {
         }
 
         // ---- audio track (PCM16) ----
-        if (has_audio) {
+        if (has_audio && cfg.audio_sample_rate > 0) {
             const uint32_t sr = cfg.audio_sample_rate;
             const size_t trak = m.box("trak");
             tkhd(2, a_total_frames * 1000 / sr, true, 0, 0, 3);
@@ -662,7 +682,7 @@ struct IsoRecorder::Impl {
             m.u16(16);
             m.u16(0);
             m.u16(0);
-            m.u32(sr << 16);
+            m.u32((sr <= 65535u ? sr : 48000u) << 16);
             if (!mov()) {
                 const size_t pc = m.fullbox("pcmC", 0, 0);
                 m.u8(1);   // little endian

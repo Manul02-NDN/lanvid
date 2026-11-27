@@ -137,8 +137,19 @@ public:
 
 private:
     struct Ring {
-        std::vector<float> data;
-        std::vector<uint16_t> tag;  // lap tag + 1 per sample; 0 = never written
+        std::unique_ptr<std::atomic<float>[]> data;
+        std::unique_ptr<std::atomic<uint32_t>[]> tag;  // (epoch << 24) | lap; 0 = never written
+        uint32_t size = 0;
+
+        explicit Ring(uint32_t cap)
+            : data(std::make_unique<std::atomic<float>[]>(cap)),
+              tag(std::make_unique<std::atomic<uint32_t>[]>(cap)),
+              size(cap) {
+            for (uint32_t i = 0; i < cap; ++i) {
+                data[i].store(0.0f, std::memory_order_relaxed);
+                tag[i].store(0u, std::memory_order_relaxed);
+            }
+        }
     };
     struct Chan {
         std::atomic<Ring*> ring{nullptr};
@@ -166,11 +177,13 @@ private:
         bool seek = false;
         double old_cursor = 0.0;  // where the previous path would have continued
         bool hold = false;        // prefill: render the gap fade, do not advance, do not count underruns
+        uint32_t epoch = 1;
+        uint32_t old_epoch = 1;
     };
 
     Plan plan(const MasterClock& clk, uint64_t local_now_us, uint32_t frames);
     void render_channel(uint16_t ch, const Plan& p, uint32_t frames, float* dst, size_t stride);
-    bool sample_at(const Ring& r, int64_t pos, float& v) const;
+    bool sample_at(const Ring& r, int64_t pos, uint32_t epoch, float& v) const;
 
     uint32_t rate_;
     uint32_t cap_;
@@ -191,12 +204,15 @@ private:
     std::atomic<bool> atomic_frame_lock_{false};
     std::atomic<bool> deterministic_playout_{false};
     std::atomic<bool> epoch_reset_req_{false};
+    std::atomic<uint32_t> epoch_gen_{1};
     std::atomic<uint64_t> epoch_resets_{0};
 
     Chan ch_[kChannels];
 
     // consumer state
     bool started_ = false;
+    uint32_t active_epoch_ = 1;
+    std::vector<float> meter_scratch_;
     std::atomic<double> ratio_limit_{500e-6};
     std::atomic<bool> prefill_enabled_{false};
     std::atomic<uint32_t> prefill_pct_{75};

@@ -94,17 +94,33 @@ public final class LanVidSender {
     /// Zero-copy push of a `CMSampleBuffer` straight from `AVCaptureVideoDataOutput` or `ReplayKit`.
     public func push(sampleBuffer: CMSampleBuffer) throws {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        try push(pixelBuffer: pb)
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let tsUs: UInt32 = pts.isNumeric ? UInt32(max(0, Int64(CMTimeGetSeconds(pts) * 1_000_000.0)) & 0xFFFFFFFF) : 0
+        try push(pixelBuffer: pb, timestampUs: tsUs)
     }
 
-    /// Zero-copy push of a `CVPixelBuffer` (supports 32BGRA and NV12 bi-planar 4:2:0 without allocations).
+    /// Zero-copy push of a `CVPixelBuffer` (prefers IOSurface zero-copy VideoToolbox path, with
+    /// lock-free plane fallback for BGRA and NV12 bi-planar 4:2:0).
     public func push(pixelBuffer: CVPixelBuffer, timestampUs: UInt32 = 0) throws {
         guard let h = handle else { return }
+        let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
+        let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
+
+        let nativeRc = lv_sender_push_cvpixelbuffer(
+            h,
+            Unmanaged.passUnretained(pixelBuffer).toOpaque(),
+            width,
+            height,
+            timestampUs
+        )
+        if nativeRc == LV_OK.rawValue { return }
+        if nativeRc != LV_ERR_UNSUPPORTED.rawValue {
+            throw LanVidError.coreError(code: nativeRc, message: String(cString: lv_error_string(nativeRc)))
+        }
+
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
-        let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
-        let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
         let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
 
         let rc: Int32

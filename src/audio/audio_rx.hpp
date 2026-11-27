@@ -89,6 +89,7 @@ private:
     void refresh_profile();
     std::atomic<uint64_t> rate_drops_{0};
     std::unique_ptr<Stream> streams_[kMaxAudioChannels];
+    std::atomic<Stream*> stream_ptrs_[kMaxAudioChannels]{};
     std::atomic<int16_t> channel_to_stream_[kMaxAudioChannels];
     std::vector<float> scratch_;
 

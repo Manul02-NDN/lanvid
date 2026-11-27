@@ -53,9 +53,11 @@ bool parse_slice_header(const uint8_t* p, size_t n, SliceHeader& h) {
     h.entropy_mode = p[11];
     h.bitstream_bytes = load_le32(p + 12);
     if (!h.width || !h.height || !h.slice_h) return false;
+    if (h.width > 16384 || h.height > 16384 || uint64_t(h.width) * uint64_t(h.height) > 33'554'432ull) return false;
     if (h.chroma > 2 || h.color_matrix > 1 || h.entropy_mode != 0) return false;
     if (h.quality < 1 || h.quality > 100) return false;
     if (uint32_t(h.slice_y0) + h.slice_h > h.height) return false;
+    if (h.bitstream_bytes > 16u * 1024u * 1024u) return false;
     return true;
 }
 

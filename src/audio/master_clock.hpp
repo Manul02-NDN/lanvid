@@ -48,6 +48,12 @@ private:
         double skew = 0.0;       // d(offset)/d(local), dimensionless (1e-6 = 1 ppm)
         double sigma_us = 1e9;
     };
+    struct AtomicSnapshot {
+        std::atomic<uint64_t> ref_local_us{0};
+        std::atomic<uint64_t> offset_bits{0};
+        std::atomic<uint64_t> skew_bits{0};
+        std::atomic<uint64_t> sigma_bits{0x41CDCD6500000000ULL};  // 1e9
+    };
     Snapshot read() const;
     void publish(const Snapshot& s);
 
@@ -61,7 +67,7 @@ private:
     std::deque<uint32_t> rtt_window_;
 
     mutable std::atomic<uint32_t> seq_{0};
-    Snapshot snap_{};
+    AtomicSnapshot snap_{};
     std::atomic<bool> synced_{false};
     std::atomic<uint32_t> min_rtt_us_{0};
     std::atomic<uint32_t> last_rtt_us_{0};

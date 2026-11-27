@@ -1,7 +1,7 @@
 name: Release Artifacts
 
 # Tag push `v*` (or manual run) builds the LanVid Core SDK (Windows / Linux / Apple / Android) and the LanVid Camera
-# Android APK, then - for tags - publishes a GitHub Release with the bilingual notes docs/RELEASE_NOTES_v<version>.md.
+# Android APK, then - for tags - publishes a GitHub Release (using docs/RELEASE_NOTES_v<version>.md if present).
 # (LanVid Camera iOS ships through App Store Connect: .github/workflows/ios_camera_appstore.yml.) The version is read from CMakeLists.txt
 # (project(lanvid VERSION x.y.z)) and must match the tag.
 
@@ -64,7 +64,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config libavcodec-dev libavutil-dev
       - name: Build, test & package Core SDK
         shell: bash
         run: |
@@ -136,6 +136,10 @@ jobs:
           fi
 
       - name: Build Android SDK AAR & LanVid Camera APK
+        env:
+          LANVID_KS_PASS: ${{ secrets.LANVID_KS_PASS }}
+          LANVID_KEY_ALIAS: ${{ secrets.LANVID_KEY_ALIAS }}
+          LANVID_KEY_PASS: ${{ secrets.LANVID_KEY_PASS }}
         run: |
           (cd sdk/android && gradle --no-daemon exportAar)
           (cd android && gradle --no-daemon exportUniversalApk)

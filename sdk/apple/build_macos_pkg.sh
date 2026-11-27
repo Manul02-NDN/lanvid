@@ -59,6 +59,13 @@ build_macos_arch() {
     -DLANVID_ENABLE_AVX2="$avx2"
   cmake --build "$bdir" --target lanvid_core lanvid_core_shared --parallel "$NCPU"
   cmake --install "$bdir" --prefix "$idir"
+  # Merge static libopus.a into liblanvid_core.a so static SDK consumers link self-contained archives
+  local opus_a
+  opus_a="$(find "$bdir" -name 'libopus.a' | head -n 1)"
+  if [ -n "$opus_a" ]; then
+    libtool -static -o "$idir/lib/liblanvid_core_merged.a" "$idir/lib/liblanvid_core.a" "$opus_a"
+    mv "$idir/lib/liblanvid_core_merged.a" "$idir/lib/liblanvid_core.a"
+  fi
 }
 
 echo "=== [2/6] Compiling Universal macOS SDK libraries (arm64 NEON + x86_64 AVX2) ==="

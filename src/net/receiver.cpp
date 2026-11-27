@@ -22,7 +22,9 @@ UdpReceiver::UdpReceiver(const ReceiverConfig& cfg, FrameCallback on_frame)
       audio_buf_(AudioJitterBuffer::kDefaultSampleRate, cfg.audio_target_ms),
       matrix_(cfg.audio_sample_rate),
       arx_(matrix_, mclock_, [this](const uint8_t* d, size_t n) {
-          return has_sender_ && tx().send_to_qos(d, n, sender_ep_, QosTrafficClass::kSyncControl) == int(n);
+          Endpoint ep{};
+          if (!sender_endpoint(ep)) return false;
+          return tx().send_to_qos(d, n, ep, QosTrafficClass::kSyncControl) == int(n);
       }),
       midi_dejitter_(cfg.audio_sample_rate) {
     arx_.set_latency_ms(cfg.audio_latency_ms);
@@ -67,7 +69,8 @@ void UdpReceiver::on_frame_internal(const CompletedFrame& cf) {
 }
 
 void UdpReceiver::maybe_send_ping(uint64_t now) {
-    if (!cfg_.enable_clock_sync || !has_sender_) return;
+    Endpoint ep{};
+    if (!cfg_.enable_clock_sync || !sender_endpoint(ep)) return;
     // Fast pings (100 ms) until the MasterClock has a well-converged minimum-RTT set, then the normal rate.
     const uint64_t interval = mclock_.accepted_samples() < 20 ? std::min<uint64_t>(cfg_.ping_interval_us, 100000)
                                                               : cfg_.ping_interval_us;
@@ -86,11 +89,12 @@ void UdpReceiver::maybe_send_ping(uint64_t now) {
     h.timestamp_us = pp.t1_client_send_us;
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, pp_bytes, sizeof(pp_bytes));
-    if (n) tx().send_to_qos(dgram, n, sender_ep_, QosTrafficClass::kSyncControl);
+    if (n) tx().send_to_qos(dgram, n, ep, QosTrafficClass::kSyncControl);
 }
 
 void UdpReceiver::maybe_send_feedback(uint64_t now) {
-    if (!cfg_.enable_feedback || !has_sender_) return;
+    Endpoint ep{};
+    if (!cfg_.enable_feedback || !sender_endpoint(ep)) return;
     if (last_fb_us_ == 0) {
         last_fb_us_ = now;
         return;
@@ -99,7 +103,7 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
     last_fb_us_ = now;
 
     const auto& seq = assembler_.seq_tracker();
-    const auto& as = assembler_.stats();
+    const AssemblerStats as = assembler_.stats();
 
     const uint64_t cur_rx = seq.received();
     const uint64_t cur_lost = seq.lost(8);
@@ -142,13 +146,14 @@ void UdpReceiver::maybe_send_feedback(uint64_t now) {
     h.timestamp_us = uint32_t(now);
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
-    if (n && tx().send_to(dgram, n, sender_ep_) == int(n)) {
-        ++feedbacks_sent_;
+    if (n && tx().send_to(dgram, n, ep) == int(n)) {
+        feedbacks_sent_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
 void UdpReceiver::send_pli_now(uint64_t now) {
-    if (!has_sender_) return;
+    Endpoint ep{};
+    if (!sender_endpoint(ep)) return;
     FeedbackPayload fb;
     {
         std::lock_guard<std::mutex> lk(fb_mu_);
@@ -170,29 +175,35 @@ void UdpReceiver::send_pli_now(uint64_t now) {
     h.timestamp_us = uint32_t(now);
     uint8_t dgram[64];
     const size_t n = write_packet(dgram, sizeof(dgram), h, fb_bytes, sizeof(fb_bytes));
-    if (n && tx().send_to(dgram, n, sender_ep_) == int(n)) {
-        ++feedbacks_sent_;
-        ++plis_sent_;
+    if (n && tx().send_to(dgram, n, ep) == int(n)) {
+        feedbacks_sent_.fetch_add(1, std::memory_order_relaxed);
+        plis_sent_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
 void UdpReceiver::handle_pong(const uint8_t* payload, size_t len, uint32_t t4_us) {
     PingPongPayload pp;
     if (!parse_ping_pong(payload, len, pp)) return;
-    if (len >= kPingPongSize + kPongMasterTailSize) {
-        uint64_t t2m = 0, t3m = 0;
-        if (parse_pong_master_tail(payload + kPingPongSize, len - kPingPongSize, t2m, t3m)) {
-            const uint64_t t4_64 = now_us();
-            const uint64_t t1_64 = t4_64 - uint64_t(uint32_t(t4_us - pp.t1_client_send_us));
-            mclock_.on_exchange(t1_64, t2m, t3m, t4_64);
-        }
-    }
-    const int64_t rtt = int64_t(diff_us32(t4_us, pp.t1_client_send_us)) -
+    const uint64_t t4_64 = now_us();
+    const uint32_t t4_cur = uint32_t(t4_64);
+    (void)t4_us;
+    const int64_t rtt = int64_t(diff_us32(t4_cur, pp.t1_client_send_us)) -
                         int64_t(diff_us32(pp.t3_server_send_us, pp.t2_server_recv_us));
     if (rtt < 0 || rtt > 500000) return;
 
+    if (len >= kPingPongSize + kPongMasterTailSize) {
+        uint64_t t2m = 0, t3m = 0;
+        if (parse_pong_master_tail(payload + kPingPongSize, len - kPingPongSize, t2m, t3m)) {
+            const uint32_t elapsed_u32 = uint32_t(t4_cur - pp.t1_client_send_us);
+            if (elapsed_u32 <= 1'000'000u && t4_64 >= elapsed_u32) {
+                const uint64_t t1_64 = t4_64 - uint64_t(elapsed_u32);
+                mclock_.on_exchange(t1_64, t2m, t3m, t4_64);
+            }
+        }
+    }
+
     const int64_t offset = (int64_t(diff_us32(pp.t2_server_recv_us, pp.t1_client_send_us)) +
-                            int64_t(diff_us32(pp.t3_server_send_us, t4_us))) / 2;
+                            int64_t(diff_us32(pp.t3_server_send_us, t4_cur))) / 2;
 
     if (!sync_.synced || uint32_t(rtt) <= sync_.min_rtt_us + 50) {
         sync_.synced = true;
@@ -230,82 +241,59 @@ void UdpReceiver::ingest_datagram(const uint8_t* data, size_t len, const Endpoin
 }
 
 void UdpReceiver::handle_datagram(const uint8_t* dgram, size_t n, const Endpoint& src, uint64_t now) {
-    struct One {
-        const uint8_t* data;
-        size_t len;
-        Endpoint src;
-    } one{dgram, n, src};
-    One* batch = &one;
-    for (int i = 0; i < 1; ++i) {
+    PacketHeader h;
+    const uint8_t* payload = nullptr;
+    const PacketParseStatus st = parse_packet(dgram, n, h, &payload);
+    if (st != PacketParseStatus::kOk) {
+        assembler_.record_bad_packet(st, n);
+        return;
+    }
 
-        PacketHeader h;
-        const uint8_t* payload = nullptr;
-        const PacketParseStatus st = parse_packet(batch[i].data, n, h, &payload);
-        if (st == PacketParseStatus::kOk) {
-            if (h.type == PacketType::kPong) {
-                handle_pong(payload, h.payload_size, uint32_t(now));
-            } else if (h.type == PacketType::kVideoSlice) {
-                if (cfg_.audio_only) {  // headless AoIP bridge: never reassemble / decode video
-                    ++video_ignored_;
-                    continue;
-                }
-                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
-                    sender_ep_ = batch[i].src;
-                    has_sender_ = true;
-                }
-                assembler_.ingest_video_packet(h, payload, n, now);
-            } else if (h.type == PacketType::kAudio2) {
-                if (!accept_epoch(h.total_slices)) continue;  // late packet of the previous session
-                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
-                    sender_ep_ = batch[i].src;
-                    has_sender_ = true;
-                }
-                audio2_bytes_rx_.fetch_add(uint64_t(n), std::memory_order_relaxed);
-                audio2_packets_rx_.fetch_add(1, std::memory_order_relaxed);
-                arx_.on_packet(h, payload, h.payload_size, now);
-            } else if (h.type == PacketType::kMidiFrame) {
-                if (h.payload_size < 4) continue;
-                const uint32_t sid = uint32_t(payload[0]) | (uint32_t(payload[1]) << 8) |
-                                     (uint32_t(payload[2]) << 16) | (uint32_t(payload[3]) << 24);
-                if (!accept_epoch(uint16_t(sid))) continue;
-                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
-                    sender_ep_ = batch[i].src;
-                    has_sender_ = true;
-                }
-                midi_rx_.on_packet_with_cb(h, payload, h.payload_size, [&](const TimedMidiEvent& ev) {
-                    const bool msync = mclock_.synced();
-                    const int64_t moff = msync ? (mclock_.master_us(now) - int64_t(now)) : 0;
-                    midi_dejitter_.push(ev, now, msync, moff);
-                });
-            } else if (h.type == PacketType::kControlSync) {
-                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
-                    sender_ep_ = batch[i].src;
-                    has_sender_ = true;
-                }
-                ControlSyncPayload cs{};
-                if (!parse_control_sync(payload, h.payload_size, cs)) continue;
-                ControlSyncCallback cb;
-                {
-                    std::lock_guard<std::mutex> clk(cs_mu_);
-                    if (cs.revision <= cs_last_rx_rev_) continue;  // dedup / anti-loop
-                    cs_last_rx_rev_ = cs.revision;
-                    cb = cs_cb_;
-                }
-                cs_rx_count_.fetch_add(1, std::memory_order_relaxed);
-                if (cb) cb(cs);
-            } else if (h.type == PacketType::kAudio) {
-                if (!has_sender_ || !(sender_ep_ == batch[i].src)) {
-                    sender_ep_ = batch[i].src;
-                    has_sender_ = true;
-                }
-                AudioHeader ah;
-                if (parse_audio_header(payload, h.payload_size, ah)) {
-                    audio_buf_.push_packet(h.frame_id, ah, payload + kAudioHeaderSize, n);
-                    if (audio_cb_) audio_cb_(h.frame_id, h.timestamp_us, ah, payload + kAudioHeaderSize);
-                }
-            }
-        } else {
-            assembler_.record_bad_packet(st, n);
+    if (h.type == PacketType::kPong) {
+        handle_pong(payload, h.payload_size, uint32_t(now));
+    } else if (h.type == PacketType::kVideoSlice) {
+        if (cfg_.audio_only) {  // headless AoIP bridge: never reassemble / decode video
+            video_ignored_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        remember_sender(src);
+        assembler_.ingest_video_packet(h, payload, n, now);
+    } else if (h.type == PacketType::kAudio2) {
+        if (!accept_epoch(h.total_slices)) return;  // late packet of the previous session
+        remember_sender(src);
+        audio2_bytes_rx_.fetch_add(uint64_t(n), std::memory_order_relaxed);
+        audio2_packets_rx_.fetch_add(1, std::memory_order_relaxed);
+        arx_.on_packet(h, payload, h.payload_size, now);
+    } else if (h.type == PacketType::kMidiFrame) {
+        if (h.payload_size < 4) return;
+        const uint32_t sid = uint32_t(payload[0]) | (uint32_t(payload[1]) << 8) |
+                             (uint32_t(payload[2]) << 16) | (uint32_t(payload[3]) << 24);
+        if (!accept_epoch(uint16_t(sid))) return;
+        remember_sender(src);
+        midi_rx_.on_packet_with_cb(h, payload, h.payload_size, [&](const TimedMidiEvent& ev) {
+            const bool msync = mclock_.synced();
+            const int64_t moff = msync ? (mclock_.master_us(now) - int64_t(now)) : 0;
+            midi_dejitter_.push(ev, now, msync, moff);
+        });
+    } else if (h.type == PacketType::kControlSync) {
+        remember_sender(src);
+        ControlSyncPayload cs{};
+        if (!parse_control_sync(payload, h.payload_size, cs)) return;
+        ControlSyncCallback cb;
+        {
+            std::lock_guard<std::mutex> clk(cs_mu_);
+            if (cs.revision <= cs_last_rx_rev_) return;  // dedup / anti-loop
+            cs_last_rx_rev_ = cs.revision;
+            cb = cs_cb_;
+        }
+        cs_rx_count_.fetch_add(1, std::memory_order_relaxed);
+        if (cb) cb(cs);
+    } else if (h.type == PacketType::kAudio) {
+        remember_sender(src);
+        AudioHeader ah;
+        if (parse_audio_header(payload, h.payload_size, ah)) {
+            audio_buf_.push_packet(h.frame_id, ah, payload + kAudioHeaderSize, n);
+            if (audio_cb_) audio_cb_(h.frame_id, h.timestamp_us, ah, payload + kAudioHeaderSize);
         }
     }
 }
@@ -315,8 +303,9 @@ void UdpReceiver::service(uint64_t now) {
     arx_.service(now);
     // MIDI without an audio consumer (no pop_audio_* for 50 ms) OR in MIDI Only ultra-low latency mode:
     // schedule deterministically via MidiDejitterQueue.
+    const uint64_t last_pop = last_pop_us_.load(std::memory_order_relaxed);
     if (midi_only_.load(std::memory_order_relaxed) ||
-        now - last_pop_us_.load(std::memory_order_relaxed) > 50'000) {
+        (now > last_pop && (now - last_pop) > 50'000)) {
         midi_dejitter_.set_effective_buffer_ms(double(arx_.latency_ms()),
                                                !midi_only_.load(std::memory_order_relaxed) && mclock_.synced());
         dispatch_midi_local(now);
@@ -372,27 +361,50 @@ void UdpReceiver::track_note(const TimedMidiEvent& ev) {
 }
 
 void UdpReceiver::dispatch_midi(uint64_t playout_us, double block_start_samples, uint32_t frames) {
-    std::lock_guard<std::mutex> lk(midi_mu_);
-    const double rate = double(matrix_.sample_rate());
-    midi_dejitter_.pop_due_media(playout_us, [&](const TimedMidiEvent& ev, bool) {
-        track_note(ev);
-        if (!midi_cb_) return;
-        int32_t off = -1;
-        if (frames > 0) {
-            const double pos = double(ev.media_ts_us) * rate / 1e6 - block_start_samples;
-            off = int32_t(std::clamp(std::floor(pos), 0.0, double(frames - 1)));
-        }
-        midi_cb_(ev, off);
-    });
+    struct DueItem {
+        TimedMidiEvent ev;
+        int32_t offset;
+    };
+    DueItem due[64];
+    size_t due_n = 0;
+    MidiCallback cb;
+    {
+        std::lock_guard<std::mutex> lk(midi_mu_);
+        cb = midi_cb_;
+        const double rate = double(matrix_.sample_rate());
+        midi_dejitter_.pop_due_media(playout_us, [&](const TimedMidiEvent& ev, bool) {
+            track_note(ev);
+            if (!cb) return;
+            int32_t off = -1;
+            if (frames > 0) {
+                const double pos = double(ev.media_ts_us) * rate / 1e6 - block_start_samples;
+                off = int32_t(std::clamp(std::floor(pos), 0.0, double(frames - 1)));
+            }
+            if (due_n < 64) {
+                due[due_n++] = {ev, off};
+            }
+        });
+    }
+    if (cb) {
+        for (size_t i = 0; i < due_n; ++i) cb(due[i].ev, due[i].offset);
+    }
 }
 
 void UdpReceiver::dispatch_midi_local(uint64_t local_now_us) {
-    std::lock_guard<std::mutex> lk(midi_mu_);
-    midi_dejitter_.pop_due_local(local_now_us, [&](const TimedMidiEvent& ev, bool) {
-        track_note(ev);
-        if (!midi_cb_) return;
-        midi_cb_(ev, -1);
-    });
+    TimedMidiEvent due[64];
+    size_t due_n = 0;
+    MidiCallback cb;
+    {
+        std::lock_guard<std::mutex> lk(midi_mu_);
+        cb = midi_cb_;
+        midi_dejitter_.pop_due_local(local_now_us, [&](const TimedMidiEvent& ev, bool) {
+            track_note(ev);
+            if (cb && due_n < 64) due[due_n++] = ev;
+        });
+    }
+    if (cb) {
+        for (size_t i = 0; i < due_n; ++i) cb(due[i], -1);
+    }
 }
 
 uint32_t UdpReceiver::active_midi_notes() const {
@@ -405,21 +417,29 @@ uint32_t UdpReceiver::active_midi_notes() const {
 }
 
 void UdpReceiver::release_all_notes() {
-    std::lock_guard<std::mutex> lk(midi_mu_);
-    for (uint8_t port = 0; port < kMaxMidiPorts; ++port)
-        for (uint8_t ch = 0; ch < 16; ++ch)
-            for (uint8_t note = 0; note < 128; ++note) {
-                if (!active_notes_[port][ch][note]) continue;
-                active_notes_[port][ch][note] = 0;
-                if (midi_cb_) {
-                    TimedMidiEvent off{};
-                    off.status = uint8_t(0x80 | ch);
-                    off.data1 = note;
-                    off.data2 = 0;
-                    off.port_index = port;
-                    midi_cb_(off, 0);
+    std::vector<TimedMidiEvent> offs;
+    MidiCallback cb;
+    {
+        std::lock_guard<std::mutex> lk(midi_mu_);
+        cb = midi_cb_;
+        for (uint8_t port = 0; port < kMaxMidiPorts; ++port)
+            for (uint8_t ch = 0; ch < 16; ++ch)
+                for (uint8_t note = 0; note < 128; ++note) {
+                    if (!active_notes_[port][ch][note]) continue;
+                    active_notes_[port][ch][note] = 0;
+                    if (cb) {
+                        TimedMidiEvent off{};
+                        off.status = uint8_t(0x80 | ch);
+                        off.data1 = note;
+                        off.data2 = 0;
+                        off.port_index = port;
+                        offs.push_back(off);
+                    }
                 }
-            }
+    }
+    if (cb) {
+        for (const auto& off : offs) cb(off, 0);
+    }
 }
 
 // ---- stream epoch (sender restart): reset transport state without clicks or stuck notes ----
@@ -444,6 +464,8 @@ void UdpReceiver::reset_stream_epoch() {
     matrix_.request_epoch_reset();   // crossfade to silence, re-anchor on the new timeline
     mclock_.reset();                 // the new sender has a new MasterClock epoch
     sync_ = {};
+    sync_synced_pub_.store(false, std::memory_order_release);
+    sync_offset_pub_.store(0, std::memory_order_relaxed);
     last_ping_us_ = 0;               // re-sync immediately
     midi_rx_.reset();                // event_seq dedup window + queued events of the old session
     midi_dejitter_.reset();          // de-jitter playout queue + transit baseline
@@ -470,7 +492,8 @@ double UdpReceiver::estimate_latency_ms(uint64_t recv_complete_us, uint32_t send
 }
 
 bool UdpReceiver::send_control_sync(const ControlSyncPayload& cs) {
-    if (!has_sender_) return false;
+    Endpoint ep{};
+    if (!sender_endpoint(ep)) return false;
     uint8_t body[kControlSyncSize];
     write_control_sync(body, cs);
     PacketHeader h;
@@ -483,7 +506,7 @@ bool UdpReceiver::send_control_sync(const ControlSyncPayload& cs) {
     if (!n) return false;
     int ok = 0;
     for (int rep = 0; rep < 3; ++rep) {
-        if (tx().send_to(out, n, sender_ep_) == int(n)) ++ok;
+        if (tx().send_to(out, n, ep) == int(n)) ++ok;
     }
     if (ok > 0) cs_tx_count_.fetch_add(1, std::memory_order_relaxed);
     return ok > 0;

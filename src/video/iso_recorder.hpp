@@ -67,7 +67,10 @@ public:
 
     bool is_open() const;
     IsoRecorderStats stats() const;
-    const std::string& path() const { return cfg_.path; }
+    std::string path() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return cfg_.path;
+    }
 
     struct Impl;
 

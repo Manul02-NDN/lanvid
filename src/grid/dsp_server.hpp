@@ -19,6 +19,7 @@ class GridChannelDspStrip {
 public:
     explicit GridChannelDspStrip(uint32_t sample_rate = 48000);
 
+    void set_sample_rate(uint32_t sample_rate);
     void set_params(const L2DspParamPayload& p);
     L2DspParamPayload params() const;
     void process_inplace(float* buf, uint32_t frames);
@@ -140,6 +141,7 @@ private:
 
     mutable std::mutex mu_;
     bool using_backup_ = false;
+    uint64_t start_us_ = 0;
     uint64_t last_primary_us_ = 0;
     uint64_t last_backup_us_ = 0;
     float primary_cpu_ = 0.0f;

@@ -529,11 +529,12 @@ struct ProCineHUDView: View {
                 Text("ISO \(Int(engine.isoValue))")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .frame(width: isCompactWidth ? 64 : 74, alignment: .leading)
-                Slider(value: $engine.isoValue, in: 50...3200, step: 50) { _ in
-                    engine.autoExposure = false
-                    engine.applyManualCameraControls()
-                }
-                .tint(CineTheme.lavenderBright)
+                Slider(value: $engine.isoValue, in: 50...3200, step: 50)
+                    .onChange(of: engine.isoValue) { _ in
+                        engine.autoExposure = false
+                        engine.applyManualCameraControls()
+                    }
+                    .tint(CineTheme.lavenderBright)
                 Button(engine.autoExposure ? "AE" : "M") {
                     engine.autoExposure.toggle()
                     engine.applyManualCameraControls()
@@ -548,11 +549,12 @@ struct ProCineHUDView: View {
                 Text("WB \(Int(engine.wbKelvin))K")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .frame(width: isCompactWidth ? 64 : 74, alignment: .leading)
-                Slider(value: $engine.wbKelvin, in: 2500...9500, step: 100) { _ in
-                    engine.autoWhiteBalance = false
-                    engine.applyManualCameraControls()
-                }
-                .tint(CineTheme.lavenderBright)
+                Slider(value: $engine.wbKelvin, in: 2500...9500, step: 100)
+                    .onChange(of: engine.wbKelvin) { _ in
+                        engine.autoWhiteBalance = false
+                        engine.applyManualCameraControls()
+                    }
+                    .tint(CineTheme.lavenderBright)
                 Button(engine.autoWhiteBalance ? "AWB" : "M") {
                     engine.autoWhiteBalance.toggle()
                     engine.applyManualCameraControls()
@@ -567,11 +569,12 @@ struct ProCineHUDView: View {
                 Text("MF \(Int(engine.focusPosition * 100))%")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .frame(width: isCompactWidth ? 64 : 74, alignment: .leading)
-                Slider(value: $engine.focusPosition, in: 0...1) { _ in
-                    engine.autoFocus = false
-                    engine.applyManualCameraControls()
-                }
-                .tint(CineTheme.lavenderBright)
+                Slider(value: $engine.focusPosition, in: 0...1)
+                    .onChange(of: engine.focusPosition) { _ in
+                        engine.autoFocus = false
+                        engine.applyManualCameraControls()
+                    }
+                    .tint(CineTheme.lavenderBright)
                 Button("A") { engine.rackFocus(to: engine.focusPointA) }
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .buttonStyle(.bordered)
@@ -588,10 +591,11 @@ struct ProCineHUDView: View {
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundColor(CineTheme.lavenderSoft)
                         .frame(width: 96, alignment: .leading)
-                    Slider(value: $engine.secondaryExposureBias, in: -2.0...2.0, step: 0.2) { _ in
-                        engine.applyManualCameraControls()
-                    }
-                    .tint(CineTheme.tallyGreen)
+                    Slider(value: $engine.secondaryExposureBias, in: -2.0...2.0, step: 0.2)
+                        .onChange(of: engine.secondaryExposureBias) { _ in
+                            engine.applyManualCameraControls()
+                        }
+                        .tint(CineTheme.tallyGreen)
                 }
             }
         }
@@ -787,11 +791,12 @@ struct ProCineHUDView: View {
                             .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundColor(CineTheme.textPrimary)
                     }
-                    Slider(value: $engine.focusPosition, in: 0...1) { _ in
-                        engine.autoFocus = false
-                        engine.sendCompanionCommandToSelectedPeer()
-                    }
-                    .tint(CineTheme.lavenderBright)
+                    Slider(value: $engine.focusPosition, in: 0...1)
+                        .onChange(of: engine.focusPosition) { _ in
+                            engine.autoFocus = false
+                            engine.sendCompanionCommandToSelectedPeer()
+                        }
+                        .tint(CineTheme.lavenderBright)
                     HStack(spacing: 10) {
                         Button(tr("Точка A (25%)", "Mark A (25%)")) { engine.rackFocus(to: engine.focusPointA) }
                             .buttonStyle(.borderedProminent).tint(CineTheme.lavender).frame(maxWidth: .infinity)

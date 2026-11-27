@@ -85,7 +85,8 @@ bool FileVideoSource::open(const std::string& path, int hint_w, int hint_h, bool
                 else y4m_chroma_ = ChromaFormat::k420;
             }
         }
-        if (width_ <= 0 || height_ <= 0) return false;
+        if (width_ <= 0 || height_ <= 0 || width_ > 16384 || height_ > 16384 ||
+            uint64_t(width_) * uint64_t(height_) > 33'554'432ull) return false;
         data_start_ = file_.tellg();
         kind_ = Kind::kY4m;
         const int sxs = chroma_shift_x(y4m_chroma_);
@@ -107,7 +108,8 @@ bool FileVideoSource::open(const std::string& path, int hint_w, int hint_h, bool
         const int w = std::atoi(t_w.c_str());
         const int h = std::atoi(t_h.c_str());
         const int maxv = std::atoi(t_max.c_str());
-        if (w <= 0 || h <= 0 || maxv != 255) return false;
+        if (w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
+            uint64_t(w) * uint64_t(h) > 33'554'432ull || maxv != 255) return false;
 
         std::vector<uint8_t> rgb(size_t(w) * size_t(h) * 3);
         file_.read(reinterpret_cast<char*>(rgb.data()), std::streamsize(rgb.size()));
