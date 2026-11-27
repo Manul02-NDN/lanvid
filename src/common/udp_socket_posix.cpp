@@ -79,8 +79,52 @@ void UdpSocket::close() {
     cached_tos_.store(-1, std::memory_order_relaxed);
 }
 
+bool UdpSocket::is_multicast_ip(const std::string& ip) {
+    in_addr addr{};
+    if (ip.empty() || ::inet_pton(AF_INET, ip.c_str(), &addr) != 1) return false;
+    const uint32_t host_ip = ntohl(addr.s_addr);
+    return (host_ip & 0xF0000000u) == 0xE0000000u;  // 224.0.0.0/4
+}
+
+bool UdpSocket::bind_multicast(const std::string& group_ip, uint16_t port, const std::string& iface_ip) {
+    if (!is_open() || !is_multicast_ip(group_ip)) return false;
+    int reuse = 1;
+    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+#if defined(SO_REUSEPORT)
+    ::setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
+#endif
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = INADDR_ANY;
+    sa.sin_port = htons(port);
+    if (::bind(fd_, reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) != 0) return false;
+
+    ip_mreq mreq{};
+    if (::inet_pton(AF_INET, group_ip.c_str(), &mreq.imr_multiaddr) != 1) return false;
+    if (!iface_ip.empty() && iface_ip != "0.0.0.0" && iface_ip != "auto") {
+        if (::inet_pton(AF_INET, iface_ip.c_str(), &mreq.imr_interface) != 1) {
+            mreq.imr_interface.s_addr = INADDR_ANY;
+        }
+    } else {
+        mreq.imr_interface.s_addr = INADDR_ANY;
+    }
+    return ::setsockopt(fd_, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) == 0;
+}
+
+bool UdpSocket::set_multicast_loop_and_ttl(bool loop, int ttl) {
+    if (!is_open()) return false;
+    unsigned char loop_val = loop ? 1 : 0;
+    unsigned char ttl_val = static_cast<unsigned char>(std::clamp(ttl, 1, 255));
+    const bool ok1 = ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &loop_val, sizeof(loop_val)) == 0;
+    const bool ok2 = ::setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_TTL, &ttl_val, sizeof(ttl_val)) == 0;
+    return ok1 && ok2;
+}
+
 bool UdpSocket::bind(const std::string& ip, uint16_t port) {
     if (!is_open()) return false;
+    if (is_multicast_ip(ip)) {
+        return bind_multicast(ip, port);
+    }
     Endpoint ep;
     if (!Endpoint::parse(ip, port, ep)) return false;
 

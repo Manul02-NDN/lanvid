@@ -11,9 +11,11 @@ import UIKit
 final class DuoSyncBrowser: ObservableObject {
     static let videoDiscoveryPort: UInt16 = 5023
     static let legacyDiscoveryPort: UInt16 = 5099
+    static let intercomDiscoveryPort: UInt16 = 5025
     static let duoSyncPort: UInt16 = 5028
 
     @Published private(set) var studios: [DiscoveredStudio] = []
+    @Published private(set) var intercomDesks: [DiscoveredIntercomDesk] = []
     @Published private(set) var duoPeers: [DuoPeerCamera] = []
     @Published private(set) var searching = false
     @Published private(set) var status = ""
@@ -43,8 +45,13 @@ final class DuoSyncBrowser: ObservableObject {
 
         if demoMode || CommandLine.arguments.contains("-LVDemo") || CommandLine.arguments.contains("-LVFakePeers") {
             studios = [
-                DiscoveredStudio(name: "LanVid Video — Mac Studio", host: "192.168.1.24", videoPort: 5006, tallyPort: 5022),
+                DiscoveredStudio(name: "OBS Studio — LanVid", host: "192.168.1.24", videoPort: 5006, tallyPort: 5022),
+                DiscoveredStudio(name: "LanVid Monitor — Mac Studio", host: "192.168.1.24", videoPort: 5008, tallyPort: 5022),
                 DiscoveredStudio(name: "LanVid Studio — Studio PC", host: "192.168.1.40", videoPort: 5006, tallyPort: 5022)
+            ]
+            intercomDesks = [
+                DiscoveredIntercomDesk(name: "LanVid Intercom — Director Desk", host: "192.168.1.24", port: 5024, isDedicated: true),
+                DiscoveredIntercomDesk(name: "OBS Studio — LanVid", host: "192.168.1.24", port: 5022, isDedicated: false)
             ]
             duoPeers = [
                 DuoPeerCamera(
@@ -142,8 +149,14 @@ final class DuoSyncBrowser: ObservableObject {
             if name == localServiceName { continue }
             if resolving[name] != nil { continue }
             var roleTag = "video"
-            if case let .bonjour(txt) = r.metadata, let rv = txt["role"] {
-                roleTag = rv
+            var txtVport: UInt16?
+            var txtTport: UInt16?
+            var txtIport: UInt16?
+            if case let .bonjour(txt) = r.metadata {
+                if let rv = txt["role"] { roleTag = rv.lowercased() }
+                if let vp = txt["vport"], let parsed = UInt16(vp), parsed > 0 { txtVport = parsed }
+                if let tp = txt["tport"], let parsed = UInt16(tp), parsed > 0 { txtTport = parsed }
+                if let ip = txt["iport"], let parsed = UInt16(ip), parsed > 0 { txtIport = parsed }
             }
             if roleTag == "audio" { continue }
 
@@ -167,10 +180,20 @@ final class DuoSyncBrowser: ObservableObject {
                                 if roleTag == "camera" || roleTag == "duo" {
                                     self.upsertDuoPeer(host: h, name: name, role: .camB, tally: .standby,
                                                        timecode: "01:00:00:00", focus: 0.5, iso: 400, shutter: 180, wb: 5600)
+                                } else if roleTag == "intercom" {
+                                    let iPort = txtIport ?? txtTport ?? (p > 0 ? p : 5024)
+                                    self.upsertIntercomDesk(DiscoveredIntercomDesk(
+                                        name: name, host: h, port: iPort, isDedicated: true
+                                    ))
                                 } else {
-                                    let ep = DiscoveredStudio(name: name, host: h, videoPort: p == 5022 ? 5006 : p, tallyPort: 5022)
-                                    if !self.studios.contains(where: { $0.host == ep.host }) {
-                                        self.studios.append(ep)
+                                    let vPort = txtVport ?? (p == 5022 ? 5006 : p)
+                                    let tPort = txtTport ?? 5022
+                                    let ep = DiscoveredStudio(name: name, host: h, videoPort: vPort, tallyPort: tPort)
+                                    self.upsertStudio(ep)
+                                    if tPort > 0 {
+                                        self.upsertIntercomDesk(DiscoveredIntercomDesk(
+                                            name: name, host: h, port: tPort, isDedicated: false
+                                        ))
                                     }
                                 }
                             }
@@ -307,7 +330,7 @@ final class DuoSyncBrowser: ObservableObject {
                     addr.sin_family = sa_family_t(AF_INET)
                     inet_pton(AF_INET, ipStr, &addr.sin_addr)
 
-                    for port in [Self.videoDiscoveryPort, Self.legacyDiscoveryPort] {
+                    for port in [Self.videoDiscoveryPort, Self.legacyDiscoveryPort, Self.intercomDiscoveryPort] {
                         addr.sin_port = port.bigEndian
                         _ = probe.withUnsafeBytes { buf in
                             withUnsafePointer(to: &addr) {
@@ -366,13 +389,45 @@ final class DuoSyncBrowser: ObservableObject {
         guard text.hasPrefix("LVDS_RSP|") else { return }
         let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
         guard parts.count >= 5, let port = UInt16(parts[1]), port > 0 else { return }
+        var roleTag = "video"
         for extra in parts.dropFirst(5) {
-            if extra == "ROLE=audio" { return }
+            if extra.hasPrefix("ROLE=") {
+                roleTag = String(extra.dropFirst(5)).lowercased()
+            }
+        }
+        if roleTag == "audio" { return }
+        if roleTag == "intercom" {
+            let name = parts[4].isEmpty ? "LanVid Intercom" : parts[4]
+            upsertIntercomDesk(DiscoveredIntercomDesk(name: name, host: host, port: port, isDedicated: true))
+            return
         }
         let name = parts[4].isEmpty ? "LanVid Video" : parts[4]
         let ep = DiscoveredStudio(name: name, host: host, videoPort: port, tallyPort: 5022)
-        if !studios.contains(where: { $0.host == host && $0.videoPort == port }) {
+        upsertStudio(ep)
+        upsertIntercomDesk(DiscoveredIntercomDesk(name: name, host: host, port: 5022, isDedicated: false))
+    }
+
+    private func upsertStudio(_ ep: DiscoveredStudio) {
+        if let idx = studios.firstIndex(where: { $0.host == ep.host && $0.videoPort == ep.videoPort }) {
+            studios[idx] = ep
+        } else {
             studios.append(ep)
+        }
+    }
+
+    private func upsertIntercomDesk(_ desk: DiscoveredIntercomDesk) {
+        if let idx = intercomDesks.firstIndex(where: { $0.host == desk.host && $0.port == desk.port }) {
+            // Preserve dedicated flag if already known as dedicated intercom
+            if desk.isDedicated || !intercomDesks[idx].isDedicated {
+                intercomDesks[idx] = desk
+            }
+        } else {
+            // Put dedicated LanVid Intercom desks first for one-tap selection
+            if desk.isDedicated {
+                intercomDesks.insert(desk, at: 0)
+            } else {
+                intercomDesks.append(desk)
+            }
         }
     }
 

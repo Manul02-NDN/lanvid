@@ -76,7 +76,13 @@ data class HudUiState(
     val adaptive: Boolean = true,
     val destIp: String = "",
     val destPort: Int = 5006,
+    val destTallyPort: Int = 5022,
     val destName: String = "",
+    val extraVideoDestinations: List<String> = emptyList(),
+    val useSeparateIntercom: Boolean = false,
+    val intercomIp: String = "",
+    val intercomPort: Int = 5024,
+    val intercomName: String = "",
     val listenPort: Int = 5006,
     val volume: Float = 1.0f,
     val audioLatencyMs: Int = 12,
@@ -90,11 +96,30 @@ data class HudUiState(
 ) {
     val isLive: Boolean get() = if (mode == BroadcastMode.SENDER) senderActive else receiverActive
 
+    val effectiveIntercomIp: String
+        get() = if (useSeparateIntercom && intercomIp.isNotBlank()) intercomIp.trim() else destIp.trim()
+
+    val effectiveIntercomPort: Int
+        get() = if (useSeparateIntercom && intercomIp.isNotBlank()) intercomPort else destTallyPort
+
+    val isIntercomSplit: Boolean
+        get() = useSeparateIntercom && intercomIp.isNotBlank() &&
+            (intercomIp.trim() != destIp.trim() || intercomPort != destTallyPort)
+
+    val activeVideoReceiverCount: Int
+        get() {
+            val primaryKey = "${destIp.trim()}:$destPort"
+            val extras = extraVideoDestinations.count { it.isNotBlank() && it != primaryKey }
+            return 1 + extras
+        }
+
     fun toolSummary(tool: HudTool): String = when (tool) {
         HudTool.SOURCE -> if (mode == BroadcastMode.SENDER) source.shortLabel else "RX"
         HudTool.CODEC -> if (codec == VideoCodecOption.DCT) "Q$quality" else "${codec.shortLabel} ${bitrateMbps.toInt()}M"
         HudTool.NETWORK -> if (mode == BroadcastMode.SENDER) {
-            if (destName.isNotBlank()) destName.take(8) else if (destIp.isNotBlank()) ":${destPort}" else "Пошук"
+            val cnt = activeVideoReceiverCount
+            val base = if (destName.isNotBlank()) destName.take(7) else if (destIp.isNotBlank()) ":${destPort}" else "Пошук"
+            if (cnt > 1) "$base+${cnt - 1}" else base
         } else ":${listenPort}"
         HudTool.AUDIO -> if (mode == BroadcastMode.SENDER) audioSource.title else "${audioLatencyMs} мс"
         HudTool.MONITOR -> if (frameGuides) "Сітка" else "Чисто"
@@ -344,10 +369,13 @@ fun ToolPanel(
     simdInfo: String,
     txStats: SenderStats,
     rxStats: ReceiverStats,
-    lanPeers: List<LanPeer>,
+    videoPeers: List<LanPeer>,
+    intercomPeers: List<LanPeer>,
     scanning: Boolean,
     onScanLan: () -> Unit,
     onSelectPeerAndGoLive: ((LanPeer) -> Unit)? = null,
+    onToggleExtraVideoDest: (String) -> Unit = {},
+    onSelectIntercomPeer: (LanPeer?) -> Unit = {},
     onUpdate: (HudUiState) -> Unit,
     onSwitchMode: (BroadcastMode) -> Unit,
     onVolumeChange: (Float) -> Unit,
@@ -439,10 +467,23 @@ fun ToolPanel(
                     }
 
                     if (ui.mode == BroadcastMode.SENDER) {
-                        if (lanPeers.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SectionHeader("Приймачі відео (1..8 одночасно)")
+                            Spacer(Modifier.weight(1f))
+                            if (ui.activeVideoReceiverCount > 1) {
+                                Chip("${ui.activeVideoReceiverCount} акт.", Studio.green)
+                            }
+                        }
+
+                        if (videoPeers.isNotEmpty()) {
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                lanPeers.forEach { p ->
+                                videoPeers.forEach { p ->
+                                    val key = "${p.ip}:${p.port}"
                                     val sel = ui.destIp == p.ip && ui.destPort == p.port
+                                    val isExtra = !sel && ui.extraVideoDestinations.contains(key)
                                     Row(
                                         Modifier
                                             .fillMaxWidth()
@@ -450,37 +491,60 @@ fun ToolPanel(
                                                 if (sel) Studio.accentSoft else Studio.surface2,
                                                 RoundedCornerShape(11.dp)
                                             )
-                                            .border(0.75.dp, if (sel) Studio.accent else Studio.border, RoundedCornerShape(11.dp))
+                                            .border(0.75.dp, if (sel) Studio.accent else if (isExtra) Studio.green else Studio.border, RoundedCornerShape(11.dp))
                                             .clickableNoRipple {
-                                                onUpdate(ui.copy(destIp = p.ip, destPort = p.port, destName = p.name))
+                                                onUpdate(
+                                                    ui.copy(
+                                                        destIp = p.ip,
+                                                        destPort = p.port,
+                                                        destTallyPort = if (p.tallyPort > 0) p.tallyPort else 5022,
+                                                        destName = p.name,
+                                                        extraVideoDestinations = ui.extraVideoDestinations.filter { it != key }
+                                                    )
+                                                )
                                             }
                                             .padding(horizontal = 10.dp, vertical = 8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        Chip(p.roleBadge, if (p.role == "video") Studio.green else Studio.accent)
+                                        Chip(p.roleBadge, if (sel) Studio.accent else Studio.green)
                                         Column(Modifier.weight(1f)) {
                                             Text(p.name, style = Bm.sans(12.5.sp, FontWeight.SemiBold), color = Studio.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text("${p.ip}:${p.port} · ${p.rttMs} мс", style = Bm.mono(10.sp), color = Studio.text3)
+                                            Text("${p.ip}:${p.port} · Tally :${p.tallyPort} · ${p.rttMs} мс", style = Bm.mono(10.sp), color = Studio.text3)
                                         }
-                                        if (onSelectPeerAndGoLive != null && !ui.senderActive && p.role != "audio") {
+                                        if (sel) {
+                                            if (onSelectPeerAndGoLive != null && !ui.senderActive) {
+                                                Box(
+                                                    Modifier
+                                                        .background(Studio.primaryBg, RoundedCornerShape(8.dp))
+                                                        .clickableNoRipple { onSelectPeerAndGoLive(p) }
+                                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                                ) {
+                                                    Text("В ефір", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.primaryFg)
+                                                }
+                                            } else {
+                                                Text("Осн.", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.accent)
+                                            }
+                                        } else {
                                             Box(
                                                 Modifier
-                                                    .background(Studio.primaryBg, RoundedCornerShape(8.dp))
-                                                    .clickableNoRipple { onSelectPeerAndGoLive(p) }
-                                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                                                    .background(if (isExtra) Studio.green else Studio.surface3, RoundedCornerShape(8.dp))
+                                                    .clickableNoRipple { onToggleExtraVideoDest(key) }
+                                                    .padding(horizontal = 8.dp, vertical = 5.dp)
                                             ) {
-                                                Text("В ефір", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.primaryFg)
+                                                Text(
+                                                    if (isExtra) "✓ +Відео" else "+ Відео",
+                                                    style = Bm.sans(10.5.sp, FontWeight.SemiBold),
+                                                    color = if (isExtra) Color.White else Studio.text
+                                                )
                                             }
-                                        } else if (sel) {
-                                            Text("Обрано", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.accent)
                                         }
                                     }
                                 }
                             }
                         } else {
                             Text(
-                                "Автопошук активний (mDNS + LAN :5023). Відкрийте LanVid Studio на ПК у тій же Wi-Fi мережі.",
+                                "Автопошук відео-приймачів активний (mDNS + LAN :5023). Відкрийте OBS або LanVid Studio на ПК.",
                                 style = Bm.sans(11.5.sp),
                                 color = Studio.text3
                             )
@@ -490,6 +554,87 @@ fun ToolPanel(
                         TextSetting("IP студії", ui.destIp) { onUpdate(ui.copy(destIp = it, destName = "")) }
                         TextSetting("UDP порт", ui.destPort.toString(), numeric = true) { v ->
                             v.toIntOrNull()?.let { p -> onUpdate(ui.copy(destPort = p.coerceIn(1024, 65535))) }
+                        }
+                        TextSetting(
+                            "Дод. відео",
+                            ui.extraVideoDestinations.joinToString(", ")
+                        ) { csv ->
+                            val parsed = csv.split(',', ';')
+                                .map { it.trim() }
+                                .filter { it.contains(':') && it != "${ui.destIp.trim()}:${ui.destPort}" }
+                                .distinct()
+                                .take(7)
+                            onUpdate(ui.copy(extraVideoDestinations = parsed))
+                        }
+
+                        HorizontalDivider(color = Studio.border)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            SectionHeader("Приймач інтеркому (голос)")
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "${ui.effectiveIntercomIp.ifBlank { "—" }}:${ui.effectiveIntercomPort}",
+                                style = Bm.mono(10.sp, FontWeight.SemiBold),
+                                color = if (ui.isIntercomSplit) Studio.green else Studio.text3
+                            )
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            val sameSelected = !ui.isIntercomSplit
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .background(if (sameSelected) Studio.accentSoft else Studio.surface2, RoundedCornerShape(10.dp))
+                                    .border(0.75.dp, if (sameSelected) Studio.accent else Studio.border, RoundedCornerShape(10.dp))
+                                    .clickableNoRipple { onSelectIntercomPeer(null) }
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Chip("[AUTO]", if (sameSelected) Studio.accent else Studio.text2)
+                                Column(Modifier.weight(1f)) {
+                                    Text("Як у відео-студії", style = Bm.sans(12.sp, FontWeight.SemiBold), color = Studio.text)
+                                    Text("${ui.destIp.ifBlank { "—" }}:${ui.destTallyPort}", style = Bm.mono(10.sp), color = Studio.text3)
+                                }
+                                if (sameSelected) {
+                                    Text("Обрано", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.accent)
+                                }
+                            }
+
+                            intercomPeers.forEach { ic ->
+                                val icSel = ui.isIntercomSplit && ui.intercomIp == ic.ip && ui.intercomPort == ic.port
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .background(if (icSel) Studio.greenSoft else Studio.surface2, RoundedCornerShape(10.dp))
+                                        .border(0.75.dp, if (icSel) Studio.green else Studio.border, RoundedCornerShape(10.dp))
+                                        .clickableNoRipple { onSelectIntercomPeer(ic) }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Chip(ic.roleBadge, if (ic.isIntercomPeer) Studio.green else Studio.accent)
+                                    Column(Modifier.weight(1f)) {
+                                        Text(ic.name, style = Bm.sans(12.sp, FontWeight.SemiBold), color = Studio.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("${ic.ip}:${ic.port}", style = Bm.mono(10.sp), color = Studio.text3)
+                                    }
+                                    if (icSel) {
+                                        Text("Активно", style = Bm.sans(11.sp, FontWeight.SemiBold), color = Studio.green)
+                                    }
+                                }
+                            }
+                        }
+
+                        SwitchRow("Окремий інтерком (ручний IP:порт)", ui.useSeparateIntercom) { on ->
+                            onUpdate(ui.copy(useSeparateIntercom = on))
+                        }
+                        if (ui.useSeparateIntercom) {
+                            TextSetting("IP інтеркому", ui.intercomIp) { onUpdate(ui.copy(intercomIp = it, intercomName = "")) }
+                            TextSetting("Порт інтер.", ui.intercomPort.toString(), numeric = true) { v ->
+                                v.toIntOrNull()?.let { p -> onUpdate(ui.copy(intercomPort = p.coerceIn(1024, 65535))) }
+                            }
                         }
                     } else {
                         TextSetting("Порт прийому", ui.listenPort.toString(), numeric = true) { v ->

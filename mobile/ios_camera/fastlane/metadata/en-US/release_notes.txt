@@ -1,6 +1,6 @@
-LanVid Camera v3.1.0 — Ultra-Low-Latency VideoToolbox, Pro Cine HUD, Tally & Duplex Intercom:
+LanVid Camera v3.1.0 — Multi-Target Fan-Out, Split Intercom, Ultra-Low-Latency VideoToolbox & Pro Cine HUD:
+• Multi-Target Video Fan-Out (1–8 simultaneous receivers): stream simultaneously to OBS Studio, LanVid Monitor, and Studio PCs with zero re-encoding, plus IPv4 Multicast support.
+• Independent Split Intercom Receiver: connect 48 kHz Duplex Intercom (IFB / PTT / Latch) to a standalone LanVid Intercom desk (:5024) separately from your Video/Tally studio (:5022), with auto-discovery and instant lanvid:// QR pairing.
 • Zero-frame VideoToolbox lookahead, hardware clean-rect cropping, and runtime codec/FPS switching (LanVid SDK v3.1.0).
 • Adaptive Pro Cinema HUD safe around Dynamic Island & Notch in Portrait and Landscape with improved pinch/pan gestures and EIS latency hints.
-• Full manual controls: Shutter Angle (45°–360°), ISO, White Balance (Kelvin), Focus Pull A↔B, Focus Peaking, Zebra & Guides.
-• iPhone Duo Mode: Single Cine HUD, Dual-Cam PIP / 50-50 Split, and paired iPhone Duo Sync.
-• Full-frame Tally borders (PGM ON AIR / PVW PREVIEW) & 48 kHz Duplex Intercom (IFB / PTT / Latch) with clean IDR sync isolation.
+• Full manual controls: Shutter Angle (45°–360°), ISO, White Balance (Kelvin), Focus Pull A↔B, Focus Peaking, Zebra, Guides, Dual-Cam PIP/Split & iPhone Duo Sync.

@@ -1,6 +1,6 @@
-LanVid Camera v3.1.0 — Ультранизька затримка VideoToolbox, Pro Cine HUD, Tally та Duplex Intercom:
+LanVid Camera v3.1.0 — Мультиприймач відео, Окремий Інтерком, Ультранизька затримка VideoToolbox і Pro Cine HUD:
+• Multi-Target Video Fan-Out (1–8 приймачів одночасно): передавайте відеопотік одночасно в OBS Studio, LanVid Monitor та Studio ПК без повторного кодування, плюс підтримка IPv4 Multicast.
+• Окремий приймач інтеркому (Split Intercom): підключайте двосторонній інтерком 48 кГц (IFB / PTT / Latch) до LanVid Intercom (:5024) незалежно від відео/Tally студії (:5022), з автовиявленням і швидким QR-підключенням lanvid://.
 • Нульовий буфер кодера VideoToolbox, апаратний clean-rect кроп і динамічна зміна кодека/FPS на льоту (LanVid SDK v3.1.0).
 • Адаптивний Pro Cine HUD із захистом Dynamic Island / Notch, покращеними жестами зуму/експозиції та точними підказками затримки EIS.
-• Повний ручний контроль: Shutter Angle (45°–360°), ISO, Баланс білого (K), Фокус A↔B, Focus Peaking, Зебра, Сітка.
-• Режим iPhone Duo: Стандартний HUD, Dual-Cam PIP / 50/50 Split і зв'язка двох iPhone (CAM A + CAM B / Пульт Режисера).
-• Повноекранний Tally (PGM В ЕФІРІ / PVW ПРЕВ'Ю) та двосторонній інтерком 48 кГц (IFB / PTT / Latch) з ізоляцією IDR-запитів.
+• Повний ручний кіноконтроль: Shutter Angle (45°–360°), ISO, Баланс білого (K), Фокус A↔B, Focus Peaking, Зебра, Dual-Cam PIP/Split та iPhone Duo Sync.

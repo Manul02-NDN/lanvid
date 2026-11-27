@@ -277,6 +277,21 @@ struct DiscoveredStudio: Identifiable, Equatable {
     let tallyPort: UInt16
 }
 
+struct VideoDestination: Identifiable, Equatable, Codable {
+    var id: String { "\(host):\(port)" }
+    var host: String
+    var port: UInt16
+    var name: String
+}
+
+struct DiscoveredIntercomDesk: Identifiable, Equatable {
+    var id: String { "\(host):\(port)" }
+    let name: String
+    let host: String
+    let port: UInt16
+    let isDedicated: Bool
+}
+
 struct DuoPeerCamera: Identifiable, Equatable {
     var id: String { host }
     let host: String

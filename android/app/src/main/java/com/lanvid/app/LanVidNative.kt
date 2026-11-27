@@ -12,13 +12,24 @@ data class LanPeer(
     val os: String,
     val simd: String,
     val rttMs: Int,
-    val role: String = ""
+    val role: String = "",
+    val tallyPort: Int = 5022
 ) {
     val roleBadge: String
         get() = when (role.lowercase()) {
             "video" -> "[VIDEO]"
+            "intercom" -> "[INTERCOM]"
             "audio" -> "[AUDIO]"
             else -> "[STUDIO]"
+        }
+
+    val isIntercomPeer: Boolean
+        get() = role.equals("intercom", ignoreCase = true)
+
+    val isVideoReceiver: Boolean
+        get() {
+            val r = role.lowercase()
+            return r != "audio" && r != "intercom" && r != "camera" && r != "duo"
         }
 }
 
@@ -60,6 +71,10 @@ object LanVidNative {
     @JvmStatic external fun nativeGetSimdInfo(): String
     @JvmStatic external fun nativeEnumerateDevices(): String
     @JvmStatic external fun nativeScanLan(timeoutMs: Int): String
+    @JvmStatic external fun nativeScanLanPort(timeoutMs: Int, discoveryPort: Int): String
+    @JvmStatic external fun nativeSenderAddDestination(ip: String, port: Int): Boolean
+    @JvmStatic external fun nativeSenderRemoveDestination(ip: String, port: Int): Boolean
+    @JvmStatic external fun nativeSenderClearExtraDestinations()
 
     @JvmStatic external fun nativeStartSender(
         destIp: String,
@@ -122,6 +137,8 @@ object LanVidNative {
     // Tally (Standby / Preview / Program) & Full-Duplex Intercom (Director <-> Camera)
     @JvmStatic external fun nativeTallyConnect(studioIp: String, studioPort: Int, cameraId: Int, label: String): Boolean
     @JvmStatic external fun nativeTallyDisconnect()
+    @JvmStatic external fun nativeIntercomConnect(intercomIp: String, intercomPort: Int, cameraId: Int, label: String): Boolean
+    @JvmStatic external fun nativeIntercomDisconnect()
     @JvmStatic external fun nativeTallyPollJson(batteryPct: Int, tempC: Int): String
     @JvmStatic external fun nativeForceKeyframe()
     @JvmStatic external fun nativeSetSenderBitrateKbps(bitrateKbps: Int)
@@ -140,19 +157,25 @@ object LanVidNative {
     @JvmStatic external fun nativeIntercomPushMic(samples: FloatArray, frames: Int)
     @JvmStatic external fun nativeIntercomPullRx(outSamples: FloatArray, frames: Int): Int
 
-    fun scanLanPeers(timeoutMs: Int = 450): List<LanPeer> {
-        val raw = nativeScanLan(timeoutMs)
+    fun scanLanPeers(timeoutMs: Int = 450): List<LanPeer> = parsePeersJson(nativeScanLan(timeoutMs), "")
+
+    fun scanLanPeersOnPort(timeoutMs: Int = 350, discoveryPort: Int = 5025, defaultRole: String = ""): List<LanPeer> =
+        parsePeersJson(nativeScanLanPort(timeoutMs, discoveryPort), defaultRole)
+
+    private fun parsePeersJson(raw: String, defaultRole: String): List<LanPeer> {
         val arr = JSONArray(raw)
         return List(arr.length()) { i ->
             val o = arr.getJSONObject(i)
+            val parsedRole = o.optString("role", "").ifBlank { defaultRole }
             LanPeer(
                 ip = o.optString("ip"),
-                port = o.optInt("port", 5000),
-                name = o.optString("name", "Receiver"),
+                port = o.optInt("port", 5006),
+                name = o.optString("name", if (parsedRole == "intercom") "LanVid Intercom" else "Receiver"),
                 os = o.optString("os", "?"),
                 simd = o.optString("simd", "scalar"),
                 rttMs = o.optInt("rtt_ms", 0),
-                role = o.optString("role", "")
+                role = parsedRole,
+                tallyPort = o.optInt("tport", 5022)
             )
         }
     }

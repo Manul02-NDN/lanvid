@@ -1,6 +1,6 @@
 # LanVid Camera → App Store & TestFlight: 5-Step Owner Checklist
 
-Everything technical is ready (`com.manul02.lanvid.camera`, version `2.7.0`, 1024×1024 RGB AppIcon, EN + UK App Store screenshots, metadata, privacy manifest, GitHub Pages policy, Fastlane, and GitHub Actions workflow). After enrolling in the Apple Developer Program, follow these **5 steps**:
+Everything technical is ready (`com.manul02.lanvid.camera`, version `3.1.0`, 1024×1024 RGB AppIcon, EN + UK App Store screenshots, metadata, privacy manifest, GitHub Pages policy, Fastlane, and GitHub Actions workflow). After enrolling in the Apple Developer Program, follow these **5 steps**:
 
 ## 1. Enroll in the Apple Developer Program ($99 / year)
 <https://developer.apple.com/programs/enroll/> — enroll with your Apple ID and wait for activation (typically up to 48 hours).

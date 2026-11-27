@@ -17,7 +17,7 @@
 
 TEST(shm_audio_bus_64ch_lockfree_roundtrip) {
     char name[64];
-    std::snprintf(name, sizeof(name), "CrossLinkAudioBus_test_%u", unsigned(cl::shm_bus_now_ms() & 0xFFFFFF));
+    std::snprintf(name, sizeof(name), "CLAudioBus_t_%u", unsigned(cl::shm_bus_now_ms() & 0xFFFFFF));
     cl::ShmAudioBus driver, host;  // two independent mappings of the same segment
     REQUIRE(driver.open(name));
     REQUIRE(host.open(name));

@@ -4,6 +4,8 @@ struct CameraSettingsView: View {
     @EnvironmentObject var engine: CameraEngine
     @Environment(\.studio) private var s
     @Environment(\.dismiss) private var dismiss
+    @State private var newExtraIp: String = ""
+    @State private var newExtraPort: String = "5008"
 
     var body: some View {
         NavigationStack {
@@ -130,12 +132,89 @@ struct CameraSettingsView: View {
                             Divider().overlay(s.border)
                             Stepper(value: $engine.tallyPort, in: 1024...65535) {
                                 HStack {
-                                    Text(tr("Порт Tally / Інтерком", "Tally / Intercom Port"))
+                                    Text(tr("Порт Tally / Оптика", "Tally / Optics Port"))
                                         .font(.system(size: 13)).foregroundColor(s.text)
                                     Spacer()
                                     Text("\(engine.tallyPort)")
                                         .font(.system(size: 13, weight: .semibold, design: .monospaced))
                                         .foregroundColor(s.text2)
+                                }
+                            }
+                            Divider().overlay(s.border)
+                            // Multi-Target Extra Video Receivers
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(tr("Додаткові приймачі відео (Fan-Out)", "Additional Video Receivers (Fan-Out)"))
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundColor(s.text)
+                                ForEach(engine.extraVideoDestinations) { dst in
+                                    HStack {
+                                        Text("\(dst.name) (\(dst.host):\(dst.port))")
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .foregroundColor(s.text2)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Button {
+                                            engine.removeExtraVideoDestination(dst)
+                                        } label: {
+                                            Image(systemName: "minus.circle.fill")
+                                                .foregroundColor(s.red)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                HStack(spacing: 6) {
+                                    TextField("IP / Multicast", text: $newExtraIp)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .keyboardType(.decimalPad)
+                                        .padding(.horizontal, 8)
+                                        .frame(height: 30)
+                                        .background(RoundedRectangle(cornerRadius: 6).fill(s.surface2))
+                                    TextField("5008", text: $newExtraPort)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .keyboardType(.numberPad)
+                                        .frame(width: 60, height: 30)
+                                        .multilineTextAlignment(.center)
+                                        .background(RoundedRectangle(cornerRadius: 6).fill(s.surface2))
+                                    Button(tr("+ Дод.", "+ Add")) {
+                                        engine.addExtraVideoDestination(
+                                            host: newExtraIp,
+                                            port: Int(newExtraPort) ?? 5008
+                                        )
+                                        newExtraIp = ""
+                                    }
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(s.primaryFg)
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 30)
+                                    .background(RoundedRectangle(cornerRadius: 6).fill(s.primaryBg))
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            Divider().overlay(s.border)
+                            // Independent Intercom Receiver
+                            Toggle(isOn: $engine.useSeparateIntercom) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(tr("Окремий приймач інтеркому", "Separate Intercom Receiver"))
+                                        .font(.system(size: 13))
+                                        .foregroundColor(s.text)
+                                    Text(tr("Напр. LanVid Intercom (:5024) окремо від відео/OBS",
+                                            "e.g. LanVid Intercom (:5024) separate from video/OBS"))
+                                        .font(.system(size: 11))
+                                        .foregroundColor(s.text3)
+                                }
+                            }
+                            .tint(s.green)
+                            if engine.useSeparateIntercom {
+                                labeledField(tr("IP інтеркому", "Intercom IP"), text: $engine.intercomIp, decimal: true)
+                                Stepper(value: $engine.intercomPort, in: 1024...65535) {
+                                    HStack {
+                                        Text(tr("Порт інтеркому (UDP)", "Intercom Port (UDP)"))
+                                            .font(.system(size: 13)).foregroundColor(s.text)
+                                        Spacer()
+                                        Text("\(engine.intercomPort)")
+                                            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                            .foregroundColor(s.text2)
+                                    }
                                 }
                             }
                             Divider().overlay(s.border)
@@ -201,7 +280,7 @@ struct CameraSettingsView: View {
                             HStack {
                                 Text(tr("Версія", "Version")).font(.system(size: 13)).foregroundColor(s.text)
                                 Spacer()
-                                Text("3.1.0 · Local LAN Only")
+                                Text(Self.appVersionLabel)
                                     .font(.system(size: 11.5, design: .monospaced))
                                     .foregroundColor(s.text3)
                             }
@@ -224,6 +303,12 @@ struct CameraSettingsView: View {
         .onDisappear {
             engine.reconnectIfEndpointChanged()
         }
+    }
+
+    private static var appVersionLabel: String {
+        let ver = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.1.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        return build.isEmpty ? "\(ver) · Local LAN Only" : "\(ver) (\(build)) · Local LAN Only"
     }
 
     private func sectionBlock<Content: View>(title: String, @ViewBuilder content: @escaping () -> Content) -> some View {

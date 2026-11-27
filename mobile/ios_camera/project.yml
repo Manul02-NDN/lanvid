@@ -56,4 +56,7 @@ targets:
         NSMicrophoneUsageDescription: "LanVid Camera uses your microphone to record program audio and enable full-duplex studio intercom (IFB / PTT) with the director."
         NSLocalNetworkUsageDescription: "LanVid Camera discovers and connects to LanVid Video / Studio and paired iPhone Duo cameras on your local Wi-Fi network."
         NSBonjourServices: [_lanvid._udp]
+        CFBundleURLTypes:
+          - CFBundleURLName: com.manul02.lanvid.camera
+            CFBundleURLSchemes: [lanvid]
         ITSAppUsesNonExemptEncryption: false

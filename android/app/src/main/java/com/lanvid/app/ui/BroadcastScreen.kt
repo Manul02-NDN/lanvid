@@ -213,7 +213,14 @@ fun BroadcastScreen(
             HudUiState(
                 destIp = prefs.getString("destIp", "") ?: "",
                 destPort = prefs.getInt("destPort", 5006),
-                destName = prefs.getString("destName", "") ?: ""
+                destTallyPort = prefs.getInt("destTallyPort", 5022),
+                destName = prefs.getString("destName", "") ?: "",
+                extraVideoDestinations = (prefs.getString("extraVideoDests", "") ?: "")
+                    .split(',').map { it.trim() }.filter { it.contains(':') },
+                useSeparateIntercom = prefs.getBoolean("useSeparateIntercom", false),
+                intercomIp = prefs.getString("intercomIp", "") ?: "",
+                intercomPort = prefs.getInt("intercomPort", 5024),
+                intercomName = prefs.getString("intercomName", "") ?: ""
             )
         )
     }
@@ -223,7 +230,8 @@ fun BroadcastScreen(
     var showEncoderDrawer by remember { mutableStateOf(false) }
     var hudHidden by remember { mutableStateOf(false) }
 
-    val lanPeers = discovery.peers
+    val videoPeers = discovery.videoPeers
+    val intercomPeers = discovery.intercomPeers
     val scanning = discovery.scanning
     var txStats by remember { mutableStateOf(SenderStats()) }
     var rxStats by remember { mutableStateOf(ReceiverStats()) }
@@ -232,6 +240,7 @@ fun BroadcastScreen(
     var batteryTempC by remember { mutableIntStateOf(34) }
     var proState by remember { mutableStateOf(ProCameraState()) }
     var tallyControlConnected by remember { mutableStateOf(false) }
+    var dedicatedIntercomConnected by remember { mutableStateOf(false) }
 
     // Interactive viewfinder touch state (reticle, EV, MF, Zoom, toast)
     var reticleNorm by remember { mutableStateOf<Offset?>(null) }
@@ -274,24 +283,63 @@ fun BroadcastScreen(
         }
     }
 
-    fun saveTargetPc(ip: String, port: Int, name: String) {
+    fun saveTargetPc(ip: String, port: Int, tallyPort: Int, name: String) {
         prefs.edit()
             .putString("destIp", ip)
             .putInt("destPort", port)
+            .putInt("destTallyPort", tallyPort)
             .putString("destName", name)
             .apply()
     }
 
-    // Auto-select the best discovered [VIDEO] or [STUDIO] PC automatically so the user just taps GO LIVE or Intercom!
-    LaunchedEffect(lanPeers.size, ui.senderActive, proState.intercomActive) {
-        if (ui.senderActive || proState.intercomActive || lanPeers.isEmpty()) return@LaunchedEffect
-        val preferred = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
-            ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+    fun saveRoutingPrefs(state: HudUiState) {
+        prefs.edit()
+            .putString("destIp", state.destIp)
+            .putInt("destPort", state.destPort)
+            .putInt("destTallyPort", state.destTallyPort)
+            .putString("destName", state.destName)
+            .putString("extraVideoDests", state.extraVideoDestinations.joinToString(","))
+            .putBoolean("useSeparateIntercom", state.useSeparateIntercom)
+            .putString("intercomIp", state.intercomIp)
+            .putInt("intercomPort", state.intercomPort)
+            .putString("intercomName", state.intercomName)
+            .apply()
+    }
+
+    fun applyExtraDestinationsToNative(extras: List<String>, primaryIp: String, primaryPort: Int) {
+        LanVidNative.nativeSenderClearExtraDestinations()
+        val primaryKey = "${primaryIp.trim()}:$primaryPort"
+        for (entry in extras) {
+            val clean = entry.trim()
+            if (clean.isEmpty() || clean == primaryKey) continue
+            val idx = clean.lastIndexOf(':')
+            if (idx <= 0 || idx >= clean.length - 1) continue
+            val ip = clean.substring(0, idx).trim()
+            val port = clean.substring(idx + 1).trim().toIntOrNull() ?: continue
+            if (ip.isNotEmpty() && port in 1..65535) {
+                LanVidNative.nativeSenderAddDestination(ip, port)
+            }
+        }
+    }
+
+    // Keep extra multi-target fan-out destinations synced live with native sender!
+    LaunchedEffect(ui.senderActive, ui.destIp, ui.destPort, ui.extraVideoDestinations) {
+        withContext(Dispatchers.IO) {
+            applyExtraDestinationsToNative(ui.extraVideoDestinations, ui.destIp, ui.destPort)
+        }
+    }
+
+    // Auto-select ONLY from videoPeers (NEVER LanVid Intercom :5024 or audio receivers!)
+    LaunchedEffect(videoPeers.size, ui.senderActive, proState.intercomActive) {
+        if (ui.senderActive || proState.intercomActive || videoPeers.isEmpty()) return@LaunchedEffect
+        val preferred = videoPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
+            ?: videoPeers.firstOrNull()
             ?: return@LaunchedEffect
-        val currentStillOnline = lanPeers.any { it.ip == ui.destIp && it.port == ui.destPort }
+        val currentStillOnline = videoPeers.any { it.ip == ui.destIp && it.port == ui.destPort }
         if (ui.destIp.isBlank() || ui.destIp == "192.168.1.100" || (!userManuallyPickedIp && !currentStillOnline)) {
-            ui = ui.copy(destIp = preferred.ip, destPort = preferred.port, destName = preferred.name)
-            saveTargetPc(preferred.ip, preferred.port, preferred.name)
+            val tp = if (preferred.tallyPort > 0) preferred.tallyPort else 5022
+            ui = ui.copy(destIp = preferred.ip, destPort = preferred.port, destTallyPort = tp, destName = preferred.name)
+            saveTargetPc(preferred.ip, preferred.port, tp, preferred.name)
         }
     }
 
@@ -337,154 +385,30 @@ fun BroadcastScreen(
         )
     }
 
-    // 1) Shared Studio Control Link (:5022 Tally / ConfigSync / Intercom transport)
-    // Active whenever EITHER video stream OR independent intercom is ON!
-    val studioControlNeeded = ui.mode == BroadcastMode.SENDER && (ui.senderActive || proState.intercomActive)
-    LaunchedEffect(studioControlNeeded, ui.destIp) {
+    // 1a) Video Studio Tally / ConfigSync Control Link (e.g. OBS :5022)
+    // Active while streaming video OR while Intercom shares the same Studio endpoint!
+    val studioControlNeeded = ui.mode == BroadcastMode.SENDER &&
+        (ui.senderActive || (proState.intercomActive && !ui.isIntercomSplit))
+    LaunchedEffect(studioControlNeeded, ui.destIp, ui.destTallyPort) {
         if (studioControlNeeded && ui.destIp.isNotBlank()) {
-            val destIp = ui.destIp
+            val destIp = ui.destIp.trim()
+            val tPort = if (ui.destTallyPort > 0) ui.destTallyPort else 5022
             val label = proState.cameraLabel
             val connected = withContext(Dispatchers.IO) {
-                val ok = LanVidNative.nativeTallyConnect(destIp, 5022, cameraId, label)
+                val ok = LanVidNative.nativeTallyConnect(destIp, tPort, cameraId, label)
                 if (ok) {
-                    if (proState.intercomActive) {
+                    if (proState.intercomActive && !ui.isIntercomSplit) {
                         LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
-                    } else {
+                    } else if (!ui.isIntercomSplit) {
                         LanVidNative.nativeIntercomSetState(false, true, 0f, 0f)
                     }
                 }
                 ok
             }
-            if (!connected) {
-                tallyControlConnected = false
-                return@LaunchedEffect
-            }
-            tallyControlConnected = true
-
+            tallyControlConnected = connected
+            if (!connected) return@LaunchedEffect
             try {
-                var tickCount = 0
-                while (true) {
-                    // 100 Hz poll when Intercom audio is ON (matches 10 ms Opus frames), 50 Hz otherwise
-                    val pollMs = if (proState.intercomActive) 10L else 20L
-                    delay(pollMs)
-                    tickCount++
-                    val bat = battery.coerceIn(0, 100)
-                    val temp = batteryTempC
-                    val raw = withContext(Dispatchers.IO) {
-                        LanVidNative.nativeTallyPollJson(bat, temp)
-                    }
-                    val uiRefreshMod = if (proState.intercomActive) 10 else 5
-                    if (tickCount % uiRefreshMod != 0) continue // UI state refresh at ~10 Hz
-                    if (raw.isNotEmpty()) {
-                        runCatching {
-                            val obj = JSONObject(raw)
-                            val tVal = obj.optInt("tally", obj.optInt("state", 0))
-                            val tState = when (tVal) {
-                                2 -> TallyStatus.PROGRAM
-                                1 -> TallyStatus.PREVIEW
-                                else -> TallyStatus.STANDBY
-                            }
-                            val newNum = obj.optInt("assignedCamNumber", proState.assignedCamNumber)
-                            val newTag = obj.optString("assignedCamTag", proState.assignedCamTag)
-                            val syncRev = obj.optLong("syncRev", 0L)
-                            val synced = obj.optBoolean("configSynced", false)
-                            val delayMs = obj.optInt("syncDelayMs", proState.syncedDelayMs).coerceIn(5, 250)
-                            val fixedDelay = obj.optBoolean("syncFixedDelay", proState.syncedFixedDelay)
-                            val nextLabel = newTag.ifBlank { obj.optString("label", proState.cameraLabel) }
-                                .ifBlank { proState.cameraLabel }
-
-                            // Capture previous sync revision BEFORE updating proState!
-                            val prevSyncRev = proState.lastSyncRev
-                            proState = proState.copy(
-                                tally = tState,
-                                remoteRec = obj.optBoolean("remoteRec", obj.optInt("rec", 0) != 0),
-                                directorSpeaking = obj.optBoolean("directorSpeaking", obj.optInt("director_speaking", 0) != 0),
-                                duckingGain = obj.optDouble("ducking", obj.optDouble("duck", 1.0)).toFloat(),
-                                cameraLabel = nextLabel,
-                                assignedCamNumber = newNum,
-                                assignedCamTag = newTag,
-                                configSynced = synced,
-                                syncedDelayMs = delayMs,
-                                syncedFixedDelay = fixedDelay,
-                                lastSyncRev = maxOf(prevSyncRev, syncRev)
-                            )
-
-                            if (synced && syncRev > prevSyncRev) {
-                                val syncRes = obj.optInt("syncRes", -1)
-                                val syncCodec = obj.optInt("syncCodec", -1)
-                                val syncBitrateKbps = obj.optInt("syncBitrateKbps", 0)
-                                val syncFps = obj.optInt("syncFps", 0)
-                                val syncLens = obj.optInt("syncLens", -1)
-
-                                val targetRes = when (syncRes) {
-                                    0, 1 -> ResolutionPreset.HD_720
-                                    2 -> ResolutionPreset.FHD_1080
-                                    3 -> ResolutionPreset.UHD_4K
-                                    else -> ui.resolution
-                                }
-                                val targetCodec = when (syncCodec) {
-                                    0 -> VideoCodecOption.DCT
-                                    1 -> VideoCodecOption.H264
-                                    2 -> VideoCodecOption.H265
-                                    else -> ui.codec
-                                }
-                                val targetBitrateMbps = if (syncBitrateKbps >= 1000) {
-                                    (syncBitrateKbps / 1000.0).coerceIn(1.0, 150.0)
-                                } else ui.bitrateMbps
-                                val targetSource = if (syncLens == 3) CaptureSource.FRONT_CAM
-                                else if (syncLens in 0..2 && ui.source == CaptureSource.FRONT_CAM) CaptureSource.BACK_CAM
-                                else ui.source
-
-                                val prevFps = proState.fps.toIntOrNull() ?: 60
-                                val targetFps = if (syncFps >= 15) syncFps else prevFps
-
-                                val onlyBitrateChanged = (targetRes == ui.resolution &&
-                                    targetCodec == ui.codec &&
-                                    targetFps == prevFps &&
-                                    targetSource == ui.source &&
-                                    targetBitrateMbps != ui.bitrateMbps)
-
-                                val needRestartSender = (targetRes != ui.resolution || targetCodec != ui.codec || targetFps != prevFps)
-                                ui = ui.copy(
-                                    resolution = targetRes,
-                                    codec = targetCodec,
-                                    bitrateMbps = targetBitrateMbps,
-                                    source = targetSource
-                                )
-                                proState = proState.copy(
-                                    resolution = when (targetRes) {
-                                        ResolutionPreset.UHD_4K -> "4K UHD"
-                                        ResolutionPreset.FHD_1080 -> "1080p"
-                                        ResolutionPreset.HD_720 -> "720p"
-                                    },
-                                    codec = when (targetCodec) {
-                                        VideoCodecOption.H265 -> "H.265"
-                                        VideoCodecOption.H264 -> "H.264"
-                                        VideoCodecOption.DCT -> "DCT"
-                                    },
-                                    bitrateMbps = targetBitrateMbps.toFloat(),
-                                    fps = targetFps.toString(),
-                                    lens = if (syncLens == 3) "Front" else if (syncLens == 1) "0.5x" else if (syncLens == 2) "2x" else "1x"
-                                )
-                                if (onlyBitrateChanged && ui.senderActive) {
-                                    withContext(Dispatchers.IO) {
-                                        LanVidNative.nativeSetSenderBitrateKbps((targetBitrateMbps * 1000).toInt())
-                                    }
-                                } else if (needRestartSender && ui.senderActive) {
-                                    val encW = targetRes.width
-                                    val encH = targetRes.height
-                                    withContext(Dispatchers.IO) {
-                                        LanVidNative.nativeStartSender(
-                                            ui.destIp, ui.destPort, encW, encH, targetFps,
-                                            ui.quality, ui.fecGroup, ui.adaptive, targetCodec.id,
-                                            (targetBitrateMbps * 1000).toInt()
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                while (true) delay(1000L)
             } finally {
                 tallyControlConnected = false
                 withContext(NonCancellable + Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
@@ -492,13 +416,176 @@ fun BroadcastScreen(
         } else {
             tallyControlConnected = false
             withContext(Dispatchers.IO) { LanVidNative.nativeTallyDisconnect() }
-            proState = proState.copy(tally = TallyStatus.STANDBY, directorSpeaking = false, duckingGain = 1.0f)
+            proState = proState.copy(tally = TallyStatus.STANDBY)
+        }
+    }
+
+    // 1b) Dedicated Split Intercom Receiver Link (e.g. standalone LanVid Intercom :5024)
+    val dedicatedIntercomNeeded = ui.mode == BroadcastMode.SENDER && proState.intercomActive && ui.isIntercomSplit
+    LaunchedEffect(dedicatedIntercomNeeded, ui.effectiveIntercomIp, ui.effectiveIntercomPort) {
+        if (dedicatedIntercomNeeded && ui.effectiveIntercomIp.isNotBlank()) {
+            val icIp = ui.effectiveIntercomIp
+            val icPort = ui.effectiveIntercomPort
+            val label = proState.cameraLabel
+            val connected = withContext(Dispatchers.IO) {
+                val ok = LanVidNative.nativeIntercomConnect(icIp, icPort, cameraId, label)
+                if (ok) {
+                    LanVidNative.nativeIntercomSetState(proState.pttHeld || proState.latchTalk, proState.ifbMuted, proState.ifbGain, 0f)
+                }
+                ok
+            }
+            dedicatedIntercomConnected = connected
+            if (!connected) return@LaunchedEffect
+            try {
+                while (true) delay(1000L)
+            } finally {
+                dedicatedIntercomConnected = false
+                withContext(NonCancellable + Dispatchers.IO) { LanVidNative.nativeIntercomDisconnect() }
+            }
+        } else {
+            dedicatedIntercomConnected = false
+            withContext(Dispatchers.IO) { LanVidNative.nativeIntercomDisconnect() }
+        }
+    }
+
+    // 1c) Unified Polling Loop for BOTH Tally (g_ti) and Dedicated Intercom (g_intercom)
+    val anyControlLinkUp = tallyControlConnected || dedicatedIntercomConnected
+    LaunchedEffect(anyControlLinkUp) {
+        if (!anyControlLinkUp) {
+            proState = proState.copy(directorSpeaking = false, duckingGain = 1.0f)
+            return@LaunchedEffect
+        }
+        var tickCount = 0
+        while (true) {
+            val pollMs = if (proState.intercomActive) 10L else 20L
+            delay(pollMs)
+            tickCount++
+            val bat = battery.coerceIn(0, 100)
+            val temp = batteryTempC
+            val raw = withContext(Dispatchers.IO) {
+                LanVidNative.nativeTallyPollJson(bat, temp)
+            }
+            val uiRefreshMod = if (proState.intercomActive) 10 else 5
+            if (tickCount % uiRefreshMod != 0) continue
+            if (raw.isNotEmpty()) {
+                runCatching {
+                    val obj = JSONObject(raw)
+                    val tVal = obj.optInt("tally", obj.optInt("state", 0))
+                    val tState = when (tVal) {
+                        2 -> TallyStatus.PROGRAM
+                        1 -> TallyStatus.PREVIEW
+                        else -> TallyStatus.STANDBY
+                    }
+                    val newNum = obj.optInt("assignedCamNumber", proState.assignedCamNumber)
+                    val newTag = obj.optString("assignedCamTag", proState.assignedCamTag)
+                    val syncRev = obj.optLong("syncRev", 0L)
+                    val synced = obj.optBoolean("configSynced", false)
+                    val delayMs = obj.optInt("syncDelayMs", proState.syncedDelayMs).coerceIn(5, 250)
+                    val fixedDelay = obj.optBoolean("syncFixedDelay", proState.syncedFixedDelay)
+                    val nextLabel = newTag.ifBlank { obj.optString("label", proState.cameraLabel) }
+                        .ifBlank { proState.cameraLabel }
+
+                    val prevSyncRev = proState.lastSyncRev
+                    proState = proState.copy(
+                        tally = tState,
+                        remoteRec = obj.optBoolean("remoteRec", obj.optInt("rec", 0) != 0),
+                        directorSpeaking = obj.optBoolean("directorSpeaking", obj.optInt("director_speaking", 0) != 0),
+                        duckingGain = obj.optDouble("ducking", obj.optDouble("duck", 1.0)).toFloat(),
+                        cameraLabel = nextLabel,
+                        assignedCamNumber = newNum,
+                        assignedCamTag = newTag,
+                        configSynced = synced,
+                        syncedDelayMs = delayMs,
+                        syncedFixedDelay = fixedDelay,
+                        lastSyncRev = maxOf(prevSyncRev, syncRev)
+                    )
+
+                    if (synced && syncRev > prevSyncRev) {
+                        val syncRes = obj.optInt("syncRes", -1)
+                        val syncCodec = obj.optInt("syncCodec", -1)
+                        val syncBitrateKbps = obj.optInt("syncBitrateKbps", 0)
+                        val syncFps = obj.optInt("syncFps", 0)
+                        val syncLens = obj.optInt("syncLens", -1)
+
+                        val targetRes = when (syncRes) {
+                            0, 1 -> ResolutionPreset.HD_720
+                            2 -> ResolutionPreset.FHD_1080
+                            3 -> ResolutionPreset.UHD_4K
+                            else -> ui.resolution
+                        }
+                        val targetCodec = when (syncCodec) {
+                            0 -> VideoCodecOption.DCT
+                            1 -> VideoCodecOption.H264
+                            2 -> VideoCodecOption.H265
+                            else -> ui.codec
+                        }
+                        val targetBitrateMbps = if (syncBitrateKbps >= 1000) {
+                            (syncBitrateKbps / 1000.0).coerceIn(1.0, 150.0)
+                        } else ui.bitrateMbps
+                        val targetSource = if (syncLens == 3) CaptureSource.FRONT_CAM
+                        else if (syncLens in 0..2 && ui.source == CaptureSource.FRONT_CAM) CaptureSource.BACK_CAM
+                        else ui.source
+
+                        val prevFps = proState.fps.toIntOrNull() ?: 60
+                        val targetFps = if (syncFps >= 15) syncFps else prevFps
+
+                        val onlyBitrateChanged = (targetRes == ui.resolution &&
+                            targetCodec == ui.codec &&
+                            targetFps == prevFps &&
+                            targetSource == ui.source &&
+                            targetBitrateMbps != ui.bitrateMbps)
+
+                        val needRestartSender = (targetRes != ui.resolution || targetCodec != ui.codec || targetFps != prevFps)
+                        ui = ui.copy(
+                            resolution = targetRes,
+                            codec = targetCodec,
+                            bitrateMbps = targetBitrateMbps,
+                            source = targetSource
+                        )
+                        proState = proState.copy(
+                            resolution = when (targetRes) {
+                                ResolutionPreset.UHD_4K -> "4K UHD"
+                                ResolutionPreset.FHD_1080 -> "1080p"
+                                ResolutionPreset.HD_720 -> "720p"
+                            },
+                            codec = when (targetCodec) {
+                                VideoCodecOption.H265 -> "H.265"
+                                VideoCodecOption.H264 -> "H.264"
+                                VideoCodecOption.DCT -> "DCT"
+                            },
+                            bitrateMbps = targetBitrateMbps.toFloat(),
+                            fps = targetFps.toString(),
+                            lens = if (syncLens == 3) "Front" else if (syncLens == 1) "0.5x" else if (syncLens == 2) "2x" else "1x"
+                        )
+                        if (onlyBitrateChanged && ui.senderActive) {
+                            withContext(Dispatchers.IO) {
+                                LanVidNative.nativeSetSenderBitrateKbps((targetBitrateMbps * 1000).toInt())
+                            }
+                        } else if (needRestartSender && ui.senderActive) {
+                            val encW = targetRes.width
+                            val encH = targetRes.height
+                            val snapExtras = ui.extraVideoDestinations
+                            val snapIp = ui.destIp
+                            val snapPort = ui.destPort
+                            withContext(Dispatchers.IO) {
+                                LanVidNative.nativeStartSender(
+                                    snapIp, snapPort, encW, encH, targetFps,
+                                    ui.quality, ui.fecGroup, ui.adaptive, targetCodec.id,
+                                    (targetBitrateMbps * 1000).toInt()
+                                )
+                                applyExtraDestinationsToNative(snapExtras, snapIp, snapPort)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     // 2) Independent Full-Duplex Intercom Audio Hardware (runs ONLY while proState.intercomActive == true!)
-    LaunchedEffect(ui.mode, proState.intercomActive, tallyControlConnected) {
-        if (ui.mode != BroadcastMode.SENDER || !proState.intercomActive || !tallyControlConnected) {
+    val intercomLinkReady = if (ui.isIntercomSplit) dedicatedIntercomConnected else tallyControlConnected
+    LaunchedEffect(ui.mode, proState.intercomActive, intercomLinkReady) {
+        if (ui.mode != BroadcastMode.SENDER || !proState.intercomActive || !intercomLinkReady) {
             return@LaunchedEffect
         }
         withContext(Dispatchers.IO) {
@@ -662,7 +749,7 @@ fun BroadcastScreen(
             val resData = res.data
             scope.launch {
                 val ok = withContext(Dispatchers.IO) {
-                    LanVidNative.nativeStartSender(
+                    val started = LanVidNative.nativeStartSender(
                         snap.destIp,
                         snap.destPort,
                         capW,
@@ -674,6 +761,10 @@ fun BroadcastScreen(
                         snap.codec.id,
                         (snap.bitrateMbps * 1000).toInt()
                     )
+                    if (started) {
+                        applyExtraDestinationsToNative(snap.extraVideoDestinations, snap.destIp, snap.destPort)
+                    }
+                    started
                 }
                 if (ok) {
                     val svcIntent = Intent(context, ScreenCaptureService::class.java).apply {
@@ -749,26 +840,47 @@ fun BroadcastScreen(
 
     fun ensureIntercomActive(): Boolean {
         if (proState.intercomActive) return true
+        if (ui.isIntercomSplit && ui.intercomIp.isNotBlank()) {
+            proState = proState.copy(intercomActive = true)
+            val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            postTouchToast(if (hasMicPerm) "Інтерком → ${ui.effectiveIntercomIp}:${ui.effectiveIntercomPort}" else "Інтерком: лише прослуховування")
+            return true
+        }
         var targetIp = ui.destIp
         var targetPort = ui.destPort
+        var targetTallyPort = ui.destTallyPort
         var targetName = ui.destName
         if (targetIp.isBlank()) {
-            val auto = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
-                ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+            val dedicatedIc = intercomPeers.firstOrNull { it.isIntercomPeer }
+            if (dedicatedIc != null) {
+                val nextUi = ui.copy(
+                    useSeparateIntercom = true,
+                    intercomIp = dedicatedIc.ip,
+                    intercomPort = dedicatedIc.port,
+                    intercomName = dedicatedIc.name
+                )
+                ui = nextUi
+                saveRoutingPrefs(nextUi)
+                proState = proState.copy(intercomActive = true)
+                postTouchToast("Інтерком → ${dedicatedIc.name}")
+                return true
+            }
+            val auto = videoPeers.firstOrNull()
             if (auto != null) {
                 targetIp = auto.ip
                 targetPort = auto.port
+                targetTallyPort = if (auto.tallyPort > 0) auto.tallyPort else 5022
                 targetName = auto.name
             } else {
                 selectedTool = HudTool.NETWORK
                 discovery.refreshNow()
-                ui = ui.copy(statusMessage = "ПК не знайдено — вкажіть IP або відкрийте LanVid на ПК")
+                ui = ui.copy(statusMessage = "Приймач інтеркому не знайдено — вкажіть IP або відкрийте LanVid на ПК")
                 return false
             }
         }
         if (targetIp != ui.destIp || targetPort != ui.destPort || targetName != ui.destName) {
-            ui = ui.copy(destIp = targetIp, destPort = targetPort, destName = targetName)
-            saveTargetPc(targetIp, targetPort, targetName)
+            ui = ui.copy(destIp = targetIp, destPort = targetPort, destTallyPort = targetTallyPort, destName = targetName)
+            saveTargetPc(targetIp, targetPort, targetTallyPort, targetName)
         }
         proState = proState.copy(intercomActive = true)
         val hasMicPerm = context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -812,6 +924,7 @@ fun BroadcastScreen(
             LanVidNative.nativeStopSender()
             LanVidNative.nativeStopReceiver()
             LanVidNative.nativeTallyDisconnect()
+            LanVidNative.nativeIntercomDisconnect()
         }
     }
 
@@ -819,28 +932,30 @@ fun BroadcastScreen(
         if (isTogglingLive) return
         if (ui.mode == BroadcastMode.SENDER) {
             if (!ui.senderActive) {
-                // Auto-resolve best discovered PC if none selected yet
+                // Auto-resolve best discovered VIDEO receiver if none selected yet (never Intercom/Audio!)
                 var targetIp = overridePeer?.ip ?: ui.destIp
                 var targetPort = overridePeer?.port ?: ui.destPort
+                var targetTallyPort = overridePeer?.tallyPort?.takeIf { it > 0 } ?: ui.destTallyPort
                 var targetName = overridePeer?.name ?: ui.destName
                 if (targetIp.isBlank()) {
-                    val auto = lanPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
-                        ?: lanPeers.firstOrNull { !it.role.equals("audio", ignoreCase = true) }
+                    val auto = videoPeers.firstOrNull { it.role.equals("video", ignoreCase = true) }
+                        ?: videoPeers.firstOrNull()
                     if (auto != null) {
                         targetIp = auto.ip
                         targetPort = auto.port
+                        targetTallyPort = if (auto.tallyPort > 0) auto.tallyPort else 5022
                         targetName = auto.name
                     } else {
                         selectedTool = HudTool.NETWORK
                         discovery.refreshNow()
-                        ui = ui.copy(statusMessage = "ПК не знайдено — відкрийте LanVid Video на ПК у тій же Wi-Fi мережі")
+                        ui = ui.copy(statusMessage = "ПК не знайдено — відкрийте OBS або LanVid Video на ПК у тій же Wi-Fi мережі")
                         return
                     }
                 }
-                if (targetIp != ui.destIp || targetPort != ui.destPort || targetName != ui.destName) {
-                    ui = ui.copy(destIp = targetIp, destPort = targetPort, destName = targetName)
+                if (targetIp != ui.destIp || targetPort != ui.destPort || targetName != ui.destName || targetTallyPort != ui.destTallyPort) {
+                    ui = ui.copy(destIp = targetIp, destPort = targetPort, destTallyPort = targetTallyPort, destName = targetName)
                 }
-                saveTargetPc(targetIp, targetPort, targetName)
+                saveTargetPc(targetIp, targetPort, targetTallyPort, targetName)
 
                 if (ui.source == CaptureSource.SCREEN) {
                     val mpm = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -852,7 +967,7 @@ fun BroadcastScreen(
                     val snap = ui
                     scope.launch {
                         val ok = withContext(Dispatchers.IO) {
-                            LanVidNative.nativeStartSender(
+                            val started = LanVidNative.nativeStartSender(
                                 targetIp,
                                 targetPort,
                                 encW,
@@ -864,13 +979,18 @@ fun BroadcastScreen(
                                 snap.codec.id,
                                 (snap.bitrateMbps * 1000).toInt()
                             )
+                            if (started) {
+                                applyExtraDestinationsToNative(snap.extraVideoDestinations, targetIp, targetPort)
+                            }
+                            started
                         }
                         if (ok) {
                             cameraStreamer.setStreamingEnabled(true)
                             if (snap.audioSource == AudioSourceOption.MIC) {
                                 withContext(Dispatchers.IO) { micStreamer.start(null) }
                             }
-                            val lbl = if (targetName.isNotBlank()) "$targetName ($targetIp:$targetPort)" else "$targetIp:$targetPort"
+                            val extraSuffix = if (snap.activeVideoReceiverCount > 1) " (+${snap.activeVideoReceiverCount - 1})" else ""
+                            val lbl = if (targetName.isNotBlank()) "$targetName ($targetIp:$targetPort)$extraSuffix" else "$targetIp:$targetPort$extraSuffix"
                             ui = ui.copy(
                                 senderActive = true,
                                 statusMessage = "LIVE -> $lbl · ${encW}×${encH}"
@@ -1414,6 +1534,7 @@ fun BroadcastScreen(
                                                 fpsVal, nextUi.quality, nextUi.fecGroup, nextUi.adaptive,
                                                 nextCodec.id, (nextMbps * 1000).toInt()
                                             )
+                                            applyExtraDestinationsToNative(nextUi.extraVideoDestinations, nextUi.destIp, nextUi.destPort)
                                         } else if (nextMbps != prevUi.bitrateMbps) {
                                             LanVidNative.nativeSetSenderBitrateKbps((nextMbps * 1000).toInt())
                                         }
@@ -1432,7 +1553,8 @@ fun BroadcastScreen(
                             simdInfo = simdInfo,
                             txStats = txStats,
                             rxStats = rxStats,
-                            lanPeers = lanPeers,
+                            videoPeers = videoPeers,
+                            intercomPeers = intercomPeers,
                             scanning = scanning,
                             onScanLan = { discovery.refreshNow() },
                             onSelectPeerAndGoLive = { peer ->
@@ -1440,11 +1562,45 @@ fun BroadcastScreen(
                                 selectedTool = null
                                 toggleLive(overridePeer = peer)
                             },
+                            onToggleExtraVideoDest = { key ->
+                                val nextList = if (ui.extraVideoDestinations.contains(key)) {
+                                    ui.extraVideoDestinations.filter { it != key }
+                                } else {
+                                    (ui.extraVideoDestinations + key).distinct().take(7)
+                                }
+                                val nextUi = ui.copy(extraVideoDestinations = nextList)
+                                ui = nextUi
+                                saveRoutingPrefs(nextUi)
+                                postTouchToast(
+                                    if (nextList.contains(key)) "Додано відео → $key" else "Прибрано відео: $key"
+                                )
+                            },
+                            onSelectIntercomPeer = { peer ->
+                                val nextUi = if (peer == null) {
+                                    ui.copy(useSeparateIntercom = false)
+                                } else {
+                                    ui.copy(
+                                        useSeparateIntercom = true,
+                                        intercomIp = peer.ip,
+                                        intercomPort = peer.port,
+                                        intercomName = peer.name
+                                    )
+                                }
+                                ui = nextUi
+                                saveRoutingPrefs(nextUi)
+                                postTouchToast(
+                                    if (peer == null) "Інтерком: як у відео-студії"
+                                    else "Інтерком → ${peer.name} (:${peer.port})"
+                                )
+                            },
                             onUpdate = { next ->
                                 val prevUi = ui
-                                if (next.destIp != ui.destIp || next.destPort != ui.destPort) {
+                                if (next.destIp != ui.destIp || next.destPort != ui.destPort || next.destTallyPort != ui.destTallyPort ||
+                                    next.extraVideoDestinations != ui.extraVideoDestinations ||
+                                    next.useSeparateIntercom != ui.useSeparateIntercom ||
+                                    next.intercomIp != ui.intercomIp || next.intercomPort != ui.intercomPort) {
                                     userManuallyPickedIp = true
-                                    saveTargetPc(next.destIp, next.destPort, next.destName)
+                                    saveRoutingPrefs(next)
                                 }
                                 ui = next
                                 if (next.resolution != prevUi.resolution || next.codec != prevUi.codec || next.bitrateMbps != prevUi.bitrateMbps) {
@@ -1473,6 +1629,7 @@ fun BroadcastScreen(
                                                     fpsVal, next.quality, next.fecGroup, next.adaptive,
                                                     next.codec.id, (next.bitrateMbps * 1000).toInt()
                                                 )
+                                                applyExtraDestinationsToNative(next.extraVideoDestinations, next.destIp, next.destPort)
                                             } else if (next.bitrateMbps != prevUi.bitrateMbps) {
                                                 LanVidNative.nativeSetSenderBitrateKbps((next.bitrateMbps * 1000).toInt())
                                             }
@@ -1627,7 +1784,8 @@ private fun TopHudBar(
                     Chip("%.1f fps".format(txStats.fps), if (txStats.fps >= 55.0) Studio.green else Studio.amber)
                 }
                 if (ui.destIp.isNotBlank()) {
-                    val pcLbl = if (ui.destName.isNotBlank()) "● ${ui.destName}" else "● ${ui.destIp}:${ui.destPort}"
+                    val extraTag = if (ui.activeVideoReceiverCount > 1) " +${ui.activeVideoReceiverCount - 1}" else ""
+                    val pcLbl = if (ui.destName.isNotBlank()) "● ${ui.destName}$extraTag" else "● ${ui.destIp}:${ui.destPort}$extraTag"
                     Chip(pcLbl, Studio.green)
                 }
             } else {

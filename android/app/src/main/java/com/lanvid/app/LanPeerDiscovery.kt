@@ -46,6 +46,8 @@ class LanPeerDiscovery(context: Context) {
     private var resolveInFlight = false
 
     val peers = mutableStateListOf<LanPeer>()
+    val videoPeers = mutableStateListOf<LanPeer>()
+    val intercomPeers = mutableStateListOf<LanPeer>()
     var scanning by mutableStateOf(false)
         private set
 
@@ -95,12 +97,15 @@ class LanPeerDiscovery(context: Context) {
         main.post { scanning = true }
         runCatching {
             io.execute {
-                val found = runCatching { LanVidNative.scanLanPeers(600) }.getOrDefault(emptyList())
+                val foundVideo = runCatching { LanVidNative.scanLanPeers(450) }.getOrDefault(emptyList())
+                val foundIntercom = runCatching {
+                    LanVidNative.scanLanPeersOnPort(300, 5025, defaultRole = "intercom")
+                }.getOrDefault(emptyList())
                 synchronized(peersLock) {
                     udpPeers.clear()
-                    for (p in found) {
+                    for (p in foundVideo + foundIntercom) {
                         if (p.ip.isBlank() || p.ip == "127.0.0.1" || p.ip == "0.0.0.0") continue
-                        udpPeers["${p.ip}:${p.port}"] = p
+                        udpPeers["${p.ip}:${p.port}:${p.role.lowercase()}"] = p
                     }
                 }
                 publishMerged()
@@ -145,18 +150,27 @@ class LanPeerDiscovery(context: Context) {
                     val ip = s.hostAddresses.firstOrNull { it is Inet4Address && !it.isLoopbackAddress }?.hostAddress
                         ?: return
                     if (s.port <= 0) return
-                    val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
+                    val role = (s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: "").lowercase()
+                    val vport = s.attributes["vport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() }
+                    val tport = s.attributes["tport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() } ?: 5022
+                    val iport = s.attributes["iport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() }
+                    val effectivePort = when (role) {
+                        "intercom" -> iport ?: tport.takeIf { it > 0 } ?: s.port
+                        "audio" -> s.port
+                        else -> vport ?: if (s.port == 5022) 5006 else s.port
+                    }
                     val peer = LanPeer(
                         ip = ip,
-                        port = s.port,
+                        port = effectivePort,
                         name = s.serviceName ?: "LanVid PC",
                         os = "lan",
                         simd = "mDNS",
                         rttMs = 1,
-                        role = role
+                        role = role.ifBlank { "video" },
+                        tallyPort = tport
                     )
                     synchronized(peersLock) {
-                        mdnsPeers["${peer.ip}:${peer.port}"] = peer
+                        mdnsPeers["${peer.ip}:${peer.port}:${peer.role.lowercase()}"] = peer
                         activeInfoCallbacks.remove(this)
                     }
                     publishMerged()
@@ -202,18 +216,27 @@ class LanPeerDiscovery(context: Context) {
                     if (host != null && !host.isLoopbackAddress && s.port > 0) {
                         val ip = host.hostAddress
                         if (ip != null) {
-                            val role = s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: ""
+                            val role = (s.attributes["role"]?.let { String(it, Charsets.UTF_8) } ?: "").lowercase()
+                            val vport = s.attributes["vport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() }
+                            val tport = s.attributes["tport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() } ?: 5022
+                            val iport = s.attributes["iport"]?.let { String(it, Charsets.UTF_8).toIntOrNull() }
+                            val effectivePort = when (role) {
+                                "intercom" -> iport ?: tport.takeIf { it > 0 } ?: s.port
+                                "audio" -> s.port
+                                else -> vport ?: if (s.port == 5022) 5006 else s.port
+                            }
                             val peer = LanPeer(
                                 ip = ip,
-                                port = s.port,
+                                port = effectivePort,
                                 name = s.serviceName ?: "LanVid PC",
                                 os = "lan",
                                 simd = "mDNS",
                                 rttMs = 1,
-                                role = role
+                                role = role.ifBlank { "video" },
+                                tallyPort = tport
                             )
                             synchronized(peersLock) {
-                                mdnsPeers["${peer.ip}:${peer.port}"] = peer
+                                mdnsPeers["${peer.ip}:${peer.port}:${peer.role.lowercase()}"] = peer
                             }
                             publishMerged()
                         }
@@ -270,19 +293,49 @@ class LanPeerDiscovery(context: Context) {
     private fun roleRank(role: String): Int = when (role.lowercase()) {
         "video" -> 0
         "" -> 1
-        else -> 2
+        "intercom" -> 2
+        else -> 3
     }
 
     private fun publishMerged() {
-        val merged = synchronized(peersLock) {
+        val (merged, videos, intercoms) = synchronized(peersLock) {
             val map = LinkedHashMap<String, LanPeer>()
             for ((k, v) in mdnsPeers) map[k] = v
             for ((k, v) in udpPeers) map[k] = v
-            map.values.sortedWith(compareBy<LanPeer>({ roleRank(it.role) }, { it.rttMs }, { it.name }))
+            val all = map.values.sortedWith(compareBy<LanPeer>({ roleRank(it.role) }, { it.rttMs }, { it.name }))
+
+            // Video receivers: strictly exclude audio, intercom, camera, duo — deduplicated by ip:port
+            val vidMap = LinkedHashMap<String, LanPeer>()
+            for (p in all) {
+                if (p.isVideoReceiver) {
+                    vidMap.putIfAbsent("${p.ip}:${p.port}", p)
+                }
+            }
+
+            // Intercom receivers: dedicated LanVid Intercom desks FIRST, then video studios' tallyPort
+            val icMap = LinkedHashMap<String, LanPeer>()
+            for (p in all) {
+                if (p.isIntercomPeer) {
+                    icMap["${p.ip}:${p.port}"] = p
+                }
+            }
+            for (p in vidMap.values) {
+                val tp = if (p.tallyPort > 0) p.tallyPort else 5022
+                icMap.putIfAbsent(
+                    "${p.ip}:$tp",
+                    p.copy(port = tp, role = "studio")
+                )
+            }
+
+            Triple(all, vidMap.values.toList(), icMap.values.toList())
         }
         main.post {
             peers.clear()
             peers.addAll(merged)
+            videoPeers.clear()
+            videoPeers.addAll(videos)
+            intercomPeers.clear()
+            intercomPeers.addAll(intercoms)
         }
     }
 }

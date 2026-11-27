@@ -96,6 +96,18 @@ LV_API int lv_sender_set_adaptive_quality(LvSenderHandle* handle, int enabled, i
 LV_API int lv_sender_set_codec(LvSenderHandle* handle, int codec);
 LV_API int lv_sender_set_fps(LvSenderHandle* handle, double fps);
 
+/* Zero-re-encode Multi-Target UDP Fan-Out (send the same encoded video+audio to 1..8 apps simultaneously). */
+typedef struct LV_Endpoint {
+    char ip[64];
+    uint16_t port;
+    uint16_t reserved;
+} LV_Endpoint;
+
+LV_API int lv_sender_add_destination(LvSenderHandle* handle, const char* ip, uint16_t port);
+LV_API int lv_sender_remove_destination(LvSenderHandle* handle, const char* ip, uint16_t port);
+LV_API int lv_sender_clear_extra_destinations(LvSenderHandle* handle);
+LV_API int lv_sender_list_destinations(LvSenderHandle* handle, LV_Endpoint* out_list, int max_count);
+
 LV_API int lv_sender_get_stream_stats(LvSenderHandle* handle, LV_StreamStats* out);
 
 /* ---- Receiver Lifecycle, Zero-Copy Callbacks & Stereo Audio Pull ---- */
@@ -201,8 +213,13 @@ LV_API void lv_tally_intercom_set_video_config_sync_callback(LvTallyIntercomHand
 LV_API int lv_tally_intercom_request_keyframe(LvTallyIntercomHandle* handle, uint32_t camera_id);
 
 /* Duplex Intercom voice I/O (48 kHz mono float32, Director <-> Camera Operator). */
+#define LV_HAVE_PER_CAMERA_INTERCOM_RX 1
 LV_API int lv_intercom_push_mic_pcm(LvTallyIntercomHandle* handle, const float* samples, int frames);
 LV_API int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames);
+LV_API int lv_intercom_pull_camera_rx_pcm(LvTallyIntercomHandle* studio, uint32_t camera_id,
+                                          float* out_samples, int frames);
+LV_API int lv_intercom_pull_sidetone_pcm(LvTallyIntercomHandle* handle, float* out_samples,
+                                         int frames);
 LV_API void lv_intercom_set_state(LvTallyIntercomHandle* handle, int talk_active, int listen_muted,
                                   float rx_gain, float sidetone_gain);
 LV_API int lv_studio_set_camera_intercom(uint32_t camera_id, int talk_to_cam, int listen_from_cam, int all_call);
@@ -371,6 +388,12 @@ LV_API int lv_multicam_set_slot_audio_config(LvMultiCamHandle* mc, uint32_t slot
 LV_API int lv_multicam_set_slot_concealment(LvMultiCamHandle* mc, uint32_t slot, int conceal_mode);
 LV_API int lv_multicam_set_slot_assigned_camera(LvMultiCamHandle* mc, uint32_t slot, uint8_t cam_number,
                                                 const char* tag, const uint8_t rgba[4]);
+
+/* Actual bound Multi-Cam base port & per-slot zero-transcode raw UDP relay to other local/LAN apps. */
+LV_API uint16_t lv_multicam_bound_port(LvMultiCamHandle* mc);
+LV_API int lv_multicam_add_slot_relay(LvMultiCamHandle* mc, uint32_t slot, const char* ip, uint16_t port);
+LV_API int lv_multicam_remove_slot_relay(LvMultiCamHandle* mc, uint32_t slot, const char* ip, uint16_t port);
+LV_API int lv_multicam_clear_slot_relays(LvMultiCamHandle* mc, uint32_t slot);
 
 /* ---- LAN Video Auto-Discovery ---- */
 /* Scans the LAN for active video receivers (discovery_port=0 -> default 5099). */

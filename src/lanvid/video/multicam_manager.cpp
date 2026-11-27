@@ -36,6 +36,7 @@ struct MultiCamManager::Slot {
     uint64_t last_pkt_us = 0;          // last datagram from the bound sender (demux thread)
     std::string pinned_ip;
     uint16_t listen_port = 0;
+    std::vector<Endpoint> relay_dsts;  // raw UDP fan-out targets (zero-transcode mirror to other apps)
 
     // identity / telemetry (info_mu)
     mutable std::mutex info_mu;
@@ -326,6 +327,11 @@ void MultiCamManager::demux_loop() {
                 const int si = slot_for_sender(batch[k].src.ipv4_be, batch[k].src.port, true);
                 if (si < 0 || !ensure_receiver(uint32_t(si))) continue;
                 slots_[si]->last_pkt_us = now;
+                if (!slots_[si]->relay_dsts.empty()) {
+                    for (const auto& rdst : slots_[si]->relay_dsts) {
+                        (void)demux_sock_->send_to(batch[k].data, batch[k].len, rdst);
+                    }
+                }
                 slots_[si]->rx->ingest_datagram(batch[k].data, batch[k].len, batch[k].src, now);
             }
             for (auto& s : slots_)
@@ -1115,6 +1121,48 @@ MultiCamManager::SlotRxTelemetry MultiCamManager::slot_rx_telemetry(uint32_t slo
     out.decoder_is_hw = s->rx->decoder_is_hardware();
     out.decoder_backend = s->rx->decoder_backend_name();
     return out;
+}
+
+bool MultiCamManager::add_slot_relay(uint32_t slot, const std::string& ip, uint16_t port) {
+    Slot* s = slot_ptr(slot);
+    if (!s || ip.empty() || port == 0) return false;
+    Endpoint ep{};
+    if (!Endpoint::parse(ip, port, ep) || !ep.valid()) return false;
+    // Prevent self-loop back into our own demux listen port on loopback
+    if ((ip == "127.0.0.1" || ip == "0.0.0.0") && port == bound_base_port_) return false;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    for (const auto& cur : s->relay_dsts) {
+        if (cur == ep) return true;
+    }
+    if (s->relay_dsts.size() >= 8) return false;
+    s->relay_dsts.push_back(ep);
+    if (s->bound && s->rx) s->rx->request_keyframe();
+    return true;
+}
+
+bool MultiCamManager::remove_slot_relay(uint32_t slot, const std::string& ip, uint16_t port) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return false;
+    Endpoint ep{};
+    if (!Endpoint::parse(ip, port, ep)) return false;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    const auto old_sz = s->relay_dsts.size();
+    s->relay_dsts.erase(std::remove(s->relay_dsts.begin(), s->relay_dsts.end(), ep), s->relay_dsts.end());
+    return s->relay_dsts.size() != old_sz;
+}
+
+void MultiCamManager::clear_slot_relays(uint32_t slot) {
+    Slot* s = slot_ptr(slot);
+    if (!s) return;
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    s->relay_dsts.clear();
+}
+
+std::vector<Endpoint> MultiCamManager::slot_relays(uint32_t slot) const {
+    const Slot* s = slot_ptr(slot);
+    if (!s) return {};
+    std::lock_guard<std::mutex> lk(slots_mu_);
+    return s->relay_dsts;
 }
 
 }  // namespace lv

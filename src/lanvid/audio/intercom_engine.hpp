@@ -109,6 +109,13 @@ public:
     // Pulls 48 kHz mono float32 received intercom voice (Operator IFB or Director headphones).
     int pull_rx_pcm(float* out_samples, int frames);
 
+    // Studio side: pulls raw 48 kHz mono float32 voice from a specific connected camera's RX FIFO
+    // (before mixing), enabling independent per-camera DSP such as spectral noise suppression.
+    int pull_camera_rx_pcm(uint32_t camera_id, float* out_samples, int frames);
+
+    // Pulls pending local sidetone samples (48 kHz mono float32) separately when doing external mixing.
+    int pull_sidetone_pcm(float* out_samples, int frames);
+
     // Local talkback state (PTT/Latch, listen mute, RX volume, sidetone gain).
     void set_intercom_state(bool talk_active, bool listen_muted, float rx_gain, float sidetone_gain);
 

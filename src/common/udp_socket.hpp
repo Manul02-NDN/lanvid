@@ -59,6 +59,11 @@ public:
     bool is_open() const;
 
     bool bind(const std::string& ip, uint16_t port);
+    // Joins an IPv4 multicast group (224.0.0.0/4) with SO_REUSEADDR + SO_REUSEPORT so multiple local
+    // and LAN applications can simultaneously receive the same camera/studio stream.
+    bool bind_multicast(const std::string& group_ip, uint16_t port, const std::string& iface_ip = "0.0.0.0");
+    bool set_multicast_loop_and_ttl(bool loop = true, int ttl = 2);
+    static bool is_multicast_ip(const std::string& ip);
     // Binds to a specific local NIC IPv4 address (empty / "0.0.0.0" = OS default route) and sets
     // IP_MULTICAST_IF / IP_UNICAST_IF (Windows) / IP_BOUND_IF (Apple) / SO_BINDTODEVICE (Linux/Android)
     // so traffic strictly exits the selected physical Ethernet / Wi-Fi interface.

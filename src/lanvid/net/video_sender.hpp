@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "codec/frame_codec.hpp"
 #include "codec/video_encoder.hpp"
@@ -92,6 +93,14 @@ public:
 
     // Physical NIC selection & Dual-NIC 1+1 failover.
     bool set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip);
+
+    // Zero-re-encode Multi-Target UDP Fan-Out (up to 8 simultaneous receivers: e.g. OBS + LanVid Monitor + PC #2).
+    // Adding a destination immediately forces an IDR keyframe so the new receiver locks on instantaneously.
+    static constexpr size_t kMaxFanoutDestinations = 8;
+    bool add_destination(const std::string& ip, uint16_t port);
+    bool remove_destination(const std::string& ip, uint16_t port);
+    void clear_extra_destinations();
+    std::vector<Endpoint> destinations() const;
     bool dual_nic_active() const { return dual_nic_active_.load(std::memory_order_acquire); }
     uint64_t failover_packets() const { return failover_pkts_.load(std::memory_order_relaxed); }
     uint64_t secondary_packets_sent() const { return sec_pkts_sent_.load(std::memory_order_relaxed); }
@@ -146,6 +155,9 @@ private:
     SenderConfig cfg_;
     std::mutex ctl_mu_;
     Endpoint dst_{};
+    mutable std::mutex dsts_mu_;
+    std::vector<Endpoint> extra_dsts_;
+    std::atomic<uint32_t> extra_dst_count_{0};
     UdpSocket sock_;
     UdpSocket sock_secondary_;
     mutable std::mutex nic_mu_;

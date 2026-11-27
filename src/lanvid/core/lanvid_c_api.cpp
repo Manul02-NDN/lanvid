@@ -120,6 +120,7 @@ struct LvSenderHandle {
     std::atomic<uint32_t> ext_audio_seq{0};
     std::string primary_nic_ip;
     std::string secondary_nic_ip;
+    std::vector<std::pair<std::string, uint16_t>> extra_dsts;
 
     std::mutex push_mu;
     lv::Image ext_img;
@@ -637,6 +638,9 @@ int lv_sdk_sender_start(LvSenderHandle* handle, const LV_SenderConfig* cfg) {
     if (!s->init()) {
         handle->state.store(LV_STATE_ERROR, std::memory_order_release);
         return LV_ERR_SOCKET;
+    }
+    for (const auto& [eip, eport] : handle->extra_dsts) {
+        s->add_destination(eip, eport);
     }
     {
         std::unique_lock<std::shared_mutex> lk_life(handle->life_mu);
@@ -1384,6 +1388,17 @@ int lv_intercom_pull_rx_pcm(LvTallyIntercomHandle* handle, float* out_samples, i
     return handle->eng->pull_rx_pcm(out_samples, frames);
 }
 
+int lv_intercom_pull_camera_rx_pcm(LvTallyIntercomHandle* studio, uint32_t camera_id,
+                                   float* out_samples, int frames) {
+    if (!studio || !studio->eng || !out_samples || frames <= 0 || camera_id == 0) return 0;
+    return studio->eng->pull_camera_rx_pcm(camera_id, out_samples, frames);
+}
+
+int lv_intercom_pull_sidetone_pcm(LvTallyIntercomHandle* handle, float* out_samples, int frames) {
+    if (!handle || !handle->eng || !out_samples || frames <= 0) return 0;
+    return handle->eng->pull_sidetone_pcm(out_samples, frames);
+}
+
 void lv_intercom_set_state(LvTallyIntercomHandle* handle, int talk_active, int listen_muted,
                            float rx_gain, float sidetone_gain) {
     if (handle && handle->eng) {
@@ -1768,6 +1783,107 @@ int lv_receiver_request_keyframe(LvReceiverHandle* handle) {
     LV_LIVE_LOCK(handle);
     if (!handle->receiver) return LV_ERR_NOT_RUNNING;
     handle->receiver->request_keyframe();
+    return LV_OK;
+}
+
+int lv_sender_add_destination(LvSenderHandle* handle, const char* ip, uint16_t port) {
+    if (!handle || !ip || !*ip || port == 0) return LV_ERR_INVALID_ARG;
+    const std::string sip(ip);
+    {
+        std::lock_guard<std::mutex> lk(handle->api_mu);
+        bool exists = false;
+        for (const auto& [eip, eport] : handle->extra_dsts) {
+            if (eip == sip && eport == port) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            if (handle->extra_dsts.size() + 1 >= lv::UdpSender::kMaxFanoutDestinations) {
+                return LV_ERR_INVALID_ARG;
+            }
+            handle->extra_dsts.emplace_back(sip, port);
+        }
+    }
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        return handle->sender->add_destination(sip, port) ? LV_OK : LV_ERR_INVALID_ARG;
+    }
+    return LV_OK;
+}
+
+int lv_sender_remove_destination(LvSenderHandle* handle, const char* ip, uint16_t port) {
+    if (!handle || !ip || !*ip || port == 0) return LV_ERR_INVALID_ARG;
+    const std::string sip(ip);
+    {
+        std::lock_guard<std::mutex> lk(handle->api_mu);
+        handle->extra_dsts.erase(
+            std::remove_if(handle->extra_dsts.begin(), handle->extra_dsts.end(),
+                           [&](const auto& p) { return p.first == sip && p.second == port; }),
+            handle->extra_dsts.end());
+    }
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        handle->sender->remove_destination(sip, port);
+    }
+    return LV_OK;
+}
+
+int lv_sender_clear_extra_destinations(LvSenderHandle* handle) {
+    if (!handle) return LV_ERR_INVALID_ARG;
+    {
+        std::lock_guard<std::mutex> lk(handle->api_mu);
+        handle->extra_dsts.clear();
+    }
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        handle->sender->clear_extra_destinations();
+    }
+    return LV_OK;
+}
+
+int lv_sender_list_destinations(LvSenderHandle* handle, LV_Endpoint* out_list, int max_count) {
+    if (!handle || !out_list || max_count <= 0) return 0;
+    LV_LIVE_LOCK(handle);
+    if (handle->sender) {
+        const auto dsts = handle->sender->destinations();
+        const int n = std::min(int(dsts.size()), max_count);
+        for (int i = 0; i < n; ++i) {
+            std::memset(&out_list[i], 0, sizeof(LV_Endpoint));
+            const std::string s = dsts[size_t(i)].to_string();
+            const auto colon = s.rfind(':');
+            lv_copy_str(out_list[i].ip, colon == std::string::npos ? s : s.substr(0, colon));
+            out_list[i].port = dsts[size_t(i)].port;
+        }
+        return n;
+    }
+    std::lock_guard<std::mutex> lk(handle->api_mu);
+    const int n = std::min(int(handle->extra_dsts.size()), max_count);
+    for (int i = 0; i < n; ++i) {
+        std::memset(&out_list[i], 0, sizeof(LV_Endpoint));
+        lv_copy_str(out_list[i].ip, handle->extra_dsts[size_t(i)].first);
+        out_list[i].port = handle->extra_dsts[size_t(i)].second;
+    }
+    return n;
+}
+
+uint16_t lv_multicam_bound_port(LvMultiCamHandle* mc) {
+    return mc ? mc->mgr.base_port() : 0;
+}
+
+int lv_multicam_add_slot_relay(LvMultiCamHandle* mc, uint32_t slot, const char* ip, uint16_t port) {
+    if (!mc || !ip || !*ip || port == 0 || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    return mc->mgr.add_slot_relay(slot, ip, port) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+int lv_multicam_remove_slot_relay(LvMultiCamHandle* mc, uint32_t slot, const char* ip, uint16_t port) {
+    if (!mc || !ip || !*ip || port == 0 || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    return mc->mgr.remove_slot_relay(slot, ip, port) ? LV_OK : LV_ERR_INVALID_ARG;
+}
+
+int lv_multicam_clear_slot_relays(LvMultiCamHandle* mc, uint32_t slot) {
+    if (!mc || slot >= mc->mgr.slot_count()) return LV_ERR_INVALID_ARG;
+    mc->mgr.clear_slot_relays(slot);
     return LV_OK;
 }
 

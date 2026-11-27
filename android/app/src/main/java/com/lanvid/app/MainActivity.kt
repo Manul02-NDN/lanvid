@@ -73,6 +73,8 @@ class MainActivity : ComponentActivity() {
         micStreamer.stop()
         LanVidNative.nativeStopSender()
         LanVidNative.nativeStopReceiver()
+        LanVidNative.nativeTallyDisconnect()
+        LanVidNative.nativeIntercomDisconnect()
         LanVidNative.nativeSetReceiverSurface(null)
         super.onDestroy()
     }

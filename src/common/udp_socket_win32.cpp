@@ -80,8 +80,54 @@ void UdpSocket::close() {
     cached_tos_.store(-1, std::memory_order_relaxed);
 }
 
+bool UdpSocket::is_multicast_ip(const std::string& ip) {
+    ensure_wsa();
+    in_addr addr{};
+    if (ip.empty() || inet_pton(AF_INET, ip.c_str(), &addr) != 1) return false;
+    const uint32_t host_ip = ntohl(addr.s_addr);
+    return (host_ip & 0xF0000000u) == 0xE0000000u;
+}
+
+bool UdpSocket::bind_multicast(const std::string& group_ip, uint16_t port, const std::string& iface_ip) {
+    if (!is_open() || !is_multicast_ip(group_ip)) return false;
+    BOOL reuse = TRUE;
+    ::setsockopt(SOCKET(fd_), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = INADDR_ANY;
+    sa.sin_port = htons(port);
+    if (::bind(SOCKET(fd_), reinterpret_cast<const sockaddr*>(&sa), sizeof(sa)) != 0) return false;
+
+    ip_mreq mreq{};
+    if (inet_pton(AF_INET, group_ip.c_str(), &mreq.imr_multiaddr) != 1) return false;
+    if (!iface_ip.empty() && iface_ip != "0.0.0.0" && iface_ip != "auto") {
+        if (inet_pton(AF_INET, iface_ip.c_str(), &mreq.imr_interface) != 1) {
+            mreq.imr_interface.s_addr = INADDR_ANY;
+        }
+    } else {
+        mreq.imr_interface.s_addr = INADDR_ANY;
+    }
+    return ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                        reinterpret_cast<const char*>(&mreq), sizeof(mreq)) == 0;
+}
+
+bool UdpSocket::set_multicast_loop_and_ttl(bool loop, int ttl) {
+    if (!is_open()) return false;
+    DWORD loop_val = loop ? 1 : 0;
+    DWORD ttl_val = DWORD(ttl < 1 ? 1 : (ttl > 255 ? 255 : ttl));
+    const bool ok1 = ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_MULTICAST_LOOP,
+                                  reinterpret_cast<const char*>(&loop_val), sizeof(loop_val)) == 0;
+    const bool ok2 = ::setsockopt(SOCKET(fd_), IPPROTO_IP, IP_MULTICAST_TTL,
+                                  reinterpret_cast<const char*>(&ttl_val), sizeof(ttl_val)) == 0;
+    return ok1 && ok2;
+}
+
 bool UdpSocket::bind(const std::string& ip, uint16_t port) {
     if (!is_open()) return false;
+    if (is_multicast_ip(ip)) {
+        return bind_multicast(ip, port);
+    }
     Endpoint ep;
     if (!Endpoint::parse(ip, port, ep)) return false;
 

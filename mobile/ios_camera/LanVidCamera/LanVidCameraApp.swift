@@ -16,6 +16,9 @@ struct LanVidCameraApp: App {
                         engine.startLocalPreviewIfAuthorized()
                     }
                 }
+                .onOpenURL { url in
+                    engine.handlePairingURL(url)
+                }
         }
     }
 }

@@ -699,6 +699,37 @@ int TallyIntercomEngine::pull_rx_pcm(float* out_samples, int frames) {
     return n;
 }
 
+int TallyIntercomEngine::pull_camera_rx_pcm(uint32_t camera_id, float* out_samples, int frames) {
+    if (!out_samples || frames <= 0 || camera_id == 0) return 0;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    std::fill(out_samples, out_samples + frames, 0.0f);
+    if (!studio_mode_.load(std::memory_order_relaxed)) return 0;
+    for (auto& c : impl_->cams) {
+        if (!c.used || c.camera_id != camera_id) continue;
+        if (!c.listen_from_cam || c.rx_fifo.empty()) return 0;
+        const int take = std::min<int>(frames, int(c.rx_fifo.size()));
+        for (int i = 0; i < take; ++i) {
+            out_samples[i] = c.rx_fifo.front();
+            c.rx_fifo.pop_front();
+        }
+        return take;
+    }
+    return 0;
+}
+
+int TallyIntercomEngine::pull_sidetone_pcm(float* out_samples, int frames) {
+    if (!out_samples || frames <= 0) return 0;
+    std::lock_guard<std::mutex> lk(impl_->mu);
+    std::fill(out_samples, out_samples + frames, 0.0f);
+    if (impl_->sidetone_fifo.empty()) return 0;
+    const int take = std::min<int>(frames, int(impl_->sidetone_fifo.size()));
+    for (int i = 0; i < take; ++i) {
+        out_samples[i] = impl_->sidetone_fifo.front();
+        impl_->sidetone_fifo.pop_front();
+    }
+    return take;
+}
+
 bool TallyIntercomEngine::is_director_speaking() const {
     std::lock_guard<std::mutex> lk(impl_->mu);
     return impl_->last_director_voice_us != 0 && (now_us() - impl_->last_director_voice_us) < 350'000ull;

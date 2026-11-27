@@ -55,6 +55,9 @@ bool UdpSender::init() {
                            UdpSocket::kMinSocketBuffer);
     sock_.set_qos_class(QosTrafficClass::kVideo);
     sock_.set_nonblocking(true);
+    if (UdpSocket::is_multicast_ip(cfg_.dest_ip)) {
+        sock_.set_multicast_loop_and_ttl(true, 2);
+    }
 
     if (!secondary_nic_ip_.empty() && secondary_nic_ip_ != "0.0.0.0") {
         set_network_interfaces(primary_nic_ip_, secondary_nic_ip_);
@@ -63,6 +66,55 @@ bool UdpSender::init() {
     last_pace_us_ = now_us();
     tokens_bytes_ = 64.0 * 1024.0;
     return true;
+}
+
+bool UdpSender::add_destination(const std::string& ip, uint16_t port) {
+    if (ip.empty() || port == 0) return false;
+    Endpoint ep{};
+    if (!Endpoint::parse(ip, port, ep) || !ep.valid()) return false;
+    if (ep == dst_) {
+        force_idr_.store(true, std::memory_order_release);
+        return true;
+    }
+    std::lock_guard<std::mutex> lk(dsts_mu_);
+    for (const auto& cur : extra_dsts_) {
+        if (cur == ep) {
+            force_idr_.store(true, std::memory_order_release);
+            return true;
+        }
+    }
+    if (extra_dsts_.size() + 1 >= kMaxFanoutDestinations) return false;
+    if (UdpSocket::is_multicast_ip(ip) && sock_.is_open()) {
+        sock_.set_multicast_loop_and_ttl(true, 2);
+    }
+    extra_dsts_.push_back(ep);
+    extra_dst_count_.store(uint32_t(extra_dsts_.size()), std::memory_order_release);
+    force_idr_.store(true, std::memory_order_release);
+    return true;
+}
+
+bool UdpSender::remove_destination(const std::string& ip, uint16_t port) {
+    Endpoint ep{};
+    if (!Endpoint::parse(ip, port, ep)) return false;
+    std::lock_guard<std::mutex> lk(dsts_mu_);
+    const auto old_sz = extra_dsts_.size();
+    extra_dsts_.erase(std::remove(extra_dsts_.begin(), extra_dsts_.end(), ep), extra_dsts_.end());
+    extra_dst_count_.store(uint32_t(extra_dsts_.size()), std::memory_order_release);
+    return extra_dsts_.size() != old_sz;
+}
+
+void UdpSender::clear_extra_destinations() {
+    std::lock_guard<std::mutex> lk(dsts_mu_);
+    extra_dsts_.clear();
+    extra_dst_count_.store(0, std::memory_order_release);
+}
+
+std::vector<Endpoint> UdpSender::destinations() const {
+    std::vector<Endpoint> out;
+    if (dst_.valid()) out.push_back(dst_);
+    std::lock_guard<std::mutex> lk(dsts_mu_);
+    out.insert(out.end(), extra_dsts_.begin(), extra_dsts_.end());
+    return out;
 }
 
 bool UdpSender::set_network_interfaces(const std::string& primary_ip, const std::string& secondary_ip) {
@@ -163,6 +215,19 @@ void UdpSender::send_encoded_slice(uint32_t frame_id, uint32_t capture_ts_us, in
                         for (int i = 0; i < s2; ++i) b2 += views[i].len;
                         sec_bytes_sent_.fetch_add(b2, std::memory_order_relaxed);
                         if (sent <= 0) sent = s2;
+                    }
+                }
+            }
+            // Zero-re-encode fan-out to additional video destinations
+            if (extra_dst_count_.load(std::memory_order_acquire) > 0) {
+                std::vector<Endpoint> extras;
+                {
+                    std::lock_guard<std::mutex> dlk(dsts_mu_);
+                    extras = extra_dsts_;
+                }
+                for (const auto& edst : extras) {
+                    if (!primary_link_down_.load(std::memory_order_acquire)) {
+                        (void)sock_.send_batch_qos(views, count, edst, QosTrafficClass::kVideo);
                     }
                 }
             }
@@ -451,6 +516,18 @@ int UdpSender::send_with_failover(const uint8_t* dgram, size_t len, QosTrafficCl
                     failover_pkts_.fetch_add(1, std::memory_order_relaxed);
                     sent = s2;
                 }
+            }
+        }
+    }
+    if (extra_dst_count_.load(std::memory_order_acquire) > 0) {
+        std::vector<Endpoint> extras;
+        {
+            std::lock_guard<std::mutex> dlk(dsts_mu_);
+            extras = extra_dsts_;
+        }
+        for (const auto& edst : extras) {
+            if (!primary_link_down_.load(std::memory_order_acquire)) {
+                (void)sock_.send_to_qos(dgram, len, edst, qos);
             }
         }
     }

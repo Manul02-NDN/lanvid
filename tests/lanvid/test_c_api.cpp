@@ -616,3 +616,89 @@ TEST(tally_and_duplex_intercom_e2e_udp) {
     camera.stop();
     studio.stop();
 }
+
+TEST(sender_multitarget_fanout_and_multicam_relay) {
+    // 1. Single UdpSender encodes ONCE and fans out simultaneously to 2 independent receivers (e.g. OBS + Monitor)
+    std::atomic<int> rx1_frames{0}, rx2_frames{0};
+    lanvid::Receiver rx1, rx2;
+    rx1.on_video([&](const LV_VideoFrameView& f) {
+        if (f.width == 320 && f.height == 180) rx1_frames.fetch_add(1, std::memory_order_relaxed);
+    });
+    rx2.on_video([&](const LV_VideoFrameView& f) {
+        if (f.width == 320 && f.height == 180) rx2_frames.fetch_add(1, std::memory_order_relaxed);
+    });
+    auto rcfg1 = lanvid::Receiver::default_config(0, LV_PIXEL_FORMAT_BGRA8888);
+    std::snprintf(rcfg1.bind_ip, sizeof(rcfg1.bind_ip), "127.0.0.1");
+    rcfg1.enable_discovery = 0;
+    auto rcfg2 = rcfg1;
+    REQUIRE(rx1.start(rcfg1).is_ok());
+    REQUIRE(rx2.start(rcfg2).is_ok());
+
+    LvSenderHandle* tx = lv_sender_create();
+    REQUIRE(tx != nullptr);
+    LV_SenderConfig scfg{};
+    lv_sdk_sender_config_default(&scfg);
+    std::snprintf(scfg.dest_ip, sizeof(scfg.dest_ip), "127.0.0.1");
+    scfg.dest_port = rx1.local_port();
+    scfg.width = 320;
+    scfg.height = 180;
+    scfg.quality = 75;
+    REQUIRE(lv_sdk_sender_start(tx, &scfg) == LV_OK);
+    REQUIRE(lv_sender_add_destination(tx, "127.0.0.1", rx2.local_port()) == LV_OK);
+
+    LV_Endpoint listed[8]{};
+    CHECK(lv_sender_list_destinations(tx, listed, 8) == 2);
+
+    std::vector<uint8_t> bgra(320u * 180u * 4u, 0x80u);
+    for (int i = 0; i < 6; ++i) {
+        bgra[0] = uint8_t(i * 30);
+        CHECK(lv_sender_push_packed_frame(tx, bgra.data(), 320, 180, 320 * 4, LV_PIXEL_FORMAT_BGRA8888,
+                                          uint32_t(i * 16667 + 1)) == LV_OK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+    for (int w = 0; w < 30 && (rx1_frames.load() < 3 || rx2_frames.load() < 3); ++w) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(rx1_frames.load() >= 3);
+    CHECK(rx2_frames.load() >= 3);
+
+    // 2. MultiCam Hub raw UDP slot relay -> second receiver
+    LvMultiCamHandle* mc = lv_multicam_create();
+    REQUIRE(mc != nullptr);
+    LV_MultiCamConfig mcfg{};
+    lv_multicam_config_default(&mcfg);
+    std::snprintf(mcfg.bind_ip, sizeof(mcfg.bind_ip), "127.0.0.1");
+    mcfg.base_port = 0;
+    mcfg.max_slots = 2;
+    mcfg.publish_video_bus = 0;
+    REQUIRE(lv_multicam_start(mc, &mcfg) == LV_OK);
+    const uint16_t mc_port = lv_multicam_bound_port(mc);
+    CHECK(mc_port != 0);
+
+    std::atomic<int> relay_rx_frames{0};
+    lanvid::Receiver rx_relay;
+    rx_relay.on_video([&](const LV_VideoFrameView& f) {
+        if (f.width == 320 && f.height == 180) relay_rx_frames.fetch_add(1, std::memory_order_relaxed);
+    });
+    REQUIRE(rx_relay.start(rcfg1).is_ok());
+    REQUIRE(lv_multicam_add_slot_relay(mc, 0, "127.0.0.1", rx_relay.local_port()) == LV_OK);
+    REQUIRE(lv_sender_add_destination(tx, "127.0.0.1", mc_port) == LV_OK);
+
+    for (int i = 6; i < 14; ++i) {
+        CHECK(lv_sender_push_packed_frame(tx, bgra.data(), 320, 180, 320 * 4, LV_PIXEL_FORMAT_BGRA8888,
+                                          uint32_t(i * 16667 + 1)) == LV_OK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+    for (int w = 0; w < 30 && relay_rx_frames.load() < 3; ++w) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(relay_rx_frames.load() >= 3);
+
+    lv_multicam_stop(mc);
+    lv_multicam_destroy(mc);
+    lv_sender_stop(tx);
+    lv_sender_destroy(tx);
+    rx_relay.stop();
+    rx2.stop();
+    rx1.stop();
+}

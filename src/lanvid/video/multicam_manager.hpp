@@ -182,6 +182,12 @@ public:
     };
     SlotRxTelemetry slot_rx_telemetry(uint32_t slot) const;
 
+    // ---- Per-slot raw UDP relay (fan-out received camera datagrams to other local/LAN apps with zero transcode) ----
+    bool add_slot_relay(uint32_t slot, const std::string& ip, uint16_t port);
+    bool remove_slot_relay(uint32_t slot, const std::string& ip, uint16_t port);
+    void clear_slot_relays(uint32_t slot);
+    std::vector<Endpoint> slot_relays(uint32_t slot) const;
+
     // Feeds one datagram as if it arrived on the base port from `src_ip:src_port` (tests / relays).
     void inject_datagram(const uint8_t* data, size_t len, uint32_t src_ip_be, uint16_t src_port);
 

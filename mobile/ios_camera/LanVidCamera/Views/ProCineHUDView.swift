@@ -1101,13 +1101,16 @@ struct ProCineHUDView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(s.text)
                             .lineLimit(1)
+                        if engine.isIntercomSplitFromTally {
+                            StudioBadge(text: tr("Окремо", "Split"), tone: .green)
+                        }
                         if engine.directorSpeaking {
                             StudioBadge(text: tr("Режисер", "Director"), tone: .accent)
                         }
                     }
                     Text(engine.isIntercomActive
-                         ? "\(engine.destIp):\(engine.tallyPort) · \(engine.isStreaming ? tr("з відеопотоком", "with video") : tr("лише інтерком", "intercom only"))"
-                         : tr("Вимкнено · можна увімкнути без стріму відео", "Off · can run without video stream"))
+                         ? "\(engine.effectiveIntercomIp):\(engine.effectiveIntercomPort) · \(engine.isStreaming ? tr("з відеопотоком", "with video") : tr("лише інтерком", "intercom only"))"
+                         : "\(engine.effectiveIntercomIp):\(engine.effectiveIntercomPort) · \(tr("вимкнено", "off"))")
                         .font(.system(size: 10.5, design: engine.isIntercomActive ? .monospaced : .default))
                         .foregroundColor(s.text3)
                         .lineLimit(1)
@@ -1358,7 +1361,7 @@ struct ProCineHUDView: View {
                     Text(tr("У мережі", "On Network"))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(s.text)
-                    Text("\(engine.browser.studios.count) \(tr("студій", "studios")) · \(engine.browser.duoPeers.count) iPhone Duo")
+                    Text("\(engine.browser.studios.count) \(tr("відео", "video")) · \(engine.browser.intercomDesks.count) \(tr("інтерком", "intercom")) · \(engine.browser.duoPeers.count) Duo")
                         .font(.system(size: 11))
                         .foregroundColor(s.text3)
                 }
@@ -1379,14 +1382,24 @@ struct ProCineHUDView: View {
                 .buttonStyle(.plain)
             }
 
-            // Discovered studios list (exact .list row style from ref1!)
+            // Section A: Video Receivers (Primary + simultaneous multi-target fan-out)
+            HStack {
+                Text(tr("Приймачі відео (1..8 одночасно)", "Video Receivers (1..8 simultaneous)"))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(s.text2)
+                Spacer()
+                if engine.activeVideoReceiverCount > 1 {
+                    StudioBadge(text: "\(engine.activeVideoReceiverCount) \(tr("акт.", "active"))", tone: .green)
+                }
+            }
+
             VStack(spacing: 0) {
                 if engine.browser.studios.isEmpty {
                     HStack(spacing: 10) {
                         Image(systemName: "wifi")
                             .foregroundColor(s.text3)
-                        Text(tr("Пошук LanVid Video / Studio у локальній Wi-Fi мережі…",
-                                "Searching for LanVid Video / Studio on local Wi-Fi…"))
+                        Text(tr("Пошук OBS / LanVid Video у локальній Wi-Fi мережі…",
+                                "Searching for OBS / LanVid Video on local Wi-Fi…"))
                             .font(.system(size: 12))
                             .foregroundColor(s.text3)
                         Spacer()
@@ -1396,44 +1409,156 @@ struct ProCineHUDView: View {
                     ForEach(Array(engine.browser.studios.enumerated()), id: \.element.id) { idx, st in
                         if idx > 0 { Divider().overlay(s.border) }
                         let selected = (engine.destIp == st.host && engine.videoPort == Int(st.videoPort))
-                        Button {
-                            engine.selectStudio(st)
-                        } label: {
-                            HStack(spacing: 10) {
-                                ZStack {
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(selected ? s.accentSoft : s.surface2)
-                                        .frame(width: 32, height: 32)
-                                    Image(systemName: "desktopcomputer")
-                                        .font(.system(size: 14))
-                                        .foregroundColor(selected ? s.accent : s.text2)
-                                }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 6) {
-                                        Text(st.name)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .foregroundColor(s.text)
-                                            .lineLimit(1)
-                                        StudioBadge(text: tr("Студія", "Studio"), tone: selected ? .accent : .neutral)
+                        let isExtra = engine.isExtraVideoDestination(st)
+                        HStack(spacing: 8) {
+                            Button {
+                                engine.selectStudio(st)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(selected ? s.accentSoft : s.surface2)
+                                            .frame(width: 32, height: 32)
+                                        Image(systemName: "desktopcomputer")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(selected ? s.accent : s.text2)
                                     }
-                                    HStack(spacing: 5) {
-                                        Circle().fill(s.green).frame(width: 6, height: 6)
-                                        Text("\(st.host):\(st.videoPort) · Tally :\(st.tallyPort)")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundColor(s.text3)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(st.name)
+                                                .font(.system(size: 13, weight: .medium))
+                                                .foregroundColor(s.text)
+                                                .lineLimit(1)
+                                            if selected {
+                                                StudioBadge(text: tr("Основний", "Primary"), tone: .accent)
+                                            }
+                                        }
+                                        HStack(spacing: 5) {
+                                            Circle().fill(s.green).frame(width: 6, height: 6)
+                                            Text("\(st.host):\(st.videoPort) · Tally :\(st.tallyPort)")
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(s.text3)
+                                        }
                                     }
-                                }
-                                Spacer()
-                                if selected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(s.accent)
+                                    Spacer(minLength: 4)
                                 }
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
+                            .buttonStyle(.plain)
+
+                            if selected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(s.accent)
+                            } else {
+                                Button {
+                                    engine.toggleExtraVideoDestination(st)
+                                } label: {
+                                    Text(isExtra ? tr("✓ +Відео", "✓ +Video") : tr("+ Відео", "+ Video"))
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundColor(isExtra ? .white : s.text)
+                                        .padding(.horizontal, 8)
+                                        .frame(height: 26)
+                                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .fill(isExtra ? s.green : s.surface2))
+                                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(isExtra ? s.green : s.borderStrong, lineWidth: 0.75))
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
                     }
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).fill(s.surface))
+            .overlay(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).stroke(s.border, lineWidth: 0.75))
+
+            // Section B: Independent Intercom Receiver (Split Voice Routing!)
+            HStack {
+                Text(tr("Приймач інтеркому (голос)", "Intercom Receiver (Voice)"))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(s.text2)
+                Spacer()
+                Text("\(engine.effectiveIntercomIp):\(engine.effectiveIntercomPort)")
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(engine.isIntercomSplitFromTally ? s.green : s.text3)
+            }
+
+            VStack(spacing: 0) {
+                // Option 0: Same as Primary Video Studio
+                let usingSame = !engine.isIntercomSplitFromTally
+                Button {
+                    engine.selectSameIntercomAsVideo()
+                } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(usingSame ? s.accentSoft : s.surface2)
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "link")
+                                .font(.system(size: 13))
+                                .foregroundColor(usingSame ? s.accent : s.text2)
+                        }
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(tr("Як у відео-студії", "Same as Video Studio"))
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(s.text)
+                            Text("\(engine.destIp):\(engine.tallyPort)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(s.text3)
+                        }
+                        Spacer()
+                        if usingSame {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(s.accent)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+
+                ForEach(engine.browser.intercomDesks) { desk in
+                    Divider().overlay(s.border)
+                    let isDeskActive = engine.isIntercomSplitFromTally &&
+                        engine.effectiveIntercomIp == desk.host &&
+                        engine.effectiveIntercomPort == Int(desk.port)
+                    Button {
+                        engine.selectIntercomDesk(desk)
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(isDeskActive ? s.greenSoft : s.surface2)
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "headphones")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(isDeskActive ? s.green : s.text2)
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack(spacing: 6) {
+                                    Text(desk.name)
+                                        .font(.system(size: 12.5, weight: .medium))
+                                        .foregroundColor(s.text)
+                                        .lineLimit(1)
+                                    if desk.isDedicated {
+                                        StudioBadge(text: tr("Інтерком", "Intercom"), tone: isDeskActive ? .green : .neutral)
+                                    }
+                                }
+                                Text("\(desk.host):\(desk.port)")
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundColor(s.text3)
+                            }
+                            Spacer()
+                            if isDeskActive {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(s.green)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .background(RoundedRectangle(cornerRadius: StudioPalette.rMd, style: .continuous).fill(s.surface))
